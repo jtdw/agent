@@ -165,6 +165,12 @@ class DownloadDeleteIn(BaseModel):
     job_id: str
 
 
+class DownloadActionIn(BaseModel):
+    user_id: str = ""
+    job_id: str
+    reason: str = ""
+
+
 class DownloadPreflightIn(BaseModel):
     user_id: str
     source_key: str = "gscloud"
@@ -1359,6 +1365,8 @@ def _maybe_start_gscloud_auto_download(job: dict, region: str = "") -> dict:
     except Exception:
         state_path = ""
     if not state_path or not Path(state_path).exists():
+        if hasattr(commercial_service, "_release_platform_reservation"):
+            commercial_service._release_platform_reservation(job_id, "release_waiting_login_platform_download")
         commercial_service._update_job(job_id, status="waiting_login", progress=5, stage="needs_gscloud_login_state")
         return {"auto_supported": True, "auto_started": False, "reason": "waiting_login"}
 
@@ -1979,6 +1987,7 @@ def list_jobs(user_id: str = ""):
                         "failure_diagnostic",
                         "login_health",
                         "region_resolution",
+                        "artifact_quality",
                     ):
                         if scene.get(key) is not None:
                             job[key] = scene.get(key)
@@ -1997,6 +2006,27 @@ def delete_download_job(body: DownloadDeleteIn):
         result = commercial_service.delete_job(body.job_id, user_id=body.user_id)
         jobs = commercial_service.list_jobs(user_id=body.user_id)
         return {**result, "jobs": jobs}
+
+    return guard(run)
+
+
+@app.post("/api/downloads/jobs/cancel")
+def cancel_download_job(body: DownloadActionIn):
+    def run():
+        result = commercial_service.cancel_job(body.job_id, user_id=body.user_id, reason=body.reason)
+        jobs = commercial_service.list_jobs(user_id=body.user_id)
+        return {**result, "jobs": jobs}
+
+    return guard(run)
+
+
+@app.post("/api/downloads/jobs/retry")
+def retry_download_job(body: DownloadActionIn):
+    def run():
+        retry = commercial_service.retry_job(body.job_id, user_id=body.user_id)
+        auto = _maybe_start_gscloud_auto_download(retry, region=str(retry.get("region") or ""))
+        jobs = commercial_service.list_jobs(user_id=body.user_id)
+        return {"job": commercial_service.get_job(retry["job_id"]), **auto, "jobs": jobs}
 
     return guard(run)
 

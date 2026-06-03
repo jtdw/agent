@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion';
-import { BarChart3, Database, Download, FileArchive, Layers3, Map, PanelRightClose, ScanSearch, Trash2 } from 'lucide-react';
+import { BarChart3, Database, Download, FileArchive, Layers3, Map, PanelRightClose, RotateCcw, ScanSearch, Trash2, XCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { GlassCard } from './GlassCard';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
@@ -250,6 +250,34 @@ export function LayerPanel({
     }
   };
 
+  const cancelJob = async (job: DownloadJob) => {
+    setBusy(true);
+    try {
+      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在前端取消任务。');
+      setJobs(result.jobs || []);
+      setNotice(`已取消下载任务：${job.output_name || job.job_id}`);
+      refreshDashboard();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '取消任务失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retryJob = async (job: DownloadJob) => {
+    setBusy(true);
+    try {
+      const result = await api.retryDownloadJob(job.job_id, userId);
+      setJobs(result.jobs || []);
+      setNotice(result.auto_started ? '已创建重试任务并开始后台下载。' : `已创建重试任务：${result.reason || '等待处理'}`);
+      refreshDashboard();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '重试任务失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const counts = dashboard?.dataset_type_counts || {};
   const artifacts = dashboard?.artifacts?.slice(0, 4) || [];
   const runtime = dashboard?.runtime_status || {};
@@ -353,6 +381,9 @@ export function LayerPanel({
                 {recentJobs.map((job) => {
                   const done = job.status === 'completed';
                   const failed = job.status === 'failed';
+                  const active = job.status === 'queued' || job.status === 'running' || job.status === 'waiting_login' || job.status === 'waiting_manual';
+                  const retryable = failed || job.status === 'canceled' || job.status === 'waiting_login' || job.status === 'waiting_manual';
+                  const deletable = !active;
                   return (
                     <div key={job.job_id} className={cn('rounded-2xl border px-3 py-2 text-xs', done ? 'border-emerald-300/35 bg-emerald-400/10' : failed ? 'border-coral/30 bg-coral/10' : 'border-white/25 bg-white/25 dark:border-white/10 dark:bg-white/5')}>
                       <div className="flex items-center justify-between gap-2">
@@ -364,11 +395,31 @@ export function LayerPanel({
                           {done && job.download_url && (
                             <a href={job.download_url} target="_blank" rel="noreferrer" className="rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 font-black text-white shadow-glow">下载</a>
                           )}
+                          {active && (
+                            <button
+                              onClick={() => cancelJob(job)}
+                              disabled={busy}
+                              className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-amber-600 transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                              title="取消任务并释放预占额度"
+                            >
+                              <XCircle size={14} strokeWidth={1.8} />
+                            </button>
+                          )}
+                          {retryable && (
+                            <button
+                              onClick={() => retryJob(job)}
+                              disabled={busy}
+                              className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-ocean transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                              title="按原条件重试任务"
+                            >
+                              <RotateCcw size={14} strokeWidth={1.8} />
+                            </button>
+                          )}
                           <button
                             onClick={() => deleteJob(job)}
-                            disabled={busy}
+                            disabled={busy || !deletable}
                             className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-coral transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
-                            title="删除这条下载任务记录"
+                            title={deletable ? '删除这条下载任务记录' : '任务进行中，请先取消'}
                           >
                             <Trash2 size={14} strokeWidth={1.8} />
                           </button>
@@ -382,6 +433,13 @@ export function LayerPanel({
                       )}
                       {job.failure_diagnostic?.user_message && <div className="mt-1 text-coral">{job.failure_diagnostic.user_message}</div>}
                       {job.scan_stop_reason && <div className="mt-1 text-slate-500 dark:text-slate-400">扫描停止：{job.scan_stop_reason}</div>}
+                      {job.quota_reserved ? <div className="mt-1 text-amber-600 dark:text-amber-300">已预占 1 次平台账号额度，失败或取消会自动释放。</div> : null}
+                      {job.retried_from_job_id && <div className="mt-1 text-slate-500 dark:text-slate-400">重试来源：{job.retried_from_job_id}</div>}
+                      {job.artifact_quality?.length ? (
+                        <div className={cn('mt-1', job.artifact_quality.every((item) => item.ok !== false) ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300')}>
+                          成果质量：{job.artifact_quality.every((item) => item.ok !== false) ? '已通过基础检查' : '需要检查文件或范围'}
+                        </div>
+                      ) : null}
                       {failed && job.error_message && <div className="mt-1 text-coral">{job.error_message}</div>}
                       {done && !job.download_url && <div className="mt-1 text-slate-500 dark:text-slate-400">已完成，结果正在整理。</div>}
                     </div>

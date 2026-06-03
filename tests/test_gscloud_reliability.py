@@ -90,6 +90,14 @@ class GSCloudReliabilityTests(unittest.TestCase):
         self.assertEqual(result["reason"], "missing_region")
         self.assertIn("区域", result["message"])
 
+    def test_resolve_download_region_adds_known_bounds(self):
+        result = resolve_download_region("下载成都 Landsat", "")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["region"], "成都")
+        self.assertEqual(result["boundary_source"], "builtin_bbox")
+        self.assertEqual(len(result["bounds"]), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

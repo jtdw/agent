@@ -658,11 +658,16 @@ class CommercialService:
             "zip_path": "",
             "error_message": "",
             "charged": 0,
+            "quota_reserved": 0,
+            "retried_from_job_id": "",
+            "canceled_at": "",
             "created_at": ts,
             "updated_at": ts,
             "finished_at": "",
         }
         self.db.insert_dict("download_jobs", data)
+        if account_mode in {"platform", "platform_account"}:
+            self._reserve_platform_quota(job_id)
         return self.get_job(job_id)
 
     def get_job(self, job_id: str) -> dict[str, Any]:
@@ -695,6 +700,8 @@ class CommercialService:
             user = self.get_user(user_id)
             if row.get("user_id") != user["user_id"]:
                 raise PermissionError("只能删除自己的下载任务记录。")
+        if row.get("status") in {"queued", "running", "waiting_login", "waiting_manual"}:
+            raise ValueError("任务仍在进行或等待处理，请先取消任务后再删除记录。")
         self.db.execute("DELETE FROM download_jobs WHERE job_id=?", [job_id])
         return {"ok": True, "deleted_job_id": job_id}
 
@@ -702,20 +709,76 @@ class CommercialService:
         fields["updated_at"] = now_str()
         self.db.update_dict("download_jobs", fields, "job_id=?", [job_id])
 
+    def _write_quota_ledger(self, user_id: str, job_id: str, change_value: int, quota_type: str, reason: str) -> None:
+        self.db.insert_dict(
+            "quota_ledger",
+            {
+                "ledger_id": f"ql_{uuid4().hex[:12]}",
+                "user_id": user_id,
+                "job_id": job_id,
+                "change_value": int(change_value),
+                "quota_type": quota_type,
+                "reason": reason,
+                "created_at": now_str(),
+            },
+        )
+
+    def _reserve_platform_quota(self, job_id: str) -> None:
+        job = self.db.fetch_one("SELECT * FROM download_jobs WHERE job_id=?", [job_id]) or {}
+        if not job or job.get("quota_reserved") or job.get("charged"):
+            return
+        if job.get("account_mode") not in {"platform", "platform_account"}:
+            return
+        user = self.get_user(job["user_id"])
+        if int(user.get("platform_monthly_quota") or 0) <= int(user.get("platform_monthly_used") or 0):
+            raise PermissionError("用户平台账号下载额度不足，请先付费或提升套餐。")
+        self.db.execute(
+            "UPDATE commercial_users SET platform_monthly_used = platform_monthly_used + 1, updated_at=? WHERE user_id=?",
+            [now_str(), job["user_id"]],
+        )
+        if job.get("account_id"):
+            self.db.execute(
+                "UPDATE platform_accounts SET used_today=used_today+1, used_month=used_month+1, last_used_at=?, updated_at=? WHERE account_id=?",
+                [now_str(), now_str(), job["account_id"]],
+            )
+        self._update_job(job_id, quota_reserved=1)
+        self._write_quota_ledger(job["user_id"], job_id, 1, "platform_monthly", "reserve_platform_download")
+
+    def _release_platform_reservation(self, job_id: str, reason: str) -> None:
+        job = self.db.fetch_one("SELECT * FROM download_jobs WHERE job_id=?", [job_id]) or {}
+        if not job or not int(job.get("quota_reserved") or 0):
+            return
+        self.db.execute(
+            """
+            UPDATE commercial_users
+            SET platform_monthly_used = CASE WHEN platform_monthly_used > 0 THEN platform_monthly_used - 1 ELSE 0 END,
+                updated_at=?
+            WHERE user_id=?
+            """,
+            [now_str(), job["user_id"]],
+        )
+        if job.get("account_id"):
+            self.db.execute(
+                """
+                UPDATE platform_accounts
+                SET used_today = CASE WHEN used_today > 0 THEN used_today - 1 ELSE 0 END,
+                    used_month = CASE WHEN used_month > 0 THEN used_month - 1 ELSE 0 END,
+                    updated_at=?
+                WHERE account_id=?
+                """,
+                [now_str(), job["account_id"]],
+            )
+        self._update_job(job_id, quota_reserved=0)
+        self._write_quota_ledger(job["user_id"], job_id, -1, "platform_monthly", reason)
+
     def _charge_success(self, job: dict[str, Any]) -> None:
         if job.get("charged"):
             return
         if job.get("account_mode") in {"platform", "platform_account"}:
-            self.db.execute(
-                "UPDATE commercial_users SET platform_monthly_used = platform_monthly_used + 1, updated_at=? WHERE user_id=?",
-                [now_str(), job["user_id"]],
-            )
-            if job.get("account_id"):
-                self.db.execute(
-                    "UPDATE platform_accounts SET used_today=used_today+1, used_month=used_month+1, last_used_at=?, updated_at=? WHERE account_id=?",
-                    [now_str(), now_str(), job["account_id"]],
-                )
-            self._update_job(job["job_id"], charged=1)
+            if not int(job.get("quota_reserved") or 0):
+                self._reserve_platform_quota(job["job_id"])
+            self._update_job(job["job_id"], charged=1, quota_reserved=0)
+            self._write_quota_ledger(job["user_id"], job["job_id"], 0, "platform_monthly", "complete_reserved_platform_download")
 
     def run_job_with_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
         zip_path = result.get("zip_path") or result.get("package_path") or ""
@@ -735,5 +798,50 @@ class CommercialService:
         return self.get_job(job_id)
 
     def fail_job(self, job_id: str, error: str) -> dict[str, Any]:
+        self._release_platform_reservation(job_id, "release_failed_platform_download")
         self._update_job(job_id, status="failed", progress=100, stage="failed", error_message=str(error), finished_at=now_str())
         return self.get_job(job_id)
+
+    def cancel_job(self, job_id: str, user_id: str = "", reason: str = "") -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if user_id:
+            user = self.get_user(user_id)
+            if job.get("user_id") != user["user_id"]:
+                raise PermissionError("只能取消自己的下载任务。")
+        if job.get("status") in {"completed", "failed", "canceled"}:
+            raise ValueError(f"任务已结束，不能取消: {job.get('status')}")
+        self._release_platform_reservation(job_id, "release_canceled_platform_download")
+        self._update_job(
+            job_id,
+            status="canceled",
+            progress=100,
+            stage="canceled",
+            error_message=reason or "用户取消任务。",
+            canceled_at=now_str(),
+            finished_at=now_str(),
+        )
+        return self.get_job(job_id)
+
+    def retry_job(self, job_id: str, user_id: str = "") -> dict[str, Any]:
+        job = self.get_job(job_id)
+        if user_id:
+            user = self.get_user(user_id)
+            if job.get("user_id") != user["user_id"]:
+                raise PermissionError("只能重试自己的下载任务。")
+        if job.get("status") not in {"failed", "canceled", "waiting_login", "waiting_manual"}:
+            raise ValueError(f"当前状态不能重试: {job.get('status')}")
+        retry = self.submit_job(
+            user_id=job.get("user_id", ""),
+            source_key=job.get("source_key", ""),
+            resource_type=job.get("resource_type", ""),
+            region=job.get("region", "") or "",
+            start_date=job.get("start_date", "") or "",
+            end_date=job.get("end_date", "") or "",
+            account_mode=job.get("account_mode", "") or "own",
+            request_text=job.get("request_text", "") or "",
+            direct_url=job.get("direct_url", "") or "",
+            local_file_path=job.get("local_file_path", "") or "",
+            output_name=job.get("output_name", "") or "",
+        )
+        self._update_job(retry["job_id"], retried_from_job_id=job_id)
+        return self.get_job(retry["job_id"])

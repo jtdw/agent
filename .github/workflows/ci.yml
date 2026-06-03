@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run Python tests
+        run: python -m unittest discover tests
+
+  frontend-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui_next/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: ui_next
+        run: npm ci
+      - name: Build frontend
+        working-directory: ui_next
+        run: npm run build
+      - name: Run frontend unit checks
+        working-directory: ui_next
+        run: |
+          npm run test:layer-policy
+          npm run test:local-library
+          npm run test:map-upgrades
+          npm run test:research-workflow
+          npm run test:analysis-panel

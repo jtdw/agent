@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS download_jobs (
     zip_path TEXT,
     error_message TEXT,
     charged INTEGER NOT NULL DEFAULT 0,
+    quota_reserved INTEGER NOT NULL DEFAULT 0,
+    retried_from_job_id TEXT,
+    canceled_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     finished_at TEXT,
@@ -152,6 +155,13 @@ COMMERCIAL_USER_MIGRATIONS = {
 }
 
 
+DOWNLOAD_JOB_MIGRATIONS = {
+    "quota_reserved": "ALTER TABLE download_jobs ADD COLUMN quota_reserved INTEGER NOT NULL DEFAULT 0",
+    "retried_from_job_id": "ALTER TABLE download_jobs ADD COLUMN retried_from_job_id TEXT",
+    "canceled_at": "ALTER TABLE download_jobs ADD COLUMN canceled_at TEXT",
+}
+
+
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -183,6 +193,10 @@ class CommercialDB:
             existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(commercial_users)").fetchall()}
             for col, sql in COMMERCIAL_USER_MIGRATIONS.items():
                 if col not in existing_cols:
+                    conn.execute(sql)
+            job_cols = {row[1] for row in conn.execute("PRAGMA table_info(download_jobs)").fetchall()}
+            for col, sql in DOWNLOAD_JOB_MIGRATIONS.items():
+                if col not in job_cols:
                     conn.execute(sql)
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:

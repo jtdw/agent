@@ -4,6 +4,7 @@ import json
 import re
 import time
 import zipfile
+from math import inf
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,22 @@ HTML_ERROR_MARKERS = (
     "登录",
     "error",
 )
+
+
+BUILTIN_REGION_BOUNDS: dict[str, tuple[float, float, float, float]] = {
+    "成都": (102.9, 30.05, 104.9, 31.45),
+    "成都市": (102.9, 30.05, 104.9, 31.45),
+    "四川": (97.35, 26.05, 108.55, 34.32),
+    "四川省": (97.35, 26.05, 108.55, 34.32),
+    "重庆": (105.28, 28.16, 110.2, 32.2),
+    "重庆市": (105.28, 28.16, 110.2, 32.2),
+    "云南": (97.52, 21.14, 106.2, 29.25),
+    "云南省": (97.52, 21.14, 106.2, 29.25),
+    "贵州": (103.36, 24.61, 109.59, 29.22),
+    "贵州省": (103.36, 24.61, 109.59, 29.22),
+    "闪电河": (115.2, 41.1, 116.6, 42.4),
+    "闪电河流域": (115.2, 41.1, 116.6, 42.4),
+}
 
 
 def inspect_storage_state(path: str | Path) -> dict[str, Any]:
@@ -162,6 +179,74 @@ def validate_download_artifact(path: str | Path) -> dict[str, Any]:
     }
 
 
+def _bounds_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    return not (a[2] < b[0] or b[2] < a[0] or a[3] < b[1] or b[3] < a[1])
+
+
+def _extract_geojson_bounds(geometry: Any) -> tuple[float, float, float, float] | None:
+    xs: list[float] = []
+    ys: list[float] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, (list, tuple)):
+            if len(value) >= 2 and all(isinstance(v, (int, float)) for v in value[:2]):
+                xs.append(float(value[0]))
+                ys.append(float(value[1]))
+                return
+            for item in value:
+                walk(item)
+
+    if isinstance(geometry, dict):
+        walk(geometry.get("coordinates"))
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def validate_map_ready_artifact(path: str | Path, expected_bounds: tuple[float, float, float, float] | None = None) -> dict[str, Any]:
+    base = validate_download_artifact(path)
+    file_path = Path(path)
+    suffix = file_path.suffix.lower()
+    result: dict[str, Any] = {**base, "map_ready": False}
+    bounds: tuple[float, float, float, float] | None = None
+
+    if suffix in {".geojson", ".json"}:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+        features = data.get("features") if isinstance(data, dict) else None
+        if not isinstance(features, list) or not features:
+            return {**result, "ok": False, "reason": "empty_geojson_features"}
+        xmin, ymin, xmax, ymax = inf, inf, -inf, -inf
+        for feature in features:
+            geom_bounds = _extract_geojson_bounds(feature.get("geometry") if isinstance(feature, dict) else None)
+            if geom_bounds is None:
+                continue
+            xmin = min(xmin, geom_bounds[0])
+            ymin = min(ymin, geom_bounds[1])
+            xmax = max(xmax, geom_bounds[2])
+            ymax = max(ymax, geom_bounds[3])
+        if xmin is inf:
+            return {**result, "ok": False, "reason": "missing_geojson_coordinates"}
+        bounds = (xmin, ymin, xmax, ymax)
+        result.update({"map_ready": True, "bounds": bounds, "feature_count": len(features)})
+    elif suffix in {".tif", ".tiff"}:
+        try:
+            import rasterio  # type: ignore
+
+            with rasterio.open(file_path) as src:
+                bounds = (float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top))
+                result.update({"map_ready": True, "bounds": bounds, "crs": str(src.crs or ""), "width": src.width, "height": src.height})
+        except Exception as exc:
+            return {**result, "ok": False, "reason": "raster_open_failed", "detail": str(exc)}
+    else:
+        result.update({"map_ready": suffix in {".zip", ".hdf", ".safe", ".tar", ".gz"}})
+
+    if expected_bounds and bounds:
+        result["bounds_overlap"] = _bounds_overlap(bounds, tuple(float(v) for v in expected_bounds))
+        if not result["bounds_overlap"]:
+            result.update({"ok": False, "reason": "bounds_do_not_overlap"})
+    return result
+
+
 def find_existing_scene_download(target_dir: str | Path, scene_id: str) -> Path | None:
     root = Path(target_dir)
     scene = str(scene_id or "").strip()
@@ -199,10 +284,17 @@ def resolve_download_region(prompt: str, region: str = "") -> dict[str, Any]:
             "message": "请补充下载区域，例如“成都”“四川省”或上传/选择工作区边界。",
             "next_action": "ask_region",
         }
-    return {
+    result = {
         "ok": True,
         "region": value,
         "reason": "region_resolved",
         "message": f"已识别下载区域：{value}",
         "next_action": "continue",
     }
+    bounds = BUILTIN_REGION_BOUNDS.get(value)
+    if bounds:
+        result["bounds"] = bounds
+        result["boundary_source"] = "builtin_bbox"
+    else:
+        result["boundary_source"] = "region_name_only"
+    return result

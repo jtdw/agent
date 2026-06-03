@@ -13,7 +13,7 @@ from ..domestic_sources.gscloud_modev1f import download_modev1f_china_evi_5day
 from ..domestic_sources.gscloud_mod021km import download_mod021km_surface_reflectance
 from ..domestic_sources.gscloud_modl1d import download_modl1d_china_lst_daily
 from ..domestic_sources.gscloud_modnd1d import download_modnd1d_china_ndvi_daily
-from ..domestic_sources.gscloud_reliability import classify_gscloud_failure, inspect_storage_state, resolve_download_region
+from ..domestic_sources.gscloud_reliability import classify_gscloud_failure, inspect_storage_state, resolve_download_region, validate_map_ready_artifact
 from ..domestic_sources.gscloud_sentinel2 import download_sentinel2_msi_scenes
 from .service import CommercialService
 
@@ -92,6 +92,8 @@ def main() -> int:
         login_health = inspect_storage_state(state_path) if state_path else inspect_storage_state("")
         if not login_health.get("ok"):
             diagnostic = classify_gscloud_failure("未找到可用地理空间数据云登录态")
+            if hasattr(service, "_release_platform_reservation"):
+                service._release_platform_reservation(job_id, "release_waiting_login_platform_download")
             current.update({
                 "state": "WAITING_LOGIN",
                 "message": diagnostic["user_message"],
@@ -114,6 +116,8 @@ def main() -> int:
             str(current.get("region") or job.get("region") or ""),
         )
         if not resolved_region.get("ok"):
+            if hasattr(service, "_release_platform_reservation"):
+                service._release_platform_reservation(job_id, "release_waiting_region_platform_download")
             diagnostic = {
                 "code": "region_required",
                 "title": "需要明确下载区域",
@@ -249,6 +253,17 @@ def main() -> int:
             )
 
         service._update_job(job_id, status="running", progress=90, stage="packaging_scene_result")
+        quality_checks = []
+        expected_bounds = resolved_region.get("bounds") if isinstance(resolved_region.get("bounds"), (list, tuple)) else None
+        for candidate in (result.get("zip_path"), result.get("package_path"), result.get("downloaded_path"), result.get("path")):
+            if not candidate:
+                continue
+            try:
+                quality_checks.append(validate_map_ready_artifact(candidate, expected_bounds=tuple(expected_bounds) if expected_bounds else None))
+            except Exception as quality_exc:
+                quality_checks.append({"ok": False, "path": str(candidate), "reason": "artifact_quality_check_failed", "detail": str(quality_exc)})
+        if quality_checks:
+            result["artifact_quality"] = quality_checks
         done = service.run_job_with_result(job_id, result)
         current.update({
             "state": "COMPLETED",

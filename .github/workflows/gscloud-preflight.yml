@@ -1,0 +1,49 @@
+name: GSCloud Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_key:
+        description: GSCloud product key
+        required: true
+        default: landsat8_oli_tirs
+      region:
+        description: Download region
+        required: true
+        default: 成都
+      max_pages:
+        description: Pages to scan
+        required: true
+        default: "1"
+
+jobs:
+  preflight:
+    runs-on: windows-latest
+    env:
+      GSCLOUD_STORAGE_STATE_JSON: ${{ secrets.GSCLOUD_STORAGE_STATE_JSON }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install chromium
+      - name: Write GSCloud storage state
+        shell: pwsh
+        run: |
+          if (-not $env:GSCLOUD_STORAGE_STATE_JSON) {
+            throw "Configure repository secret GSCLOUD_STORAGE_STATE_JSON before running this workflow."
+          }
+          New-Item -ItemType Directory -Force -Path workspace\ci_auth | Out-Null
+          Set-Content -Path workspace\ci_auth\gscloud_storage_state.json -Value $env:GSCLOUD_STORAGE_STATE_JSON -Encoding UTF8
+      - name: Run preflight scan without download
+        run: >
+          python scripts\verify_gscloud_scene_download.py
+          --product-key "${{ inputs.product_key }}"
+          --storage-state workspace\ci_auth\gscloud_storage_state.json
+          --download-dir workspace\gscloud_download_verification
+          --max-pages "${{ inputs.max_pages }}"
+          --region "${{ inputs.region }}"

@@ -121,6 +121,10 @@ export type DownloadJob = {
   output_path?: string;
   zip_path?: string;
   download_url?: string;
+  charged?: number;
+  quota_reserved?: number;
+  retried_from_job_id?: string;
+  canceled_at?: string;
   pages_scanned?: number;
   candidate_count?: number;
   selected_count?: number;
@@ -135,6 +139,7 @@ export type DownloadJob = {
   };
   login_health?: Record<string, unknown>;
   region_resolution?: Record<string, unknown>;
+  artifact_quality?: Array<Record<string, unknown>>;
   scene_status?: Record<string, unknown>;
   updated_at?: string;
   finished_at?: string;
@@ -407,6 +412,18 @@ export const api = {
   },
   async deleteDownloadJob(job_id: string, user_id?: string) {
     return request<{ ok: boolean; deleted_job_id: string; jobs: DownloadJob[] }>('/api/downloads/jobs/delete', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: user_id || '', job_id })
+    });
+  },
+  async cancelDownloadJob(job_id: string, user_id?: string, reason?: string) {
+    return request<DownloadJob & { jobs: DownloadJob[] }>('/api/downloads/jobs/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: user_id || '', job_id, reason: reason || '用户取消任务。' })
+    });
+  },
+  async retryDownloadJob(job_id: string, user_id?: string) {
+    return request<{ job: DownloadJob; jobs: DownloadJob[]; auto_supported?: boolean; auto_started?: boolean; reason?: string }>('/api/downloads/jobs/retry', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', job_id })
     });
