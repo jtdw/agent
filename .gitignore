@@ -1,0 +1,39 @@
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Frontend dependencies and build output
+node_modules/
+ui_next/node_modules/
+dist/
+ui_next/dist/
+*.tsbuildinfo
+
+# Runtime data, downloads, exports, and generated local libraries
+workspace/
+local_library/
+logs/
+*.log
+
+# Secrets and authentication state
+.env
+.env.*
+!.env.example
+secrets/
+*storage_state*.json
+*cookie*.json
+*cookies*.json
+
+# IDE and OS files
+.vscode/
+.idea/
+.streamlit/secrets.toml
+.DS_Store
+Thumbs.db
