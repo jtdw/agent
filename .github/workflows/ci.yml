@@ -9,6 +9,8 @@ on:
 jobs:
   python-tests:
     runs-on: windows-latest
+    env:
+      ZAI_API_KEY: ci-test-key
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,8 +20,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+      - name: Compile Python modules
+        run: python -m py_compile api_server.py core\api_security.py core\resource_tools.py core\commercial\security.py core\ops_config.py
       - name: Run Python tests
         run: python -m unittest discover tests
+      - name: Run doctor
+        shell: pwsh
+        run: .\scripts\doctor.ps1
 
   frontend-build:
     runs-on: windows-latest
@@ -44,3 +51,36 @@ jobs:
           npm run test:map-upgrades
           npm run test:research-workflow
           npm run test:analysis-panel
+
+  smoke:
+    runs-on: windows-latest
+    env:
+      ZAI_API_KEY: ci-test-key
+      GIS_AGENT_BACKEND_URL: http://127.0.0.1:8765
+      GIS_AGENT_FRONTEND_URL: http://127.0.0.1:5173
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui_next/package-lock.json
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install chromium
+      - name: Install frontend dependencies
+        working-directory: ui_next
+        run: npm ci
+      - name: Start backend and frontend
+        shell: pwsh
+        run: |
+          Start-Process -FilePath python -ArgumentList @('-m','uvicorn','api_server:app','--host','127.0.0.1','--port','8765') -WindowStyle Hidden
+          Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory ui_next -WindowStyle Hidden
+          Start-Sleep -Seconds 25
+      - name: Run E2E smoke
+        run: python scripts\e2e_smoke.py

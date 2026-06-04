@@ -8,7 +8,7 @@ from urllib.parse import urlencode
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from core.config import Settings, load_settings
@@ -22,6 +22,7 @@ from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gsclou
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
+from core.ops_config import require_valid_production_config, validate_production_config
 
 try:
     from core.commercial.tile_jobs import list_gscloud_tile_jobs, start_gscloud_tile_process
@@ -87,6 +88,12 @@ try:
     _bootstrap_platform_account_from_env()
 except Exception:
     pass
+
+
+@app.on_event("startup")
+def _startup_operational_checks() -> None:
+    require_valid_production_config()
+    commercial_service.recover_interrupted_jobs()
 
 
 def _safe_key(value: str | None) -> str:
@@ -186,6 +193,31 @@ def _require_admin_or_mock_payment_user(request: Request, user_id: str) -> str:
     if os.getenv("GIS_AGENT_ENABLE_MOCK_PAYMENT", "0").strip().lower() in {"1", "true", "yes", "on"}:
         return _require_request_user(request, user_id)
     raise PermissionError("模拟支付接口默认关闭。请设置 GIS_AGENT_ENABLE_MOCK_PAYMENT=1 并登录，或配置 GIS_AGENT_ADMIN_TOKEN 后用管理员令牌调用。")
+
+
+def _audit(
+    request: Request,
+    *,
+    user_id: str = "",
+    action: str,
+    status: str = "ok",
+    resource_type: str = "",
+    resource_id: str = "",
+    detail: dict | None = None,
+) -> None:
+    try:
+        commercial_service.write_audit_event(
+            user_id=user_id,
+            action=action,
+            status=status,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            ip_address=request.client.host if request.client else "",
+            user_agent=str(request.headers.get("user-agent") or ""),
+            detail=detail or {},
+        )
+    except Exception:
+        pass
 
 
 class AuthIn(BaseModel):
@@ -502,6 +534,11 @@ def status():
     }
 
 
+@app.get("/api/ops/config")
+def ops_config():
+    return validate_production_config()
+
+
 def _tianditu_layer_url(layer: str, matrix_set: str = "w") -> str:
     token = os.getenv("TIANDITU_TOKEN", "").strip()
     return (
@@ -569,21 +606,23 @@ def map_raster_preview(request: Request, user_id: str = Query(default=""), datas
     return guard(run)
 
 @app.post("/api/auth/login")
-def login(body: AuthIn, response: Response):
+def login(body: AuthIn, response: Response, request: Request):
     def run():
         session = commercial_service.authenticate_user(str(body.email), body.password)
         _set_session_cookies(response, session)
+        _audit(request, user_id=str(session["user"].get("user_id") or ""), action="auth.login", resource_type="user", resource_id=str(session["user"].get("user_id") or ""))
         return {"user": session["user"], "expires_at": session.get("expires_at")}
 
     return guard(run)
 
 
 @app.post("/api/auth/register")
-def register(body: AuthIn, response: Response):
+def register(body: AuthIn, response: Response, request: Request):
     def run():
         commercial_service.register_user(str(body.email), body.password, plan="basic")
         session = commercial_service.authenticate_user(str(body.email), body.password)
         _set_session_cookies(response, session)
+        _audit(request, user_id=str(session["user"].get("user_id") or ""), action="auth.register", resource_type="user", resource_id=str(session["user"].get("user_id") or ""))
         return {"user": session["user"], "expires_at": session.get("expires_at")}
 
     return guard(run)
@@ -604,8 +643,9 @@ def me(request: Request):
 
 
 @app.post("/api/auth/logout")
-def logout(response: Response):
+def logout(response: Response, request: Request):
     _clear_session_cookies(response)
+    _audit(request, action="auth.logout")
     return {"ok": True}
 
 
@@ -1698,6 +1738,43 @@ def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
     }
 
 
+def _format_download_job_log_text(job: dict, scene_jobs: list[dict], tile_jobs: list[dict], audit_events: list[dict]) -> str:
+    lines = [
+        f"Download job log: {job.get('job_id')}",
+        f"status: {job.get('status')}",
+        f"stage: {job.get('stage')}",
+        f"progress: {job.get('progress')}%",
+        f"source_key: {job.get('source_key')}",
+        f"resource_type: {job.get('resource_type')}",
+        f"region: {job.get('region')}",
+        f"output_path: {job.get('output_path') or ''}",
+        f"zip_path: {job.get('zip_path') or ''}",
+        f"error_message: {job.get('error_message') or ''}",
+        "",
+        "Scene jobs:",
+    ]
+    if scene_jobs:
+        for item in scene_jobs:
+            lines.append(f"- {item.get('scene_job_id') or ''} state={item.get('state') or ''} message={item.get('message') or ''}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    lines.append("Tile jobs:")
+    if tile_jobs:
+        for item in tile_jobs:
+            lines.append(f"- {item.get('tile_job_id') or ''} state={item.get('state') or ''} message={item.get('message') or ''}")
+    else:
+        lines.append("- none")
+    lines.append("")
+    lines.append("Recent audit events:")
+    if audit_events:
+        for item in audit_events:
+            lines.append(f"- {item.get('created_at') or ''} {item.get('action') or ''} {item.get('status') or ''} {item.get('resource_id') or ''}")
+    else:
+        lines.append("- none")
+    return "\n".join(lines) + "\n"
+
+
 @app.post("/api/chat/ask")
 def ask(body: AskIn, request: Request):
     def run():
@@ -1974,6 +2051,7 @@ def export_workspace(body: ExportIn, request: Request):
         service = workspace_for(user_id)
         result = service.export_results(mode=body.mode)
         result["download_url"] = _relative_artifact_url(service, result["zip_path"])
+        _audit(request, user_id=user_id, action="workspace.export", resource_type="artifact", resource_id=str(result.get("zip_path") or ""), detail={"mode": body.mode, "file_count": result.get("file_count")})
         return result
 
     return guard(run)
@@ -1985,6 +2063,7 @@ def artifact(request: Request, user_id: str = Query(default=""), path: str = Que
         authorized_user_id = _require_request_user(request, user_id)
         service = workspace_for(authorized_user_id)
         target = resolve_child_path(service.manager.workdir, path)
+        _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="workspace_file", resource_id=path)
         return FileResponse(str(target), filename=target.name)
 
     return guard(run)
@@ -1996,7 +2075,7 @@ def simulate_payment(body: PaymentIn, request: Request):
         user_id = _require_admin_or_mock_payment_user(request, body.user_id)
         preset = PLAN_PRESETS.get(body.plan, PLAN_PRESETS["pro"])
         amount = int(preset.get("price_cents", 2000)) if "price_cents" in preset else {"basic": 900, "pro": 2000, "team": 5900}.get(body.plan, 2000)
-        return commercial_service.simulate_payment(
+        result = commercial_service.simulate_payment(
             user_id=user_id,
             plan=body.plan,
             amount_cents=amount,
@@ -2004,6 +2083,8 @@ def simulate_payment(body: PaymentIn, request: Request):
             days=int(preset.get("days", 30)),
             note="Web 前端模拟支付",
         )
+        _audit(request, user_id=user_id, action="payment.simulate", resource_type="payment", resource_id=str((result.get("payment") or {}).get("payment_id") or ""), detail={"plan": body.plan})
+        return result
 
     return guard(run)
 
@@ -2016,6 +2097,7 @@ def submit_download(body: DownloadIn, request: Request):
         payload["user_id"] = user_id
         job = commercial_service.submit_job(**payload)
         auto = _maybe_start_gscloud_auto_download(job, region=body.region)
+        _audit(request, user_id=user_id, action="download.submit", resource_type="download_job", resource_id=job["job_id"], detail={"source_key": job.get("source_key"), "resource_type": job.get("resource_type"), "auto_started": auto.get("auto_started")})
         return {"job": commercial_service.get_job(job["job_id"]), **auto}
 
     return guard(run)
@@ -2070,6 +2152,27 @@ def preflight_download(body: DownloadPreflightIn, request: Request):
     return guard(run)
 
 
+@app.get("/api/downloads/login-health")
+def download_login_health(request: Request, user_id: str = Query(...), source_key: str = Query(default="gscloud"), account_mode: str = Query(default="platform")):
+    def run():
+        authorized_user_id = _require_request_user(request, user_id)
+        source = str(source_key or "gscloud").lower()
+        mode = str(account_mode or "platform").lower()
+        if mode == "own":
+            state_path = commercial_service.get_user_storage_state_path(authorized_user_id, source)
+        else:
+            check = commercial_service._select_platform_account(source)
+            if not check.ok or not check.account_id:
+                raise PermissionError(check.reason or "没有可用平台账号。")
+            account = commercial_service.get_platform_account_private(check.account_id)
+            state_path = str(account.get("storage_state_path") or "")
+        health = inspect_storage_state(state_path)
+        _audit(request, user_id=authorized_user_id, action="download.login_health", resource_type="storage_state", detail={"source_key": source, "account_mode": mode, "ok": health.get("ok")})
+        return {"source_key": source, "account_mode": mode, "login_health": health}
+
+    return guard(run)
+
+
 @app.get("/api/downloads/jobs")
 def list_jobs(request: Request, user_id: str = ""):
     def run():
@@ -2109,12 +2212,57 @@ def list_jobs(request: Request, user_id: str = ""):
     return guard(run)
 
 
+@app.get("/api/downloads/jobs/log")
+def download_job_log(request: Request, user_id: str = Query(...), job_id: str = Query(...)):
+    def run():
+        authorized_user_id = _require_request_user(request, user_id)
+        job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
+        tile_jobs = []
+        scene_jobs = []
+        if list_gscloud_tile_jobs is not None:
+            tile_jobs = [item for item in list_gscloud_tile_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
+        if list_gscloud_scene_jobs is not None:
+            scene_jobs = [item for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
+        return {
+            "job": job,
+            "scene_jobs": scene_jobs,
+            "tile_jobs": tile_jobs,
+            "audit_events": commercial_service.list_audit_events(user_id=authorized_user_id, limit=20),
+        }
+
+    return guard(run)
+
+
+@app.get("/api/downloads/jobs/log-download")
+def download_job_log_file(request: Request, user_id: str = Query(...), job_id: str = Query(...)):
+    def run():
+        authorized_user_id = _require_request_user(request, user_id)
+        job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
+        tile_jobs = []
+        scene_jobs = []
+        if list_gscloud_tile_jobs is not None:
+            tile_jobs = [item for item in list_gscloud_tile_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
+        if list_gscloud_scene_jobs is not None:
+            scene_jobs = [item for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
+        audit_events = commercial_service.list_audit_events(user_id=authorized_user_id, limit=20)
+        text = _format_download_job_log_text(job, scene_jobs, tile_jobs, audit_events)
+        _audit(request, user_id=authorized_user_id, action="download.log_download", resource_type="download_job", resource_id=job_id)
+        return PlainTextResponse(
+            text,
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{job_id}_log.txt"'},
+        )
+
+    return guard(run)
+
+
 @app.post("/api/downloads/jobs/delete")
 def delete_download_job(body: DownloadDeleteIn, request: Request):
     def run():
         user_id = _require_request_user(request, body.user_id)
         result = commercial_service.delete_job(body.job_id, user_id=user_id)
         jobs = commercial_service.list_jobs(user_id=user_id)
+        _audit(request, user_id=user_id, action="download.delete", resource_type="download_job", resource_id=body.job_id)
         return {**result, "jobs": jobs}
 
     return guard(run)
@@ -2126,6 +2274,7 @@ def cancel_download_job(body: DownloadActionIn, request: Request):
         user_id = _require_request_user(request, body.user_id)
         result = commercial_service.cancel_job(body.job_id, user_id=user_id, reason=body.reason)
         jobs = commercial_service.list_jobs(user_id=user_id)
+        _audit(request, user_id=user_id, action="download.cancel", resource_type="download_job", resource_id=body.job_id)
         return {**result, "jobs": jobs}
 
     return guard(run)
@@ -2138,6 +2287,7 @@ def retry_download_job(body: DownloadActionIn, request: Request):
         retry = commercial_service.retry_job(body.job_id, user_id=user_id)
         auto = _maybe_start_gscloud_auto_download(retry, region=str(retry.get("region") or ""))
         jobs = commercial_service.list_jobs(user_id=user_id)
+        _audit(request, user_id=user_id, action="download.retry", resource_type="download_job", resource_id=retry["job_id"], detail={"retried_from": body.job_id, "auto_started": auto.get("auto_started")})
         return {"job": commercial_service.get_job(retry["job_id"]), **auto, "jobs": jobs}
 
     return guard(run)
@@ -2151,7 +2301,9 @@ def download_job_artifact(request: Request, user_id: str = Query(...), job_id: s
         target = resolve_child_path(base_settings.workdir, path)
         allowed = {str(job.get("zip_path") or ""), str(job.get("output_path") or "")}
         if str(target.resolve()) not in {str(Path(item).resolve()) for item in allowed if item}:
+            _audit(request, user_id=authorized_user_id, action="download.artifact", status="denied", resource_type="download_job", resource_id=job_id, detail={"path": path})
             raise PermissionError("下载路径不属于该任务。")
+        _audit(request, user_id=authorized_user_id, action="download.artifact", resource_type="download_job", resource_id=job_id, detail={"path": path})
         return FileResponse(str(target), filename=target.name)
     return guard(run)
 

@@ -145,6 +145,19 @@ export type DownloadJob = {
   finished_at?: string;
 };
 
+export type LoginHealthResponse = {
+  source_key: string;
+  account_mode: string;
+  login_health: {
+    ok?: boolean;
+    reason?: string;
+    action?: string;
+    path?: string;
+    detail?: string;
+    [key: string]: unknown;
+  };
+};
+
 export type WorkspaceDashboard = {
   summary: string;
   datasets: Array<Record<string, unknown>>;
@@ -224,6 +237,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const data = await res.json();
       detail = data.detail || data.error || detail;
     } catch {}
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`登录已过期或没有权限，请重新登录后再试。${typeof detail === 'string' ? ` ${detail}` : ''}`.trim());
+    }
     throw new Error(detail);
   }
   return res.json() as Promise<T>;
@@ -237,6 +253,9 @@ async function multipart<T>(path: string, data: FormData): Promise<T> {
       const payload = await res.json();
       detail = payload.detail || payload.error || detail;
     } catch {}
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`登录已过期或没有权限，请重新登录后再试。${typeof detail === 'string' ? ` ${detail}` : ''}`.trim());
+    }
     throw new Error(detail);
   }
   return res.json() as Promise<T>;
@@ -250,6 +269,9 @@ async function downloadWithAuth(url: string, fallbackName = 'download') {
       const payload = await res.json();
       detail = payload.detail || payload.error || detail;
     } catch {}
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`登录已过期或没有权限，请重新登录后再试。${typeof detail === 'string' ? ` ${detail}` : ''}`.trim());
+    }
     throw new Error(detail);
   }
   const blob = await res.blob();
@@ -447,6 +469,18 @@ export const api = {
   async jobs(user_id?: string) {
     const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
     return request<{ jobs: DownloadJob[] }>(`/api/downloads/jobs${q}`);
+  },
+  async loginHealth(user_id: string, source_key = 'gscloud', account_mode: 'own' | 'platform' = 'platform') {
+    const q = `?user_id=${encodeURIComponent(user_id)}&source_key=${encodeURIComponent(source_key)}&account_mode=${encodeURIComponent(account_mode)}`;
+    return request<LoginHealthResponse>(`/api/downloads/login-health${q}`);
+  },
+  async downloadJobLog(user_id: string, job_id: string) {
+    const q = `?user_id=${encodeURIComponent(user_id)}&job_id=${encodeURIComponent(job_id)}`;
+    return request<{ job: DownloadJob; scene_jobs: Array<Record<string, unknown>>; tile_jobs: Array<Record<string, unknown>>; audit_events: Array<Record<string, unknown>> }>(`/api/downloads/jobs/log${q}`);
+  },
+  async downloadJobLogFile(user_id: string, job_id: string) {
+    const q = `?user_id=${encodeURIComponent(user_id)}&job_id=${encodeURIComponent(job_id)}`;
+    return downloadWithAuth(`/api/downloads/jobs/log-download${q}`, `${job_id}_log.txt`);
   },
   async deleteDownloadJob(job_id: string, user_id?: string) {
     return request<{ ok: boolean; deleted_job_id: string; jobs: DownloadJob[] }>('/api/downloads/jobs/delete', {

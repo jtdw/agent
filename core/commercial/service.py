@@ -689,6 +689,68 @@ class CommercialService:
             out.append(public_record(r))
         return out
 
+    def write_audit_event(
+        self,
+        *,
+        user_id: str = "",
+        action: str,
+        status: str = "ok",
+        resource_type: str = "",
+        resource_id: str = "",
+        ip_address: str = "",
+        user_agent: str = "",
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event = {
+            "event_id": f"evt_{uuid4().hex[:12]}",
+            "user_id": str(user_id or ""),
+            "action": str(action or "").strip(),
+            "status": str(status or "ok").strip(),
+            "resource_type": str(resource_type or "").strip(),
+            "resource_id": str(resource_id or "").strip(),
+            "ip_address": str(ip_address or "").strip(),
+            "user_agent": str(user_agent or "").strip()[:300],
+            "detail_json": json_dumps(detail or {}),
+            "created_at": now_str(),
+        }
+        if not event["action"]:
+            raise ValueError("audit action is required")
+        self.db.insert_dict("audit_events", event)
+        return {**event, "detail": json_loads(event["detail_json"])}
+
+    def list_audit_events(self, user_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        if user_id:
+            rows = self.db.fetch_all("SELECT * FROM audit_events WHERE user_id=? ORDER BY created_at DESC LIMIT ?", [user_id, int(limit)])
+        else:
+            rows = self.db.fetch_all("SELECT * FROM audit_events ORDER BY created_at DESC LIMIT ?", [int(limit)])
+        for row in rows:
+            row["detail"] = json_loads(row.get("detail_json")) or {}
+        return rows
+
+    def recover_interrupted_jobs(self) -> dict[str, Any]:
+        rows = self.db.fetch_all(
+            "SELECT * FROM download_jobs WHERE status IN ('queued', 'running') ORDER BY updated_at ASC",
+        )
+        recovered: list[str] = []
+        for job in rows:
+            self._release_platform_reservation(job["job_id"], "release_interrupted_platform_download")
+            self._update_job(
+                job["job_id"],
+                status="waiting_manual",
+                progress=max(0, min(99, int(job.get("progress") or 0))),
+                stage="service_restart_needs_retry",
+                error_message="服务重启后检测到未完成任务，请点击重试继续。",
+            )
+            recovered.append(job["job_id"])
+        if recovered:
+            self.write_audit_event(
+                action="download.recover_interrupted",
+                status="ok",
+                resource_type="download_job",
+                detail={"job_ids": recovered, "count": len(recovered)},
+            )
+        return {"count": len(recovered), "job_ids": recovered}
+
     def delete_job(self, job_id: str, user_id: str = "") -> dict[str, Any]:
         job_id = str(job_id or "").strip()
         if not job_id:

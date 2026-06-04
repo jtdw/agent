@@ -287,6 +287,39 @@ export function LayerPanel({
     }
   };
 
+  const checkLoginHealth = async () => {
+    if (!user) {
+      setNotice('请先登录账号，再检查下载登录态。');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api.loginHealth(user.user_id, 'gscloud', 'platform');
+      const health = result.login_health || {};
+      setNotice(health.ok ? 'GSCloud 平台账号登录态可用。' : `GSCloud 登录态不可用：${String(health.reason || health.detail || '需要重新登录')}`);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '检查登录态失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inspectJobLog = async (job: DownloadJob) => {
+    setBusy(true);
+    try {
+      const result = await api.downloadJobLog(userId, job.job_id);
+      const sceneCount = result.scene_jobs?.length || 0;
+      const tileCount = result.tile_jobs?.length || 0;
+      const auditCount = result.audit_events?.length || 0;
+      await api.downloadJobLogFile(userId, job.job_id);
+      setNotice(`任务日志：状态 ${result.job.status || '--'}，场景日志 ${sceneCount} 条，分幅日志 ${tileCount} 条，审计记录 ${auditCount} 条。`);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '读取任务日志失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const counts = dashboard?.dataset_type_counts || {};
   const artifacts = dashboard?.artifacts?.slice(0, 4) || [];
   const runtime = dashboard?.runtime_status || {};
@@ -425,6 +458,14 @@ export function LayerPanel({
                             </button>
                           )}
                           <button
+                            onClick={() => inspectJobLog(job)}
+                            disabled={busy}
+                            className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                            title="查看任务日志摘要"
+                          >
+                            <ScanSearch size={14} strokeWidth={1.8} />
+                          </button>
+                          <button
                             onClick={() => deleteJob(job)}
                             disabled={busy || !deletable}
                             className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-coral transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
@@ -510,6 +551,7 @@ export function LayerPanel({
               placeholder="输入下载区域，例如 成都市 / 四川省"
             />
             <button onClick={preflightPlatformJob} disabled={preflightBusy || busy} className="glass-button mt-3 w-full gap-2 rounded-2xl text-sm font-black disabled:opacity-60"><ScanSearch size={16} strokeWidth={1.5} /> {preflightBusy ? '验证中...' : '先验证可下载'}</button>
+            <button onClick={checkLoginHealth} disabled={busy} className="glass-button mt-2 w-full gap-2 rounded-2xl text-sm font-black disabled:opacity-60"><ScanSearch size={16} strokeWidth={1.5} /> 检查 GSCloud 登录态</button>
             <button onClick={submitPlatformJob} disabled={busy || preflightBusy} className="primary-button mt-2 w-full gap-2 disabled:opacity-60"><Map size={16} strokeWidth={1.5} /> {busy ? '处理中...' : '使用平台账号下载数据'}</button>
             <button onClick={exportAll} disabled={busy} className="glass-button mt-2 w-full gap-2 rounded-2xl text-sm font-black disabled:opacity-60"><FileArchive size={16} strokeWidth={1.5} /> 打包导出成果</button>
             {notice && <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">{notice}</p>}

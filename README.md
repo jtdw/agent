@@ -64,7 +64,17 @@ Frontend:
 .\start_web_ui.ps1
 ```
 
-Default frontend URL is usually `http://localhost:5173`.
+Default frontend URL is usually `http://localhost:5173`. The backend listens on `http://127.0.0.1:8765`.
+
+## Diagnostics
+
+Run the local environment check before debugging download issues:
+
+```powershell
+.\scripts\doctor.ps1
+```
+
+The doctor checks the project `.venv`, key Python packages, `.env`, backend reachability, frontend dependencies, and GSCloud `storage_state` presence.
 
 ## GSCloud Login State
 
@@ -97,6 +107,14 @@ npm run test:map-upgrades
 npm run test:research-workflow
 npm run test:analysis-panel
 ```
+
+Smoke test with both servers running:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\e2e_smoke.py
+```
+
+GitHub Actions runs Python tests, frontend build/checks, doctor, and an end-to-end smoke test.
 
 ## Job Safety
 

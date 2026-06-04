@@ -144,6 +144,19 @@ CREATE TABLE IF NOT EXISTS payment_records (
     created_at TEXT NOT NULL,
     FOREIGN KEY(user_id) REFERENCES commercial_users(user_id)
 );
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id TEXT PRIMARY KEY,
+    user_id TEXT,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ok',
+    resource_type TEXT,
+    resource_id TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    detail_json TEXT,
+    created_at TEXT NOT NULL
+);
 """
 
 
