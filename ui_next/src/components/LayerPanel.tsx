@@ -228,11 +228,20 @@ export function LayerPanel({
       const r = await api.exportWorkspace(userId, 'all');
       setNotice(`已打包 ${r.file_count} 个成果文件。${r.download_url ? '可在最近成果中下载。' : ''}`);
       refreshDashboard();
-      if (r.download_url) window.open(r.download_url, '_blank');
+      if (r.download_url) await downloadUrl(r.download_url, 'workspace-export.zip');
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '导出失败');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const downloadUrl = async (url: string | undefined, fallbackName: string) => {
+    if (!url) return;
+    try {
+      await api.downloadAuthenticated(url, fallbackName);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '下载失败');
     }
   };
 
@@ -393,7 +402,7 @@ export function LayerPanel({
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">
                           {done && job.download_url && (
-                            <a href={job.download_url} target="_blank" rel="noreferrer" className="rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 font-black text-white shadow-glow">下载</a>
+                            <button type="button" onClick={() => downloadUrl(job.download_url, job.output_name || `${job.job_id}.zip`)} className="rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 font-black text-white shadow-glow">下载</button>
                           )}
                           {active && (
                             <button
@@ -511,9 +520,9 @@ export function LayerPanel({
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 最近成果</div>
               <div className="space-y-2">
                 {artifacts.map((item, i) => (
-                  <a key={`${item.path}-${i}`} href={item.download_url || '#'} target="_blank" rel="noreferrer" className="block rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                  <button key={`${item.path}-${i}`} type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="block w-full rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-left text-xs font-semibold text-slate-600 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
                     {item.name || item.path.split(/[\\/]/).pop() || '成果文件'}
-                  </a>
+                  </button>
                 ))}
               </div>
             </div>

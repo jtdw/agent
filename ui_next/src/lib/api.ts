@@ -80,8 +80,8 @@ export type ChatSession = {
 
 export type AuthSession = {
   user: CommercialUser;
-  session_id: string;
-  session_token: string;
+  session_id?: string;
+  session_token?: string;
   expires_at?: string;
 };
 
@@ -204,12 +204,17 @@ export type LocalLibraryResponse = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
+function authHeaders(): Record<string, string> {
+  return {};
+}
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
+    credentials: 'include',
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
       ...(init.headers || {})
     }
   });
@@ -225,7 +230,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 async function multipart<T>(path: string, data: FormData): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', body: data });
+  const res = await fetch(`${API_BASE}${path}`, { method: 'POST', body: data, headers: authHeaders(), credentials: 'include' });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
@@ -235,6 +240,30 @@ async function multipart<T>(path: string, data: FormData): Promise<T> {
     throw new Error(detail);
   }
   return res.json() as Promise<T>;
+}
+
+async function downloadWithAuth(url: string, fallbackName = 'download') {
+  const res = await fetch(`${API_BASE}${url}`, { headers: authHeaders(), credentials: 'include' });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const payload = await res.json();
+      detail = payload.detail || payload.error || detail;
+    } catch {}
+    throw new Error(detail);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  const name = decodeURIComponent(match?.[1] || fallbackName);
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = href;
+  anchor.download = name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(href);
 }
 
 export const api = {
@@ -268,6 +297,15 @@ export const api = {
     return request<{ user: CommercialUser }>('/api/auth/validate', {
       method: 'POST',
       body: JSON.stringify({ session_id, session_token })
+    });
+  },
+  async me() {
+    return request<{ user: CommercialUser; expires_at?: string }>('/api/auth/me');
+  },
+  async logout() {
+    return request<{ ok: boolean }>('/api/auth/logout', {
+      method: 'POST',
+      body: JSON.stringify({})
     });
   },
   async messages(user_id?: string) {
@@ -427,5 +465,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', job_id })
     });
+  },
+  async downloadAuthenticated(url: string, fallbackName?: string) {
+    return downloadWithAuth(url, fallbackName);
   }
 };

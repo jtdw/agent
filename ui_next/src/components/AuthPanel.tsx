@@ -5,9 +5,8 @@ import { api, CommercialUser, PaidPlan } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
 
-const SESSION_KEY = 'gis-agent-auth-session';
-
-type StoredSession = { session_id: string; session_token: string; user: CommercialUser; expires_at?: string };
+const USER_KEY = 'gis-agent-auth-user';
+const LEGACY_SESSION_KEY = 'gis-agent-auth-session';
 
 type PlanMeta = {
   key: 'basic' | 'pro' | 'team';
@@ -47,9 +46,9 @@ const PLAN_META: Record<'basic' | 'pro' | 'team', PlanMeta> = {
   }
 };
 
-export function readStoredSession(): StoredSession | null {
+export function readStoredUser(): CommercialUser | null {
   try {
-    const raw = localStorage.getItem(SESSION_KEY);
+    const raw = localStorage.getItem(USER_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
@@ -57,9 +56,7 @@ export function readStoredSession(): StoredSession | null {
 }
 
 function writeStoredUser(user: CommercialUser) {
-  const saved = readStoredSession();
-  if (!saved) return;
-  localStorage.setItem(SESSION_KEY, JSON.stringify({ ...saved, user }));
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 
 function normalizePlan(plan?: string): 'basic' | 'pro' | 'team' {
@@ -215,14 +212,18 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
   const [error, setError] = useState('');
 
   useEffect(() => {
-    const saved = readStoredSession();
-    if (!saved) return;
-    api.validate(saved.session_id, saved.session_token)
+    localStorage.removeItem(LEGACY_SESSION_KEY);
+    const saved = readStoredUser();
+    if (saved) setUser(saved);
+    api.me()
       .then((r) => {
         setUser(r.user);
         writeStoredUser(r.user);
       })
-      .catch(() => localStorage.removeItem(SESSION_KEY));
+      .catch(() => {
+        localStorage.removeItem(USER_KEY);
+        setUser(null);
+      });
   }, [setUser]);
 
   const submit = async () => {
@@ -230,7 +231,7 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
     setError('');
     try {
       const session = mode === 'login' ? await api.login(email, password) : await api.register(email, password);
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      writeStoredUser(session.user);
       setUser(session.user);
       setOpen(false);
     } catch (e) {
@@ -264,7 +265,7 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
               </div>
               <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{planHint}</div>
             </div>
-            <button className="glass-button px-2 py-1 text-xs" onClick={() => { localStorage.removeItem(SESSION_KEY); setUser(null); }}>退出</button>
+            <button className="glass-button px-2 py-1 text-xs" onClick={() => { api.logout().catch(() => undefined); localStorage.removeItem(USER_KEY); localStorage.removeItem(LEGACY_SESSION_KEY); setUser(null); }}>退出</button>
           </div>
         </GlassCard>
         <UpgradeModal user={user} open={upgradeOpen} onClose={() => setUpgradeOpen(false)} onUpgraded={setUser} />

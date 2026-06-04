@@ -4,8 +4,9 @@ import os
 import re
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlencode
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, EmailStr, Field
@@ -13,6 +14,7 @@ from pydantic import BaseModel, EmailStr, Field
 from core.config import Settings, load_settings
 from core.service import GISWorkspaceService
 from core.commercial.service import CommercialService, PLAN_PRESETS
+from core.api_security import require_admin_token, require_authenticated_user, require_resource_owner
 from core.api_utils import api_guard, resolve_child_path
 from core.local_library import LocalFileLibrary
 from core.station_data import find_station_archives, parse_ismn_station_zip
@@ -59,6 +61,9 @@ local_library = LocalFileLibrary(local_library_root)
 _workspace_services: dict[str, GISWorkspaceService] = {}
 MAX_UPLOAD_FILES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_FILES", "30") or 30)
 MAX_UPLOAD_BYTES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_MB", "300") or 300) * 1024 * 1024
+SESSION_COOKIE_ID = "gis_agent_session_id"
+SESSION_COOKIE_TOKEN = "gis_agent_session_token"
+SESSION_COOKIE_MAX_AGE = int(os.getenv("GIS_AGENT_SESSION_COOKIE_MAX_AGE", str(7 * 24 * 60 * 60)) or (7 * 24 * 60 * 60))
 
 
 def _bootstrap_platform_account_from_env() -> None:
@@ -111,6 +116,76 @@ def workspace_for(user_id: str | None = None) -> GISWorkspaceService:
         settings.ensure_dirs()
         _workspace_services[key] = GISWorkspaceService(settings=settings)
     return _workspace_services[key]
+
+
+def _request_session(request: Request) -> tuple[str, str]:
+    return (
+        str(request.headers.get("x-session-id") or request.cookies.get(SESSION_COOKIE_ID) or request.query_params.get("session_id") or "").strip(),
+        str(request.headers.get("x-session-token") or request.cookies.get(SESSION_COOKIE_TOKEN) or request.query_params.get("session_token") or "").strip(),
+    )
+
+
+def _request_admin_token(request: Request) -> str:
+    value = str(request.headers.get("x-admin-token") or "").strip()
+    if value:
+        return value
+    auth = str(request.headers.get("authorization") or "").strip()
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return str(request.query_params.get("admin_token") or "").strip()
+
+
+def _set_session_cookies(response: Response, session: dict) -> None:
+    secure = os.getenv("GIS_AGENT_COOKIE_SECURE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    response.set_cookie(
+        SESSION_COOKIE_ID,
+        str(session.get("session_id") or ""),
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        path="/",
+    )
+    response.set_cookie(
+        SESSION_COOKIE_TOKEN,
+        str(session.get("session_token") or ""),
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        path="/",
+    )
+
+
+def _clear_session_cookies(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE_ID, path="/")
+    response.delete_cookie(SESSION_COOKIE_TOKEN, path="/")
+
+
+def _require_request_user(request: Request, user_id: str) -> str:
+    session_id, session_token = _request_session(request)
+    return require_authenticated_user(
+        commercial_service,
+        requested_user_id=user_id,
+        session_id=session_id,
+        session_token=session_token,
+    )
+
+
+def _require_request_user_if_present(request: Request, user_id: str) -> str:
+    if not str(user_id or "").strip():
+        return ""
+    return _require_request_user(request, user_id)
+
+
+def _require_admin_or_mock_payment_user(request: Request, user_id: str) -> str:
+    admin_token = _request_admin_token(request)
+    if admin_token:
+        require_admin_token(os.getenv("GIS_AGENT_ADMIN_TOKEN", ""), admin_token)
+        return str(user_id or "").strip()
+    if os.getenv("GIS_AGENT_ENABLE_MOCK_PAYMENT", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        return _require_request_user(request, user_id)
+    raise PermissionError("模拟支付接口默认关闭。请设置 GIS_AGENT_ENABLE_MOCK_PAYMENT=1 并登录，或配置 GIS_AGENT_ADMIN_TOKEN 后用管理员令牌调用。")
 
 
 class AuthIn(BaseModel):
@@ -253,7 +328,7 @@ def _relative_artifact_url(service: GISWorkspaceService, file_path: str) -> str:
     user_key = _safe_key(str(workdir.name))
     # The path itself remains checked server-side by /api/files/artifact.
     rel_url_path = str(rel).replace("\\", "/")
-    return f"/api/files/artifact?user_id={user_key}&path={rel_url_path}"
+    return f"/api/files/artifact?{urlencode({'user_id': user_key, 'path': rel_url_path})}"
 
 
 def _decorate_dashboard(service: GISWorkspaceService) -> dict:
@@ -286,7 +361,7 @@ def _decorate_dashboard(service: GISWorkspaceService) -> dict:
     return data
 
 
-def _relative_shared_download_url(file_path: str) -> str:
+def _relative_shared_download_url(file_path: str, user_id: str = "", job_id: str = "") -> str:
     path = Path(file_path or "").resolve()
     if not path.exists() or not path.is_file():
         return ""
@@ -296,7 +371,7 @@ def _relative_shared_download_url(file_path: str) -> str:
     except Exception:
         return ""
     rel_url_path = str(rel).replace("\\", "/")
-    return f"/api/downloads/artifact?path={rel_url_path}"
+    return f"/api/downloads/artifact?{urlencode({'user_id': _safe_key(user_id), 'job_id': job_id, 'path': rel_url_path})}"
 
 
 def _gscloud_product_key_from_resource(value: str) -> str:
@@ -471,19 +546,19 @@ def tianditu_config():
 
 
 @app.get("/api/map/stations")
-def map_stations(user_id: str = Query(default="")):
-    return guard(lambda: _load_station_collection(user_id))
+def map_stations(request: Request, user_id: str = Query(default="")):
+    return guard(lambda: _load_station_collection(_require_request_user_if_present(request, user_id)))
 
 
 @app.get("/api/map/layers")
-def map_layers(user_id: str = Query(default="")):
-    return guard(lambda: _workspace_map_layers(workspace_for(user_id)))
+def map_layers(request: Request, user_id: str = Query(default="")):
+    return guard(lambda: _workspace_map_layers(workspace_for(_require_request_user_if_present(request, user_id))))
 
 
 @app.get("/api/map/raster-preview")
-def map_raster_preview(user_id: str = Query(default=""), dataset_name: str = Query(...)):
+def map_raster_preview(request: Request, user_id: str = Query(default=""), dataset_name: str = Query(...)):
     def run():
-        service = workspace_for(user_id)
+        service = workspace_for(_require_request_user_if_present(request, user_id))
         target = _raster_preview_path(service, dataset_name)
         if not target.exists():
             _ensure_raster_preview(service, dataset_name)
@@ -494,15 +569,22 @@ def map_raster_preview(user_id: str = Query(default=""), dataset_name: str = Que
     return guard(run)
 
 @app.post("/api/auth/login")
-def login(body: AuthIn):
-    return guard(lambda: commercial_service.authenticate_user(str(body.email), body.password))
+def login(body: AuthIn, response: Response):
+    def run():
+        session = commercial_service.authenticate_user(str(body.email), body.password)
+        _set_session_cookies(response, session)
+        return {"user": session["user"], "expires_at": session.get("expires_at")}
+
+    return guard(run)
 
 
 @app.post("/api/auth/register")
-def register(body: AuthIn):
+def register(body: AuthIn, response: Response):
     def run():
         commercial_service.register_user(str(body.email), body.password, plan="basic")
-        return commercial_service.authenticate_user(str(body.email), body.password)
+        session = commercial_service.authenticate_user(str(body.email), body.password)
+        _set_session_cookies(response, session)
+        return {"user": session["user"], "expires_at": session.get("expires_at")}
 
     return guard(run)
 
@@ -512,15 +594,30 @@ def validate(body: ValidateIn):
     return guard(lambda: commercial_service.validate_session(body.session_id, body.session_token))
 
 
+@app.get("/api/auth/me")
+def me(request: Request):
+    def run():
+        session_id, session_token = _request_session(request)
+        return commercial_service.validate_session(session_id, session_token)
+
+    return guard(run)
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response):
+    _clear_session_cookies(response)
+    return {"ok": True}
+
+
 @app.get("/api/chat/messages")
-def messages(user_id: str = Query(default="")):
-    return guard(lambda: {"messages": workspace_for(user_id).current_messages()})
+def messages(request: Request, user_id: str = Query(default="")):
+    return guard(lambda: {"messages": workspace_for(_require_request_user_if_present(request, user_id)).current_messages()})
 
 
 @app.get("/api/chat/sessions")
-def chat_sessions(user_id: str = Query(default="")):
+def chat_sessions(request: Request, user_id: str = Query(default="")):
     def run():
-        service = workspace_for(user_id)
+        service = workspace_for(_require_request_user_if_present(request, user_id))
         return {
             "sessions": service.list_sessions(),
             "current_session_id": service.current_session_id,
@@ -531,9 +628,9 @@ def chat_sessions(user_id: str = Query(default="")):
 
 
 @app.post("/api/chat/sessions")
-def create_chat_session(body: ChatSessionIn):
+def create_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
         session_id = service.create_new_session(body.title or None)
         return {
             "session_id": session_id,
@@ -546,9 +643,9 @@ def create_chat_session(body: ChatSessionIn):
 
 
 @app.post("/api/chat/sessions/switch")
-def switch_chat_session(body: ChatSessionIn):
+def switch_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
         service.switch_session(body.session_id)
         return {
             "sessions": service.list_sessions(),
@@ -560,9 +657,9 @@ def switch_chat_session(body: ChatSessionIn):
 
 
 @app.post("/api/chat/sessions/rename")
-def rename_chat_session(body: ChatSessionIn):
+def rename_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
         service.rename_session(body.session_id, body.title)
         return {"sessions": service.list_sessions(), "current_session_id": service.current_session_id}
 
@@ -570,9 +667,9 @@ def rename_chat_session(body: ChatSessionIn):
 
 
 @app.post("/api/chat/sessions/delete")
-def delete_chat_session(body: ChatSessionIn):
+def delete_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
         current = service.delete_session(body.session_id)
         return {
             "current_session_id": current,
@@ -584,9 +681,9 @@ def delete_chat_session(body: ChatSessionIn):
 
 
 @app.post("/api/chat/retry")
-def retry_chat_message(body: ChatRetryIn):
+def retry_chat_message(body: ChatRetryIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
         if body.session_id:
             service.switch_session(body.session_id)
         result = service.edit_user_message_and_retry(body.message_id, body.content)
@@ -1511,12 +1608,12 @@ def _is_commercial_download_status_prompt(prompt: str) -> bool:
     return bool(re.search(r"\bjob_[A-Za-z0-9_\-]+\b", text)) and any(word in text for word in ("查看", "查询", "状态", "进度"))
 
 
-def _format_commercial_download_status(prompt: str) -> dict:
+def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
     match = re.search(r"\b(job_[A-Za-z0-9_\-]+)\b", str(prompt or ""))
     if not match:
         raise ValueError("请提供商业下载任务编号，例如 job_xxxxxxxxxxxx。")
     job_id = match.group(1)
-    job = commercial_service.get_job(job_id)
+    job = require_resource_owner(commercial_service.get_job(job_id), user_id=user_id, resource_name="download job")
     status = str(job.get("status") or "")
     stage = str(job.get("stage") or "")
     progress = job.get("progress", 0)
@@ -1602,13 +1699,14 @@ def _format_commercial_download_status(prompt: str) -> dict:
 
 
 @app.post("/api/chat/ask")
-def ask(body: AskIn):
+def ask(body: AskIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        user_id = _require_request_user_if_present(request, body.user_id)
+        service = workspace_for(user_id)
         if body.session_id:
             service.switch_session(body.session_id)
         if _is_commercial_download_status_prompt(body.prompt):
-            result = _format_commercial_download_status(body.prompt)
+            result = _format_commercial_download_status(body.prompt, user_id)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1651,7 +1749,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if intent_route.kind == "matched":
-            result = _submit_gscloud_intent_route_from_chat(body.user_id, body.prompt, intent_route)
+            result = _submit_gscloud_intent_route_from_chat(user_id, body.prompt, intent_route)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1675,7 +1773,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_modl1d_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_modl1d_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_modl1d_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1692,7 +1790,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_modnd1d_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_modnd1d_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_modnd1d_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1709,7 +1807,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_modev1f_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_modev1f_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_modev1f_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1726,7 +1824,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_mod021km_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_mod021km_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_mod021km_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1743,7 +1841,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_sentinel2_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_sentinel2_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_sentinel2_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1760,7 +1858,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_landsat_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_landsat8_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_landsat8_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1777,7 +1875,7 @@ def ask(body: AskIn):
                 pass
             return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
         if _is_gscloud_dem_download_prompt(body.prompt):
-            result = _submit_direct_gscloud_dem_from_chat(body.user_id, body.prompt)
+            result = _submit_direct_gscloud_dem_from_chat(user_id, body.prompt)
             try:
                 if not service.current_session_id:
                     service.current_session_id = service._ensure_session()
@@ -1798,7 +1896,7 @@ def ask(body: AskIn):
 
 
 @app.post("/api/files/upload")
-async def upload_files(user_id: str = Form(default=""), files: list[UploadFile] = File(...)):
+async def upload_files(request: Request, user_id: str = Form(default=""), files: list[UploadFile] = File(...)):
     async def read_all() -> list[tuple[str, bytes]]:
         if len(files) > MAX_UPLOAD_FILES:
             raise ValueError(f"单次最多上传 {MAX_UPLOAD_FILES} 个文件。")
@@ -1817,9 +1915,10 @@ async def upload_files(user_id: str = Form(default=""), files: list[UploadFile] 
     payload = await read_all()
     if not payload:
         raise HTTPException(status_code=400, detail="没有读取到有效上传文件。")
+    authorized_user_id = _require_request_user(request, user_id)
 
     def run():
-        service = workspace_for(user_id)
+        service = workspace_for(authorized_user_id)
         messages = service.upload_bytes_batch(payload)
         return {"ok": True, "count": len(payload), "messages": messages, "dashboard": _decorate_dashboard(service)}
 
@@ -1843,11 +1942,12 @@ def rescan_local_library():
 
 
 @app.post("/api/local-library/import")
-def import_local_library(body: LocalLibraryImportIn):
+def import_local_library(body: LocalLibraryImportIn, request: Request):
     def run():
+        user_id = _require_request_user(request, body.user_id)
         if not body.item_ids:
             raise ValueError("请选择至少一个本地文件库条目。")
-        service = workspace_for(body.user_id)
+        service = workspace_for(user_id)
         messages: list[str] = []
         for item in local_library.resolve_paths(body.item_ids):
             messages.append(service.import_local_library_item(item))
@@ -1857,9 +1957,10 @@ def import_local_library(body: LocalLibraryImportIn):
 
 
 @app.get("/api/workspace/dashboard")
-def dashboard(user_id: str = Query(default="")):
+def dashboard(request: Request, user_id: str = Query(default="")):
     def run():
-        data = _decorate_dashboard(workspace_for(user_id))
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        data = _decorate_dashboard(workspace_for(authorized_user_id))
         data["local_library"] = local_library.list_items()
         return data
 
@@ -1867,9 +1968,10 @@ def dashboard(user_id: str = Query(default="")):
 
 
 @app.post("/api/workspace/export")
-def export_workspace(body: ExportIn):
+def export_workspace(body: ExportIn, request: Request):
     def run():
-        service = workspace_for(body.user_id)
+        user_id = _require_request_user(request, body.user_id)
+        service = workspace_for(user_id)
         result = service.export_results(mode=body.mode)
         result["download_url"] = _relative_artifact_url(service, result["zip_path"])
         return result
@@ -1878,9 +1980,10 @@ def export_workspace(body: ExportIn):
 
 
 @app.get("/api/files/artifact")
-def artifact(user_id: str = Query(default=""), path: str = Query(...)):
+def artifact(request: Request, user_id: str = Query(default=""), path: str = Query(...)):
     def run():
-        service = workspace_for(user_id)
+        authorized_user_id = _require_request_user(request, user_id)
+        service = workspace_for(authorized_user_id)
         target = resolve_child_path(service.manager.workdir, path)
         return FileResponse(str(target), filename=target.name)
 
@@ -1888,12 +1991,13 @@ def artifact(user_id: str = Query(default=""), path: str = Query(...)):
 
 
 @app.post("/api/payments/simulate")
-def simulate_payment(body: PaymentIn):
+def simulate_payment(body: PaymentIn, request: Request):
     def run():
+        user_id = _require_admin_or_mock_payment_user(request, body.user_id)
         preset = PLAN_PRESETS.get(body.plan, PLAN_PRESETS["pro"])
         amount = int(preset.get("price_cents", 2000)) if "price_cents" in preset else {"basic": 900, "pro": 2000, "team": 5900}.get(body.plan, 2000)
         return commercial_service.simulate_payment(
-            user_id=body.user_id,
+            user_id=user_id,
             plan=body.plan,
             amount_cents=amount,
             platform_quota=int(preset.get("platform_monthly_quota", 30)),
@@ -1905,9 +2009,12 @@ def simulate_payment(body: PaymentIn):
 
 
 @app.post("/api/downloads/submit")
-def submit_download(body: DownloadIn):
+def submit_download(body: DownloadIn, request: Request):
     def run():
-        job = commercial_service.submit_job(**body.model_dump())
+        user_id = _require_request_user(request, body.user_id)
+        payload = body.model_dump()
+        payload["user_id"] = user_id
+        job = commercial_service.submit_job(**payload)
         auto = _maybe_start_gscloud_auto_download(job, region=body.region)
         return {"job": commercial_service.get_job(job["job_id"]), **auto}
 
@@ -1915,8 +2022,9 @@ def submit_download(body: DownloadIn):
 
 
 @app.post("/api/downloads/preflight")
-def preflight_download(body: DownloadPreflightIn):
+def preflight_download(body: DownloadPreflightIn, request: Request):
     def run():
+        _require_request_user(request, body.user_id)
         if str(body.source_key or "").lower() != "gscloud":
             raise ValueError("当前预检接口仅支持 GSCloud 场景表产品。")
         product_key = _gscloud_product_key_from_resource(body.product_key or body.resource_type)
@@ -1963,9 +2071,10 @@ def preflight_download(body: DownloadPreflightIn):
 
 
 @app.get("/api/downloads/jobs")
-def list_jobs(user_id: str = ""):
+def list_jobs(request: Request, user_id: str = ""):
     def run():
-        jobs = commercial_service.list_jobs(user_id=user_id)
+        authorized_user_id = _require_request_user(request, user_id)
+        jobs = commercial_service.list_jobs(user_id=authorized_user_id)
         scene_by_job: dict[str, dict] = {}
         if list_gscloud_scene_jobs is not None:
             for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100):
@@ -1992,7 +2101,7 @@ def list_jobs(user_id: str = ""):
                         if scene.get(key) is not None:
                             job[key] = scene.get(key)
                 for target in (job.get("zip_path"), job.get("output_path")):
-                    url = _relative_shared_download_url(str(target or ""))
+                    url = _relative_shared_download_url(str(target or ""), user_id=authorized_user_id, job_id=str(job.get("job_id") or ""))
                     if url:
                         job["download_url"] = url
                         break
@@ -2001,40 +2110,48 @@ def list_jobs(user_id: str = ""):
 
 
 @app.post("/api/downloads/jobs/delete")
-def delete_download_job(body: DownloadDeleteIn):
+def delete_download_job(body: DownloadDeleteIn, request: Request):
     def run():
-        result = commercial_service.delete_job(body.job_id, user_id=body.user_id)
-        jobs = commercial_service.list_jobs(user_id=body.user_id)
+        user_id = _require_request_user(request, body.user_id)
+        result = commercial_service.delete_job(body.job_id, user_id=user_id)
+        jobs = commercial_service.list_jobs(user_id=user_id)
         return {**result, "jobs": jobs}
 
     return guard(run)
 
 
 @app.post("/api/downloads/jobs/cancel")
-def cancel_download_job(body: DownloadActionIn):
+def cancel_download_job(body: DownloadActionIn, request: Request):
     def run():
-        result = commercial_service.cancel_job(body.job_id, user_id=body.user_id, reason=body.reason)
-        jobs = commercial_service.list_jobs(user_id=body.user_id)
+        user_id = _require_request_user(request, body.user_id)
+        result = commercial_service.cancel_job(body.job_id, user_id=user_id, reason=body.reason)
+        jobs = commercial_service.list_jobs(user_id=user_id)
         return {**result, "jobs": jobs}
 
     return guard(run)
 
 
 @app.post("/api/downloads/jobs/retry")
-def retry_download_job(body: DownloadActionIn):
+def retry_download_job(body: DownloadActionIn, request: Request):
     def run():
-        retry = commercial_service.retry_job(body.job_id, user_id=body.user_id)
+        user_id = _require_request_user(request, body.user_id)
+        retry = commercial_service.retry_job(body.job_id, user_id=user_id)
         auto = _maybe_start_gscloud_auto_download(retry, region=str(retry.get("region") or ""))
-        jobs = commercial_service.list_jobs(user_id=body.user_id)
+        jobs = commercial_service.list_jobs(user_id=user_id)
         return {"job": commercial_service.get_job(retry["job_id"]), **auto, "jobs": jobs}
 
     return guard(run)
 
 
 @app.get("/api/downloads/artifact")
-def download_job_artifact(path: str = Query(...)):
+def download_job_artifact(request: Request, user_id: str = Query(...), job_id: str = Query(...), path: str = Query(...)):
     def run():
+        authorized_user_id = _require_request_user(request, user_id)
+        job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
         target = resolve_child_path(base_settings.workdir, path)
+        allowed = {str(job.get("zip_path") or ""), str(job.get("output_path") or "")}
+        if str(target.resolve()) not in {str(Path(item).resolve()) for item in allowed if item}:
+            raise PermissionError("下载路径不属于该任务。")
         return FileResponse(str(target), filename=target.name)
     return guard(run)
 
@@ -2053,10 +2170,11 @@ SHANDIAN_WORKFLOW_PROMPT = """
 
 
 @app.post("/api/workflows/shandian-soil-moisture")
-def shandian_soil_moisture_workflow(body: WorkflowIn):
+def shandian_soil_moisture_workflow(body: WorkflowIn, request: Request):
     def run():
+        user_id = _require_request_user_if_present(request, body.user_id)
         if body.run_now:
-            return workspace_for(body.user_id).ask(SHANDIAN_WORKFLOW_PROMPT)
+            return workspace_for(user_id).ask(SHANDIAN_WORKFLOW_PROMPT)
         return {"prompt": SHANDIAN_WORKFLOW_PROMPT}
 
     return guard(run)

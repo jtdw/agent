@@ -40,6 +40,10 @@ Copy-Item .env.example .env
 Important values:
 
 - `APP_SECRET_KEY`: required for encrypting saved credentials. Generate one with the commercial tool or a Fernet key.
+- `GIS_AGENT_ENV=production`: disables implicit workspace secret creation unless `GIS_AGENT_ALLOW_WORKSPACE_SECRET_FILE=1` is explicitly set.
+- `GIS_AGENT_ADMIN_TOKEN`: optional admin token for protected administrative/debug actions. Set it outside Git in production.
+- `GIS_AGENT_ENABLE_MOCK_PAYMENT`: keep `0` by default. Set `1` only for local demos where logged-in users may trigger simulated payments.
+- `GIS_AGENT_COOKIE_SECURE=1`: use when serving the API over HTTPS so browser session cookies are marked secure.
 - `GSCLOUD_PLATFORM_USERNAME` / `GSCLOUD_PLATFORM_PASSWORD`: optional backend platform account bootstrap.
 - `GSCLOUD_PLATFORM_STORAGE_STATE`: optional path to a Playwright `storage_state.json`.
 - `TIANDITU_TOKEN`: optional Tianditu basemap token.
@@ -113,4 +117,3 @@ The repository intentionally ignores:
 - Playwright `storage_state` / cookie JSON
 - frontend `node_modules/` and `dist/`
 - Python and TypeScript caches
-

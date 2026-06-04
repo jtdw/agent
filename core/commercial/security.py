@@ -42,6 +42,13 @@ class SecretBox:
         self.key_source = "env"
         raw = os.getenv("APP_SECRET_KEY", "").strip()
         if not raw:
+            env_name = os.getenv("GIS_AGENT_ENV", os.getenv("ENV", "development")).strip().lower()
+            allow_workspace_key = os.getenv(
+                "GIS_AGENT_ALLOW_WORKSPACE_SECRET_FILE",
+                "0" if env_name in {"prod", "production"} else "1",
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if not allow_workspace_key:
+                raise ValueError("APP_SECRET_KEY is required when workspace secret files are disabled.")
             key_file = self.workdir / "commercial_secret.key"
             if key_file.exists():
                 raw = key_file.read_text(encoding="utf-8").strip()

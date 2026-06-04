@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import ipaddress
+import socket
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import requests
@@ -35,7 +38,37 @@ def _guess_direct_resource_type(text: str) -> str:
     return "other"
 
 
+def validate_public_http_url(url: str) -> str:
+    text = str(url or "").strip()
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("请提供有效的 http/https 下载链接。")
+    host = parsed.hostname.strip().lower()
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
+        raise ValueError("不允许下载 localhost 地址。")
+    try:
+        addresses = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        except socket.gaierror as exc:
+            raise ValueError(f"无法解析下载域名: {host}") from exc
+        addresses = []
+        for info in infos:
+            try:
+                addresses.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                continue
+    if not addresses:
+        raise ValueError(f"无法解析下载域名: {host}")
+    for address in addresses:
+        if address.is_private or address.is_loopback or address.is_link_local or address.is_reserved or address.is_multicast or address.is_unspecified:
+            raise ValueError("不允许下载内网、回环、链路本地或保留地址。")
+    return text
+
+
 def _download_binary(url: str, target_path: Path, timeout: int = 120) -> None:
+    url = validate_public_http_url(url)
     max_bytes = int(os.getenv("GIS_AGENT_MAX_DIRECT_DOWNLOAD_MB", "1000") or 1000) * 1024 * 1024
     target_path.parent.mkdir(parents=True, exist_ok=True)
     with requests.get(url, stream=True, timeout=timeout) as r:
