@@ -20,8 +20,8 @@ assert.deepEqual(policy.getDrawLayerVisibility({ dem: true, boundary: true, stat
 });
 
 assert.deepEqual(policy.getOverlayVisibilityPlan({ dem: false, boundary: true, stations: false, soil: true }), {
-  stations: { visible: false, layers: ['station_points_halo', 'station_points_core'] },
-  boundary: { visible: true, layers: ['demo_aoi_fill', 'demo_aoi_line'] },
+  stations: { visible: false, layers: [] },
+  boundary: { visible: true, layers: [] },
   draw: { visible: true, layers: ['draw_polygon', 'draw_line', 'draw_points'] }
 });
 

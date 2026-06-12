@@ -76,6 +76,68 @@ Run the local environment check before debugging download issues:
 
 The doctor checks the project `.venv`, key Python packages, `.env`, backend reachability, frontend dependencies, and GSCloud `storage_state` presence.
 
+## LLM Configuration And Deployment Check
+
+The backend supports OpenAI-compatible providers through one unified LLM configuration layer. Existing `ZAI_*` variables still work.
+
+Common local settings:
+
+```env
+LLM_PROVIDER=zai
+LLM_MODEL=glm-4.5-air
+LLM_API_KEY_ENV=ZAI_API_KEY
+LLM_BASE_URL=https://api.z.ai/api/paas/v4/
+LLM_TIMEOUT=60
+LLM_MAX_RETRIES=2
+ENABLE_LLM_INTENT_CLASSIFIER=0
+FALLBACK_TO_RULE_CLASSIFIER=1
+ZAI_API_KEY=
+```
+
+For OpenAI-compatible deployments, use:
+
+```env
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o-mini
+LLM_API_KEY_ENV=OPENAI_API_KEY
+OPENAI_API_KEY=
+```
+
+Check config without making a network request:
+
+```powershell
+python scripts\check_llm_health.py
+```
+
+Check the real provider during deployment:
+
+```powershell
+python scripts\check_llm_health.py --network
+```
+
+Use strict mode in deployment gates when degraded rule-only fallback should fail the release:
+
+```powershell
+python scripts\check_llm_health.py --strict
+python scripts\check_llm_health.py --network --strict
+```
+
+The API also exposes:
+
+```text
+GET /api/llm/health?network=false
+GET /api/llm/health?network=true
+```
+
+If no API key is configured and `FALLBACK_TO_RULE_CLASSIFIER=1`, the semantic intent classifier falls back to deterministic rules and the health result is `degraded` instead of crashing. The default CLI exits successfully for `ok` and `degraded` so local rule-only development can continue; `--strict` exits non-zero unless the provider is fully `ok`. Requests that require the main LLM agent still need a valid provider key. Health errors report the missing env var name, never the secret value.
+
+Common fixes:
+
+- `UNSUPPORTED_PROVIDER`: set `LLM_PROVIDER` to `zai`, `openai`, or `fake`.
+- `MODEL_REQUIRED`: set `LLM_MODEL` or the legacy provider model variable.
+- `API_KEY_MISSING`: set the env var named by `LLM_API_KEY_ENV`, such as `ZAI_API_KEY` or `OPENAI_API_KEY`.
+- `BASE_URL_INVALID`: use an `http://` or `https://` provider endpoint.
+
 ## GSCloud Login State
 
 GSCloud automation needs a valid Playwright storage state. For platform accounts, use the login workflow in the app or set `GSCLOUD_PLATFORM_STORAGE_STATE` to a local JSON file.
@@ -87,6 +149,14 @@ python scripts\verify_gscloud_scene_download.py --product-key landsat8_oli_tirs 
 ```
 
 Add `--execute-download` only when you intentionally want to download a file.
+
+## Shapefile Export Notes
+
+Vector exports requested as `.shp` are delivered as a `.zip` package. A Shapefile is a multi-file format, so the package keeps `.shp`, `.shx`, `.dbf`, `.prj` when CRS is available, `.cpg`, and any other writer sidecar files together.
+
+The export tool writes UTF-8 and includes a `.cpg` file. ESRI Shapefile/DBF still limits field names to 10 characters, so long columns such as `population_density` may be truncated by the GIS writer. The structured `ToolResult.warnings` field reports this with `SHAPEFILE_FIELD_NAME_TRUNCATION`; use GeoJSON when full field names must be preserved.
+
+Export paths are restricted to the workspace. The API rejects output paths that escape the workspace and Shapefile zip members are written with local filenames only, avoiding archive path traversal.
 
 ## Tests
 
@@ -100,12 +170,24 @@ Frontend:
 
 ```powershell
 cd ui_next
+npm test
 npm run build
+```
+
+Run a focused frontend test when debugging one area:
+
+```powershell
+npm run test:analysis-model-results
+npm run test:analysis-panel
+npm run test:chat-message-content
+npm run test:chat-panel-experience
+npm run test:chat-persistence
 npm run test:layer-policy
 npm run test:local-library
 npm run test:map-upgrades
+npm run test:product-console
 npm run test:research-workflow
-npm run test:analysis-panel
+npm run test:task-outcome-experience
 ```
 
 Smoke test with both servers running:

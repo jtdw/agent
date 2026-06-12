@@ -4,7 +4,8 @@ import { Database, MessageCircle, PanelRightOpen, Sparkles } from 'lucide-react'
 import { MapControls } from './components/MapControls';
 import { SplashScreen } from './components/SplashScreen';
 import { useTheme } from './hooks/useTheme';
-import type { CommercialUser } from './lib/api';
+import type { CommercialUser, ResultPanel } from './lib/api';
+import { mergeChatContext, type ChatContextPayload } from './lib/chatContext';
 import type { MapCommand, MapCommandType } from './components/mapCommands';
 import type { LayerOpacity } from './components/mapLayerPolicy';
 import type { ParsedMapTextCommand } from './components/mapTextCommands';
@@ -15,6 +16,7 @@ const ChatPanel = lazy(() => import('./components/ChatPanel').then((m) => ({ def
 const LayerPanel = lazy(() => import('./components/LayerPanel').then((m) => ({ default: m.LayerPanel })));
 const SettingsPanel = lazy(() => import('./components/SettingsPanel').then((m) => ({ default: m.SettingsPanel })));
 const AnalysisPanel = lazy(() => import('./components/AnalysisPanel').then((m) => ({ default: m.AnalysisPanel })));
+const ProductConsole = lazy(() => import('./components/ProductConsole').then((m) => ({ default: m.ProductConsole })));
 
 function MapFallback() {
   return (
@@ -44,13 +46,17 @@ export default function App() {
   const [splash, setSplash] = useState(true);
   const [user, setUser] = useState<CommercialUser | null>(null);
   const [basemap, setBasemap] = useState<'standard' | 'satellite' | 'terrain' | 'dark'>('standard');
-  const [chatOpen, setChatOpen] = useState(true);
-  const [toolsOpen, setToolsOpen] = useState(true);
+  const [consoleOpen, setConsoleOpen] = useState(true);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
   const [layerVisibility, setLayerVisibility] = useState({ dem: true, boundary: true, stations: true, soil: true });
   const [layerOpacity, setLayerOpacity] = useState<LayerOpacity>({ dem: 1, boundary: 1, stations: 1, soil: 1, draw: 1 });
   const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
   const [externalPrompt, setExternalPrompt] = useState<{ id: number; prompt: string } | null>(null);
+  const [latestResultPanel, setLatestResultPanel] = useState<ResultPanel | null>(null);
+  const [chatContext, setChatContext] = useState<ChatContextPayload>({});
+  const updateChatContext = (patch: Partial<ChatContextPayload>) => setChatContext((current) => mergeChatContext(current, patch));
 
   const dispatchMapCommand = (type: MapCommandType) => {
     setMapCommand({ type, id: Date.now() });
@@ -98,11 +104,11 @@ export default function App() {
     <div className="relative isolate h-screen w-screen overflow-hidden text-slate-950 transition-colors duration-500 dark:text-slate-50">
       <SplashScreen visible={splash} />
       <Suspense fallback={<MapFallback />}>
-        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} mapCommand={mapCommand} />
+        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} mapCommand={mapCommand} onChatContextChange={updateChatContext} />
       </Suspense>
       <Suspense fallback={chatOpen ? <PanelFallback side="left" /> : null}>
         <AnimatePresence>
-          {chatOpen && <ChatPanel user={user} setUser={setUser} onClose={() => setChatOpen(false)} onMapTextCommand={handleTextMapCommand} externalPrompt={externalPrompt} />}
+          {chatOpen && <ChatPanel user={user} setUser={setUser} onClose={() => setChatOpen(false)} onMapTextCommand={handleTextMapCommand} externalPrompt={externalPrompt} onResultPanel={setLatestResultPanel} chatContext={chatContext} />}
         </AnimatePresence>
       </Suspense>
       <Suspense fallback={toolsOpen ? <PanelFallback side="right" /> : null}>
@@ -114,9 +120,7 @@ export default function App() {
               setBasemap={setBasemap}
               onClose={() => setToolsOpen(false)}
               layerVisibility={layerVisibility}
-              layerOpacity={layerOpacity}
               onLayerToggle={(id) => setLayerVisibility((v) => ({ ...v, [id]: !v[id as keyof typeof v] }))}
-              onLayerOpacityChange={(id, value) => setLayerOpacity((v) => ({ ...v, [id]: value }))}
               onLayerLocate={() => dispatchMapCommand('locate')}
               onRunWorkflowAction={runWorkflowAction}
             />
@@ -124,34 +128,65 @@ export default function App() {
         </AnimatePresence>
       </Suspense>
       <Suspense fallback={null}>
-        <SettingsPanel />
-        <AnalysisPanel userId={user?.user_id || ''} />
+        {!consoleOpen && (
+          <>
+            <SettingsPanel />
+            <AnalysisPanel userId={user?.user_id || ''} resultPanel={latestResultPanel} onChatContextChange={updateChatContext} />
+          </>
+        )}
       </Suspense>
-      <MapControls theme={theme} toggleTheme={toggle} drawMode={drawMode} toggleDrawMode={() => setDrawMode((v) => !v)} onMapCommand={dispatchMapCommand} />
+      <Suspense fallback={null}>
+        {consoleOpen && (
+          <ProductConsole
+            user={user}
+            setUser={setUser}
+            resultPanel={latestResultPanel}
+            onOpenChat={() => setChatOpen(true)}
+            onOpenMap={() => {
+              setConsoleOpen(false);
+              setChatOpen(true);
+              setToolsOpen(true);
+            }}
+          />
+        )}
+      </Suspense>
+      {!consoleOpen && <MapControls theme={theme} toggleTheme={toggle} drawMode={drawMode} toggleDrawMode={() => setDrawMode((v) => !v)} onMapCommand={dispatchMapCommand} />}
 
-      <motion.div
-        initial={{ opacity: 0, y: 18 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="no-drag fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-[24px] border border-white/50 bg-white/70 p-2 shadow-glass backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/65"
-      >
-        <div className="hidden items-center gap-2 px-2 text-xs font-black text-slate-500 dark:text-slate-300 sm:flex">
-          <Sparkles size={14} strokeWidth={1.7} /> 工作台
-        </div>
-        <button
-          onClick={() => setChatOpen((v) => !v)}
-          className={`floating-dock-button ${chatOpen ? 'is-active' : ''}`}
-          title={chatOpen ? '隐藏智能助手' : '显示智能助手'}
+      {!consoleOpen && (
+        <motion.div
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="no-drag fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-[24px] border border-white/50 bg-white/70 p-2 shadow-glass backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/65"
         >
-          <MessageCircle size={19} strokeWidth={1.7} />
-        </button>
-        <button
-          onClick={() => setToolsOpen((v) => !v)}
-          className={`floating-dock-button ${toolsOpen ? 'is-active' : ''}`}
-          title={toolsOpen ? '隐藏数据与工具' : '显示数据与工具'}
-        >
-          <Database size={18} strokeWidth={1.7} />
-        </button>
-        {!chatOpen && !toolsOpen && (
+          <div className="hidden items-center gap-2 px-2 text-xs font-black text-slate-500 dark:text-slate-300 sm:flex">
+            <Sparkles size={14} strokeWidth={1.7} /> 工作台
+          </div>
+          <button
+            onClick={() => {
+              setConsoleOpen(true);
+              setChatOpen(false);
+              setToolsOpen(false);
+            }}
+            className="floating-dock-button"
+            title="打开控制台"
+          >
+            <PanelRightOpen size={18} strokeWidth={1.7} />
+          </button>
+          <button
+            onClick={() => setChatOpen((v) => !v)}
+            className={`floating-dock-button ${chatOpen ? 'is-active' : ''}`}
+            title={chatOpen ? '隐藏智能助手' : '显示智能助手'}
+          >
+            <MessageCircle size={19} strokeWidth={1.7} />
+          </button>
+          <button
+            onClick={() => setToolsOpen((v) => !v)}
+            className={`floating-dock-button ${toolsOpen ? 'is-active' : ''}`}
+            title={toolsOpen ? '隐藏数据与工具' : '显示数据与工具'}
+          >
+            <Database size={18} strokeWidth={1.7} />
+          </button>
+          {!chatOpen && !toolsOpen && (
           <button
             onClick={() => {
               setChatOpen(true);
@@ -162,8 +197,9 @@ export default function App() {
           >
             <PanelRightOpen size={18} strokeWidth={1.7} />
           </button>
-        )}
-      </motion.div>
+          )}
+        </motion.div>
+      )}
     </div>
   );
 }

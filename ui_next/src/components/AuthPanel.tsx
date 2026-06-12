@@ -4,6 +4,7 @@ import { Check, Crown, LockKeyhole, LogIn, Mail, Rocket, ShieldCheck, Sparkles, 
 import { api, CommercialUser, PaidPlan } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
+import { ModalPortal } from './ModalPortal';
 
 const USER_KEY = 'gis-agent-auth-user';
 const LEGACY_SESSION_KEY = 'gis-agent-auth-session';
@@ -117,15 +118,16 @@ function UpgradeModal({ user, open, onClose, onUpgraded }: { user: CommercialUse
   };
 
   return (
-    <AnimatePresence>
-      {open && (
-        <motion.div className="fixed inset-0 z-[95] grid place-items-center bg-slate-950/25 p-4 backdrop-blur-md dark:bg-black/55" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+    <ModalPortal>
+      <AnimatePresence>
+        {open && (
+          <motion.div className="fixed inset-0 z-[95] grid place-items-center overflow-y-auto bg-slate-950/25 p-3 backdrop-blur-md dark:bg-black/55 sm:p-6" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
           <motion.div
             initial={{ opacity: 0, scale: 0.95, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.96, y: 8 }}
             transition={{ type: 'spring', stiffness: 360, damping: 32 }}
-            className="glass-panel w-full max-w-3xl overflow-hidden rounded-[30px] p-0"
+            className="glass-panel flex max-h-[calc(100dvh-1.5rem)] w-full max-w-3xl flex-col overflow-hidden rounded-[24px] p-0 sm:max-h-[calc(100dvh-3rem)] sm:rounded-[30px]"
           >
             <div className="relative border-b border-white/30 px-6 py-5 dark:border-white/10">
               <button onClick={onClose} className="glass-button absolute right-4 top-4 h-9 w-9 rounded-2xl p-0"><X size={16} strokeWidth={1.6} /></button>
@@ -140,65 +142,68 @@ function UpgradeModal({ user, open, onClose, onUpgraded }: { user: CommercialUse
               </div>
             </div>
 
-            <div className="grid gap-4 p-5 md:grid-cols-2">
-              {(['pro', 'team'] as const).map((plan) => {
-                const item = PLAN_META[plan];
-                const isCurrent = currentPlan === plan;
-                return (
-                  <motion.div
-                    key={plan}
-                    whileHover={{ y: -3, scale: 1.01 }}
-                    className={cn(
-                      'relative overflow-hidden rounded-[26px] border p-5 transition',
-                      item.popular ? 'border-cyan-glow/45 bg-cyan-glow/10 shadow-glow' : 'border-white/40 bg-white/35 dark:border-white/10 dark:bg-white/5'
-                    )}
-                  >
-                    {item.popular && <div className="absolute right-4 top-4 rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-2.5 py-1 text-[11px] font-black text-white shadow-glow">推荐</div>}
-                    <div className="flex items-center gap-2">
-                      <div className="grid h-10 w-10 place-items-center rounded-2xl bg-white/70 text-ocean shadow-sm dark:bg-white/10 dark:text-cyan-glow">
-                        {plan === 'pro' ? <Rocket size={18} strokeWidth={1.5} /> : <Crown size={18} strokeWidth={1.5} />}
-                      </div>
-                      <div>
-                        <div className="text-lg font-black tracking-tight">{item.label}</div>
-                        <div className="text-xs text-slate-500 dark:text-slate-400">{item.subtitle}</div>
-                      </div>
-                    </div>
-                    <div className="mt-5 flex items-end gap-2">
-                      <span className="text-3xl font-black tracking-tight">{item.price}</span>
-                      <span className="pb-1 text-xs text-slate-500 dark:text-slate-400">模拟支付</span>
-                    </div>
-                    <div className="mt-2 rounded-2xl border border-white/40 bg-white/45 px-3 py-2 text-sm font-bold text-slate-700 dark:border-white/10 dark:bg-slate-950/20 dark:text-slate-200">{item.quota}</div>
-                    <div className="mt-4 space-y-2">
-                      {item.features.map((f) => (
-                        <div key={f} className="flex gap-2 text-sm leading-5 text-slate-600 dark:text-slate-300">
-                          <Check className="mt-0.5 shrink-0 text-cyan-glow" size={15} strokeWidth={1.8} />
-                          <span>{f}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <button
-                      disabled={Boolean(busyPlan) || isCurrent}
-                      onClick={() => pay(plan)}
-                      className={cn('primary-button mt-5 w-full gap-2 disabled:cursor-not-allowed disabled:opacity-55', plan === 'team' && 'bg-none')}
-                      style={plan === 'team' ? { background: 'linear-gradient(135deg, #7c3aed, #22d3ee)' } : undefined}
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                {(['pro', 'team'] as const).map((plan) => {
+                  const item = PLAN_META[plan];
+                  const isCurrent = currentPlan === plan;
+                  return (
+                    <motion.div
+                      key={plan}
+                      whileHover={{ y: -3, scale: 1.01 }}
+                      className={cn(
+                        'relative overflow-hidden rounded-[22px] border p-5 transition',
+                        item.popular ? 'border-cyan-glow/45 bg-cyan-glow/10 shadow-glow' : 'border-white/40 bg-white/35 dark:border-white/10 dark:bg-white/5'
+                      )}
                     >
-                      {isCurrent ? '当前套餐' : busyPlan === plan ? '处理中...' : currentPlan === 'pro' && plan === 'team' ? '升级到 TEAM' : `升级到 ${item.label}`}
-                    </button>
-                  </motion.div>
-                );
-              })}
-            </div>
-            {(error || success) && (
-              <div className="px-5 pb-5">
-                <div className={cn('rounded-2xl border px-4 py-3 text-sm font-semibold', error ? 'border-coral/25 bg-coral/10 text-coral' : 'border-emerald-300/30 bg-emerald-400/10 text-emerald-600 dark:text-emerald-300')}>
-                  {error || success}
-                </div>
+                      {item.popular && <div className="absolute right-4 top-4 rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-2.5 py-1 text-[11px] font-black text-white shadow-glow">推荐</div>}
+                      <div className="flex items-center gap-2">
+                        <div className="grid h-10 w-10 place-items-center rounded-2xl bg-white/70 text-ocean shadow-sm dark:bg-white/10 dark:text-cyan-glow">
+                          {plan === 'pro' ? <Rocket size={18} strokeWidth={1.5} /> : <Crown size={18} strokeWidth={1.5} />}
+                        </div>
+                        <div>
+                          <div className="text-lg font-black tracking-tight">{item.label}</div>
+                          <div className="text-xs text-slate-500 dark:text-slate-400">{item.subtitle}</div>
+                        </div>
+                      </div>
+                      <div className="mt-5 flex items-end gap-2">
+                        <span className="text-3xl font-black tracking-tight">{item.price}</span>
+                        <span className="pb-1 text-xs text-slate-500 dark:text-slate-400">模拟支付</span>
+                      </div>
+                      <div className="mt-2 rounded-2xl border border-white/40 bg-white/45 px-3 py-2 text-sm font-bold text-slate-700 dark:border-white/10 dark:bg-slate-950/20 dark:text-slate-200">{item.quota}</div>
+                      <div className="mt-4 space-y-2">
+                        {item.features.map((f) => (
+                          <div key={f} className="flex gap-2 text-sm leading-5 text-slate-600 dark:text-slate-300">
+                            <Check className="mt-0.5 shrink-0 text-cyan-glow" size={15} strokeWidth={1.8} />
+                            <span>{f}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <button
+                        disabled={Boolean(busyPlan) || isCurrent}
+                        onClick={() => pay(plan)}
+                        className={cn('primary-button mt-5 w-full gap-2 disabled:cursor-not-allowed disabled:opacity-55', plan === 'team' && 'bg-none')}
+                        style={plan === 'team' ? { background: 'linear-gradient(135deg, #7c3aed, #22d3ee)' } : undefined}
+                      >
+                        {isCurrent ? '当前套餐' : busyPlan === plan ? '处理中...' : currentPlan === 'pro' && plan === 'team' ? '升级到 TEAM' : `升级到 ${item.label}`}
+                      </button>
+                    </motion.div>
+                  );
+                })}
               </div>
-            )}
+              {(error || success) && (
+                <div className="pt-4">
+                  <div className={cn('rounded-2xl border px-4 py-3 text-sm font-semibold', error ? 'border-coral/25 bg-coral/10 text-coral' : 'border-emerald-300/30 bg-emerald-400/10 text-emerald-600 dark:text-emerald-300')}>
+                    {error || success}
+                  </div>
+                </div>
+              )}
+            </div>
           </motion.div>
         </motion.div>
       )}
-    </AnimatePresence>
+      </AnimatePresence>
+    </ModalPortal>
   );
 }
 
@@ -217,8 +222,13 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
     if (saved) setUser(saved);
     api.me()
       .then((r) => {
-        setUser(r.user);
-        writeStoredUser(r.user);
+        if (r.authenticated && r.user) {
+          setUser(r.user);
+          writeStoredUser(r.user);
+          return;
+        }
+        localStorage.removeItem(USER_KEY);
+        setUser(null);
       })
       .catch(() => {
         localStorage.removeItem(USER_KEY);
@@ -275,13 +285,14 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
 
   return (
     <>
-      <button onClick={() => setOpen(true)} className="primary-button w-full gap-2">
+      <button data-testid="auth-open" onClick={() => setOpen(true)} className="primary-button w-full gap-2">
         <LogIn size={16} strokeWidth={1.5} /> 登录 / 注册账号
       </button>
-      <AnimatePresence>
-        {open && (
-          <motion.div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/20 p-4 backdrop-blur-md dark:bg-black/50" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
-            <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 8 }} transition={{ duration: 0.16 }} className="glass-panel w-full max-w-md rounded-[28px] p-6">
+      <ModalPortal>
+        <AnimatePresence>
+          {open && (
+            <motion.div className="fixed inset-0 z-[90] grid place-items-center overflow-y-auto bg-slate-950/20 p-3 backdrop-blur-md dark:bg-black/50 sm:p-4" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+              <motion.div initial={{ opacity: 0, scale: 0.95, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.96, y: 8 }} transition={{ duration: 0.16 }} className="glass-panel max-h-[calc(100dvh-1.5rem)] w-full max-w-md overflow-y-auto rounded-[24px] p-5 sm:max-h-[calc(100dvh-2rem)] sm:rounded-[28px] sm:p-6">
               <div className="mb-6 flex items-center gap-3">
                 <div className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow">
                   <Sparkles size={22} strokeWidth={1.5} />
@@ -294,25 +305,26 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
               <div className="space-y-3">
                 <label className="relative block">
                   <Mail className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} strokeWidth={1.5} />
-                  <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱账号" className="input-glass w-full pl-10" />
+                  <input data-testid="auth-email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="邮箱账号" className="input-glass w-full pl-10" />
                 </label>
                 <label className="relative block">
                   <LockKeyhole className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} strokeWidth={1.5} />
-                  <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" type="password" className="input-glass w-full pl-10" />
+                  <input data-testid="auth-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="密码" type="password" className="input-glass w-full pl-10" />
                 </label>
               </div>
               {error && <div className="mt-3 rounded-xl border border-coral/20 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</div>}
-              <button onClick={submit} disabled={busy || !email || !password} className="primary-button mt-5 w-full gap-2 disabled:opacity-50">
+              <button data-testid="auth-submit" onClick={submit} disabled={busy || !email || !password} className="primary-button mt-5 w-full gap-2 disabled:opacity-50">
                 {mode === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />} {busy ? '处理中...' : mode === 'login' ? '登录' : '注册 BASIC 账号'}
               </button>
-              <button onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="mt-4 w-full text-sm font-semibold text-slate-500 transition hover:text-ocean dark:text-slate-400">
+              <button data-testid="auth-mode-toggle" onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="mt-4 w-full text-sm font-semibold text-slate-500 transition hover:text-ocean dark:text-slate-400">
                 {mode === 'login' ? '没有账号？立即注册' : '已有账号？返回登录'}
               </button>
               <button onClick={() => setOpen(false)} className="mt-2 w-full text-xs text-slate-400 hover:text-slate-600">关闭</button>
             </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </ModalPortal>
     </>
   );
 }

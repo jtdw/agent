@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS download_jobs (
     progress INTEGER NOT NULL DEFAULT 0,
     stage TEXT NOT NULL DEFAULT 'queued',
     result_json TEXT,
+    failure_diagnostic_json TEXT,
+    artifact_quality_json TEXT,
     output_path TEXT,
     zip_path TEXT,
     error_message TEXT,
@@ -172,6 +174,8 @@ DOWNLOAD_JOB_MIGRATIONS = {
     "quota_reserved": "ALTER TABLE download_jobs ADD COLUMN quota_reserved INTEGER NOT NULL DEFAULT 0",
     "retried_from_job_id": "ALTER TABLE download_jobs ADD COLUMN retried_from_job_id TEXT",
     "canceled_at": "ALTER TABLE download_jobs ADD COLUMN canceled_at TEXT",
+    "failure_diagnostic_json": "ALTER TABLE download_jobs ADD COLUMN failure_diagnostic_json TEXT",
+    "artifact_quality_json": "ALTER TABLE download_jobs ADD COLUMN artifact_quality_json TEXT",
 }
 
 

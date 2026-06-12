@@ -1,18 +1,35 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
+import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from langchain.agents import create_agent
-from langchain_openai import ChatOpenAI
+try:
+    from langchain.agents import create_agent
+    from langchain_openai import ChatOpenAI
+except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+    create_agent = None  # type: ignore[assignment]
+    ChatOpenAI = None  # type: ignore[assignment]
+    _AGENT_DEPENDENCY_IMPORT_ERROR = exc
+else:
+    _AGENT_DEPENDENCY_IMPORT_ERROR = None
 
 from .config import Settings
-from .data_manager import DataManager
-from .gis_tools import build_tools
+from .llm_config import validate_llm_config
+if TYPE_CHECKING:
+    from .data_manager import DataManager
+try:
+    from .gis_tools import build_tools
+except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+    build_tools = None  # type: ignore[assignment]
+    _GIS_TOOLS_IMPORT_ERROR = exc
+else:
+    _GIS_TOOLS_IMPORT_ERROR = None
 
 # Direct command router for high-risk / UI-opening actions.
 # This avoids cases where the LLM answers in text instead of invoking the tool.
@@ -39,50 +56,55 @@ except Exception:  # pragma: no cover
 
 
 SYSTEM_PROMPT = """
-你是一个更偏科研与论文场景的智能 GIS 助手，主要服务于地理信息科学专业学生的开题、毕业设计、遥感/GIS 数据处理、实验设计、结果分析和论文写作。
-
-你的角色不仅是 GIS 工具执行器，也是研究流程协作者。尤其适合：
-- 开题报告与论文结构优化
-- 多源遥感/再分析/站点数据的预处理与匹配
-- 流域尺度空间分析、制图与结果汇报
-- 土壤水分、生态水文、遥感反演与模型比较研究
-- 结果复核、误差评价、月尺度/季节尺度分析
+你是一个交互式 AI GIS 智能体，负责基于当前工作区数据、对话上下文和工具结果完成数据检查、处理、空间分析、制图、建模与结果解释。
 
 工作原则：
-1. 先理解当前已有数据集，再决定调用哪些工具。
-2. 尽量自主完成中间步骤，例如先检查字段、识别坐标字段、判断时间字段、识别文档内容，再决定下一步处理。
-3. 不要编造字段名、统计值、输出路径；所有结论必须基于工具结果。
-4. 当用户要“制图”“看分布”“画图”“生成结果图”时，优先调用 plot_dataset 或 raster_histogram。
-5. 当用户上传的是表格且包含经纬度或坐标字段时，优先考虑 detect_coordinate_fields，再决定是否使用 table_to_points。若用户上传的是点 shapefile/GeoJSON/GPKG，则应直接把它视为可建模的矢量属性数据，不要误判为普通表格。
-6. 当用户上传的是 docx、txt、md 等论文或方案文档时，优先使用 preview_document、document_outline、search_document_text 读取内容后再回答，不要只凭用户一句话猜测全文。
-7. 当用户要做叠加分析、相交、差异、面内点统计、空间连接、提取栅格值到点、属性连接、面积长度字段补充时，优先使用对应 GIS 工具而不是只做口头说明。
-8. 当用户要做模型评价、产品比较、缺失统计、时间聚合、滞后特征构建、BTCH 融合、RF/XGBoost 融合、LSTM 时序建模或 GCP 不确定性分析时，优先使用 evaluate_prediction_accuracy、aggregate_time_series、build_time_features、profile_missing_values、btch_fusion_model、train_rf_fusion_model、train_xgboost_fusion_model、train_lstm_fusion_model、geographical_conformal_prediction 等工具。对于点位 shapefile 的回归任务，优先使用 train_xgboost_fusion_model，并保持空间几何、启用空间分块验证、检查 Moran's I、输出残差空间分布图。
-8.0 当用户在 XGBoost / RF / BTCH / LSTM 结果后继续要求 GCP、预测区间、不确定性范围、PICP/MPIW/NMPIW/QCP/IS 时，应继续调用 geographical_conformal_prediction。若结果数据集中没有显式 holdout 标签，但存在 *_xgb_spatial_cv 或 *_spatial_cv 这类空间交叉验证预测列，则默认把这些非空样本视为可用于 GCP 的目标样本；不要因为用户写了 target_filter=xxx == 'holdout' 就直接失败。
-8.05 当用户要求“残差空间分布图”“预测结果图层”“空间分布图”时，优先理解为矢量结果图层或空间分布图输出，不要把这类需求误当成只支持普通统计图的 chart_type；若需要调用 generate_thesis_charts，优先使用 spatial_distribution、residual_map、prediction_map 或 auto_pack。
-8.1 当用户提到“数据库”“存储数据”“自动调用数据”“SQL”“结果复用”时，优先使用 database_status、list_database_objects、sync_dataset_to_database、sync_all_to_database、query_workspace_database，把表格、矢量属性和文档摘要组织进内置 SQLite 工作区数据库，再基于查询结果继续分析。
-8.2 当用户希望“一键跑完整流程”“显示处理过程”“让新手看懂步骤”时，优先使用 explain_database_training_pipeline、run_database_training_pipeline、list_pipeline_runs、show_pipeline_run，给出可视化步骤说明、运行记录和阶段性输出。
-9. 若缺少参数，请基于已有数据给出最小化追问，或先列出候选字段并建议下一步。
-10. 回答尽量使用清晰结构：
-   - 已完成操作
-   - 关键结果
-   - 输出文件
-   - 下一步建议
-11. 若用户让你概括当前工作区，请优先调用 workspace_status 或 describe_dataset。
-12. 对毕业论文场景，优先使用正式、准确、易引用的表达；涉及实验设计时，主动从“数据、方法、验证、结果表达、风险点”五个方面组织建议。若用户提到开题、中期或答辩材料，请优先考虑 generate_stage_report 与 generate_model_comparison_summary。
-13. 如果收到附带图片、地图、统计图或图件预览，请结合图像内容回答，不要忽略视觉信息。
-14. 如果用户希望“自动完成一整套处理流程”，可以连续调用多个工具，但每一步都必须基于前一步结果。
-15. 对“基于多源遥感的闪电河流域表层土壤水分数据融合及模型比较研究”这类任务，应优先联想到：站点—栅格匹配、时间对齐、深度统一、缺失值检查、滞后降水构建、BTCH 权重融合、RF/XGBoost 回归融合、LSTM 时序建模、GCP 空间不确定性估计、月季尺度统计、精度指标比较、阶段材料生成、论文结果表述，以及必要时通过内置数据库统一管理训练表、验证表和阶段成果。
-16. 当用户提到“下载某地 DEM / 降水 / 外部资源 / 在线数据 / 某省数据”时，优先先调用 download_backend_status、list_remote_resource_catalog 或本地文件库工具，判断本地文件库、国内数据源、天地图能力和商业化账号任务是否可用；若需要区域边界，优先从本地文件库调用行政区划/流域边界，若用户给了直链，则优先使用 download_file_from_url。
-16.1 当用户提到“国内网站 / 国内数据源 / 地理空间数据云 / 中国气象数据网 / 国家地球系统科学数据中心 / RESDC / 账号登录下载”时，优先调用 list_domestic_data_sources 与 domestic_login_status。若网站有验证码或复杂下单流程，使用 open_domestic_login_window 让用户手动登录保存 Cookie，再用 capture_domestic_browser_download 捕获用户点击的下载文件；不要尝试绕过验证码、付费墙或权限控制。若用户提供的是下载直链，使用 download_domestic_url；若用户已经手动下载到本机，使用 import_domestic_downloaded_file 入库。
-16.2 当用户提到“商业版 / 商用智能体 / 付费 / 会员 / 平台账号 / 用户自己的账号 / 账号池 / 下载额度 / 订单 / 任务状态 / 登录 / 注册”时，优先调用 commercial_system_status、register_commercial_login_user、authenticate_commercial_login_user、commercial_permission_summary、create_mock_payment_order、complete_mock_payment_order、simulate_commercial_payment、create_commercial_customer、grant_commercial_plan、add_platform_source_account、submit_commercial_download_job、list_commercial_download_jobs 等商业化工具。平台账号不得暴露给普通用户；用户凭据和平台凭据只能加密保存，回复中只显示掩码。普通用户使用 account_mode=own 调用自己的地理空间数据云账号或 Cookie；付费用户使用 account_mode=platform 调用平台账号池并消耗 platform_monthly_quota。地理空间数据云 DEM 任务优先使用 open_gscloud_customer_login_window 或 open_gscloud_platform_login_window 保存登录态。若用户不知道四川/某区域对应哪些分幅，先调用 plan_gscloud_aster_gdem_tiles 计算 ASTGTM_NxxExxx 分幅清单；商业化场景下用户说“提交地理空间数据云 DEM 下载任务”时，应优先创建任务并启动 start_gscloud_dem_region_auto_tiles_job 或 run_gscloud_dem_region_auto_tiles_job，让系统自动计算分幅、扫描访问数据页全部分页并只下载目标分幅，不要默认打开网页让用户自己选择分幅；只有自动流程失败或用户明确要求手动时，才调用 run_gscloud_dem_capture_job 让用户按清单手动点击。
-16.3 当用户提到“天地图 / 底图 / 地名搜索 / 逆地理编码 / 行政区 / 道路 / 水系 / 地图服务 / WMTS”时，应优先说明天地图在本系统中的定位：用于网页底图、影像/矢量/地形底图、地名检索、逆地理编码、政区/道路/水系等要素辅助查询；不得把天地图底图服务误说成 DEM 或降雨原始数据下载源。若未配置 TIANDITU_TOKEN，应提示用户先在 .env 中配置。
-
-17. 对外部资源下载场景，不要凭空承诺某网站一定可用。要基于工具返回结果说明：下载来源、区域范围、时间范围、输出文件和当前限制（例如本地文件库没有匹配数据、国内网站需要用户手动登录/授权、平台账号额度不足、天地图 Key 未配置）。
+1. 必须基于用户提供的上下文、当前工作区和工具返回结果回答。
+2. 不得编造字段名、文件路径、坐标系、统计值、模型指标或图件内容。
+3. 如果缺少关键输入，先做最小化追问；如果上下文足够，优先调用合适工具验证后再回答。
+4. 每次工具调用都应服务于当前任务计划，不要做无关操作。
+5. 解释结果时说明已完成操作、使用的数据、关键结果、输出文件、含义、风险和下一步建议。
+6. 外部数据下载、账号、验证码、付费或平台凭据相关流程必须遵守权限和安全边界，不绕过访问控制。
 """.strip()
 
 
+def _remove_default_agent_admin_tool_hints(prompt: str) -> str:
+    for tool_name in (
+        "commercial_system_status",
+        "create_commercial_customer",
+        "grant_commercial_plan",
+        "add_platform_source_account",
+        "open_gscloud_platform_login_window",
+    ):
+        prompt = prompt.replace(tool_name, "")
+    return prompt
+
+
+SYSTEM_PROMPT = _remove_default_agent_admin_tool_hints(SYSTEM_PROMPT)
+
+
 class GISAgent:
-    def __init__(self, settings: Settings, manager: DataManager):
+    def __init__(self, settings: Settings, manager: "DataManager"):
+        if ChatOpenAI is None or create_agent is None:
+            raise RuntimeError(
+                "Missing AI agent dependencies (`langchain` / `langchain-openai`). "
+                "Install the full backend requirements with `pip install -r requirements.txt`."
+            ) from _AGENT_DEPENDENCY_IMPORT_ERROR
+        if build_tools is None:
+            raise RuntimeError(
+                "Missing GIS tool dependencies while initializing GISAgent. "
+                "Install the full backend requirements with `pip install -r requirements.txt`."
+            ) from _GIS_TOOLS_IMPORT_ERROR
+        validation = validate_llm_config()
+        if validation.get("status") == "invalid" or not settings.api_key:
+            key_env = str(validation.get("api_key_env") or "LLM_API_KEY_ENV")
+            codes = ", ".join(str(error.get("code") or "") for error in validation.get("errors", []))
+            if not settings.api_key:
+                codes = (codes + ", " if codes else "") + "API_KEY_MISSING"
+            raise RuntimeError(
+                f"LLM provider is not ready ({codes}). Set {key_env}, LLM_PROVIDER and LLM_MODEL, "
+                "or run scripts/check_llm_health.py for deployment diagnostics."
+            )
         self.settings = settings
         self.manager = manager
         self.model = ChatOpenAI(
@@ -90,6 +112,8 @@ class GISAgent:
             api_key=settings.api_key,
             base_url=settings.base_url,
             temperature=settings.temperature,
+            timeout=settings.timeout,
+            max_retries=settings.max_retries,
         )
         self.tools = build_tools(manager)
         self.agent = create_agent(
@@ -113,6 +137,171 @@ class GISAgent:
                     parts.append(str(item))
             return "\n".join(parts)
         return str(content)
+
+    def _message_content(self, message: Any) -> Any:
+        content = getattr(message, "content", None)
+        if content is None and isinstance(message, dict):
+            content = message.get("content", "")
+        return content
+
+    def _message_role(self, message: Any) -> str:
+        if isinstance(message, dict):
+            return str(message.get("type") or message.get("role") or "").lower()
+        return str(getattr(message, "type", "") or getattr(message, "role", "") or "").lower()
+
+    def _json_payload(self, text: str) -> Any | None:
+        stripped = str(text or "").strip()
+        if not stripped:
+            return None
+        if not ((stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]"))):
+            return None
+        try:
+            return json.loads(stripped)
+        except Exception:
+            return None
+
+    def _candidate_fields_text(self, candidates: Any) -> str:
+        if not isinstance(candidates, list):
+            return ""
+        fields: list[str] = []
+        for item in candidates[:5]:
+            if isinstance(item, dict):
+                field = item.get("field") or item.get("name") or item.get("column")
+                ratio = item.get("numeric_ratio")
+                if field:
+                    if isinstance(ratio, (int, float)):
+                        fields.append(f"{field}（数值比例 {ratio:.0%}）")
+                    else:
+                        fields.append(str(field))
+            elif item:
+                fields.append(str(item))
+        return "、".join(fields)
+
+    def _tool_json_summary_from_payload(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+
+        if {"ok", "tool_name", "task_id", "inputs", "outputs", "artifacts"}.issubset(payload):
+            if payload.get("ok"):
+                lines = [
+                    f"工具：{payload.get('tool_name')}",
+                    f"状态：成功",
+                ]
+                if payload.get("summary"):
+                    lines.append(f"摘要：{payload.get('summary')}")
+                outputs = payload.get("outputs") if isinstance(payload.get("outputs"), dict) else {}
+                for key, value in list(outputs.items())[:6]:
+                    if value not in ("", None):
+                        lines.append(f"{key}={value}")
+                artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
+                for item in artifacts[:4]:
+                    if isinstance(item, dict):
+                        label = item.get("title") or item.get("type") or "输出文件"
+                        path = item.get("path") or item.get("display_path") or ""
+                        lines.append(f"{label}: {path}" if path else str(label))
+                next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+                if next_actions:
+                    lines.append("建议：" + "；".join(str(item) for item in next_actions[:3]))
+                return "我已调用工具并收到结构化结果：\n" + "\n".join(f"- {line}" for line in lines)
+
+            lines = [
+                f"工具：{payload.get('tool_name')}",
+                f"状态：失败",
+                f"错误代码：{payload.get('error_code')}",
+                f"错误标题：{payload.get('error_title')}",
+                f"原因：{payload.get('user_message')}",
+            ]
+            next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
+            if next_actions:
+                lines.append("建议：" + "；".join(str(item) for item in next_actions[:3]))
+            return "我已调用工具并收到结构化失败诊断：\n" + "\n".join(f"- {line}" for line in lines if str(line).strip())
+
+        lines: list[str] = []
+        dataset = payload.get("dataset") or payload.get("dataset_name") or payload.get("name")
+        if dataset:
+            lines.append(f"数据集：{dataset}")
+
+        x_fields = self._candidate_fields_text(payload.get("x_candidates"))
+        if x_fields:
+            lines.append(f"可能的 X/经度字段：{x_fields}")
+
+        y_fields = self._candidate_fields_text(payload.get("y_candidates"))
+        if y_fields:
+            lines.append(f"可能的 Y/纬度字段：{y_fields}")
+
+        for key, label in (
+            ("time_candidates", "可能的时间字段"),
+            ("target_candidates", "可能的目标变量"),
+            ("feature_candidates", "可能的特征字段"),
+        ):
+            value = self._candidate_fields_text(payload.get(key))
+            if value:
+                lines.append(f"{label}：{value}")
+
+        suggestion = payload.get("suggestion") or payload.get("next_step") or payload.get("message")
+        if suggestion:
+            lines.append(f"建议：{suggestion}")
+
+        if not lines:
+            scalar_items = []
+            for key, value in list(payload.items())[:6]:
+                if isinstance(value, (str, int, float, bool)) and value not in ("", None):
+                    scalar_items.append(f"{key}={value}")
+            if scalar_items:
+                lines.append("；".join(scalar_items))
+
+        if not lines:
+            return ""
+
+        return "我已调用工具完成检查，但模型没有继续生成自然语言总结。根据工具结果：\n" + "\n".join(
+            f"- {line}" for line in lines
+        )
+
+    def _latest_tool_result_summary(self, messages: list[Any]) -> str:
+        for message in reversed(messages):
+            role = self._message_role(message)
+            text = self._normalize_text(self._message_content(message) or "").strip()
+            if not text:
+                continue
+            payload = self._json_payload(text)
+            if role in {"tool", "toolmessage"} or payload is not None:
+                summary = self._tool_json_summary_from_payload(payload)
+                if summary:
+                    return summary
+        return ""
+
+    def _last_nonempty_reply(self, messages: list[Any]) -> str:
+        for message in reversed(messages):
+            role = self._message_role(message)
+            if role in {"human", "user"}:
+                continue
+            if role in {"tool", "toolmessage"}:
+                continue
+            text = self._normalize_text(self._message_content(message) or "").strip()
+            if text and self._json_payload(text) is None:
+                return text
+        return ""
+
+    def _confirmation_id(self, action: str, **params: Any) -> str:
+        payload = json.dumps({"action": action, **params}, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _direct_confirmation_reply(self, action: str, user_text: str, **params: Any) -> str | None:
+        expected = self._confirmation_id(action, **params)
+        if expected in user_text:
+            return None
+        return json.dumps(
+            {
+                "ok": False,
+                "requires_confirmation": True,
+                "direct_command": action,
+                "confirmed_action_id": expected,
+                "message": "This action starts browser automation or uses a platform account. Re-send the request with confirmed_action_id to proceed.",
+            },
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
 
     def _image_to_data_url(self, image_path: str) -> str:
         path = Path(image_path)
@@ -190,6 +379,28 @@ class GISAgent:
         platform_match = re.search(r"(pa_[A-Za-z0-9_\-]+)", text)
         if "平台账号" in text and platform_match:
             account_id = platform_match.group(1)
+            if os.getenv("GIS_AGENT_ALLOW_AGENT_PLATFORM_LOGIN", "").strip().lower() not in {"1", "true", "yes", "on"}:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "direct_command": "open_gscloud_platform_login_window",
+                        "account_id": account_id,
+                        "error": "forbidden_agent_platform_login",
+                        "hint": "Platform account login is disabled for the default agent route. Use an admin-only API or set GIS_AGENT_ALLOW_AGENT_PLATFORM_LOGIN=1 in a trusted local/admin environment.",
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+            confirmation = self._direct_confirmation_reply(
+                "open_gscloud_platform_login_window",
+                text,
+                account_id=account_id,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+            )
+            if confirmation:
+                return confirmation
             try:
                 account = commercial.get_platform_account_private(account_id)
                 state_path = gscloud_platform_state_path(self.manager.workdir, account["account_id"], "gscloud")
@@ -247,6 +458,16 @@ class GISAgent:
             elif user_match:
                 user_id = user_match.group(1)
 
+        if user_id:
+            confirmation = self._direct_confirmation_reply(
+                "open_gscloud_customer_login_window",
+                text,
+                user_id=user_id,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+            )
+            if confirmation:
+                return confirmation
         if user_id:
             try:
                 user = commercial.get_user(user_id)
@@ -450,6 +671,20 @@ class GISAgent:
             job = commercial.get_job(job_id)
             if str(job.get("source_key", "")).lower() != "gscloud":
                 raise ValueError("该任务不是地理空间数据云任务。")
+            timeout_seconds = self._extract_timeout_seconds(text, default=1800)
+            max_downloads = self._extract_max_downloads(text, default=1)
+            headless = False
+            confirmation = self._direct_confirmation_reply(
+                "start_gscloud_dem_capture_job",
+                text,
+                job_id=job_id,
+                max_downloads=max_downloads,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+                auto_load=True,
+            )
+            if confirmation:
+                return confirmation
             state_path = self._resolve_gscloud_storage_state_for_job(commercial, job)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError(
@@ -562,6 +797,17 @@ class GISAgent:
         max_tiles = self._extract_max_tiles(text, default=0)
 
         try:
+            confirmation = self._direct_confirmation_reply(
+                "submit_gscloud_dem_job_auto_tiles",
+                text,
+                user_id=user_id,
+                region=region,
+                account_mode=account_mode,
+                output_name=output_name,
+                max_tiles=max_tiles,
+            )
+            if confirmation:
+                return confirmation
             job = commercial.submit_job(
                 user_id=user_id,
                 source_key="gscloud",
@@ -705,6 +951,18 @@ class GISAgent:
             job_match = re.search(r"(job_[A-Za-z0-9_\-]+)", text)
             job_id = job_match.group(1) if job_match else self._resolve_latest_gscloud_job_id(commercial)
             job = commercial.get_job(job_id)
+            max_tiles = self._extract_max_tiles(text, default=0)
+            region = "???" if ("??" in text or not job.get("region")) else str(job.get("region") or "???")
+            confirmation = self._direct_confirmation_reply(
+                "start_gscloud_dem_auto_tile_job",
+                text,
+                job_id=job_id,
+                region=region,
+                max_tiles=max_tiles,
+                auto_load=True,
+            )
+            if confirmation:
+                return confirmation
             state_path = self._resolve_gscloud_storage_state_for_job(commercial, job)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError(
@@ -776,11 +1034,10 @@ class GISAgent:
         if not new_history:
             return "", []
 
-        final_message = new_history[-1]
-        content = getattr(final_message, "content", None)
-        if content is None and isinstance(final_message, dict):
-            content = final_message.get("content", "")
-
-        reply = self._normalize_text(content or "")
+        reply = self._last_nonempty_reply(list(new_history))
+        if not reply:
+            reply = self._latest_tool_result_summary(list(new_history))
+        if not reply:
+            reply = "我已完成处理，但模型没有返回可显示的文本。请换一种说法重试，或要求我概括当前工作区。"
         self.manager.log_operation("智能体回复", reply[:180], "chat")
         return reply, list(new_history)

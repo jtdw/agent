@@ -5,6 +5,7 @@ export type ModelMetricDatum = {
   r: number;
   rmse: number;
   nse?: number | null;
+  modelResultId?: string;
 };
 
 export function ModelMetricChart({ data }: { data: ModelMetricDatum[] }) {

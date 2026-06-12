@@ -22,7 +22,7 @@ def check_frontend() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1366, "height": 768})
-        page.goto(FRONTEND_URL, wait_until="networkidle", timeout=30_000)
+        page.goto(FRONTEND_URL, wait_until="domcontentloaded", timeout=30_000)
         body_text = page.locator("body").inner_text(timeout=10_000).strip()
         html = page.content()
         browser.close()

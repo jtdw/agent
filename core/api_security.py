@@ -29,6 +29,18 @@ def require_authenticated_user(
     return actual
 
 
+def optional_authenticated_session(service: SessionValidator, *, session_id: str, session_token: str) -> dict[str, Any]:
+    if not str(session_id or "").strip() or not str(session_token or "").strip():
+        return {"authenticated": False, "user": None}
+    try:
+        payload = service.validate_session(session_id, session_token)
+    except PermissionError:
+        return {"authenticated": False, "user": None}
+    if not isinstance(payload, dict):
+        return {"authenticated": False, "user": None}
+    return {"authenticated": True, **payload}
+
+
 def require_admin_token(configured_token: str, provided_token: str) -> bool:
     expected = str(configured_token or "").strip()
     actual = str(provided_token or "").strip()

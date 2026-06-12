@@ -36,7 +36,6 @@ def build_domestic_tools(manager: DataManager):
                     "categories": list(src.categories),
                     "notes": src.notes,
                     "storage_state_exists": state_path.exists(),
-                    "storage_state_path": str(state_path),
                     **status,
                 }
             )
@@ -54,7 +53,6 @@ def build_domestic_tools(manager: DataManager):
                 {
                     **credential_status(src),
                     "storage_state_exists": state_path.exists(),
-                    "storage_state_path": str(state_path),
                     "home_url": src.home_url,
                     "login_url": src.login_url,
                 }
@@ -66,7 +64,8 @@ def build_domestic_tools(manager: DataManager):
         """打开国内数据源登录窗口，用户手动登录/输入验证码，超时后自动保存 Cookie。适合有验证码的网站。"""
         src = get_source(source_key)
         result = open_manual_login_window(src, manager.workdir, timeout_seconds=timeout_seconds, headless=headless)
-        manager.log_operation("国内数据源登录态保存", f"{src.name} -> {result.get('storage_state_path')}", "download")
+        result.pop("storage_state_path", None)
+        manager.log_operation("国内数据源登录态保存", f"{src.name} -> <storage_state_path_redacted>", "download")
         return _json(result)
 
     @tool
@@ -117,6 +116,7 @@ def build_domestic_tools(manager: DataManager):
         path = Path(file_path).expanduser()
         if not path.exists():
             raise FileNotFoundError(f"文件不存在: {file_path}")
+        manager._require_allowed_import_source(path)
         result = postprocess_download(manager, path, source_key="manual", output_name=output_name or path.stem, auto_load=auto_load)
         return _json(result.to_dict())
 

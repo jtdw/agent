@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from importlib.util import find_spec
 from pathlib import Path
 
@@ -35,6 +36,19 @@ class ApiUtilsTest(unittest.TestCase):
                     self.resolve_child_path(root, "../outside.txt")
             finally:
                 outside.unlink(missing_ok=True)
+
+    def test_read_vector_for_map_rejects_zip_path_escape(self) -> None:
+        from api_server import _read_vector_for_map
+
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "bad.zip"
+            with zipfile.ZipFile(archive_path, "w") as zf:
+                zf.writestr("../evil.shp", b"not a real shapefile")
+
+            with self.assertRaises(ValueError):
+                _read_vector_for_map(archive_path)
+
+            self.assertFalse((Path(tmp).parent / "evil.shp").exists())
 
     def test_api_guard_maps_unhandled_error_to_error_id(self) -> None:
         def fail() -> None:

@@ -5,11 +5,22 @@ import os
 from pathlib import Path
 from typing import Any
 
-from cryptography.fernet import Fernet, InvalidToken
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+    Fernet = None  # type: ignore[assignment]
+    InvalidToken = Exception  # type: ignore[assignment]
+    _CRYPTOGRAPHY_IMPORT_ERROR = exc
+else:
+    _CRYPTOGRAPHY_IMPORT_ERROR = None
 
 
 def generate_fernet_key() -> str:
     """Generate a Fernet key string suitable for APP_SECRET_KEY."""
+    if Fernet is None:
+        raise RuntimeError(
+            "Missing dependency `cryptography`. Install backend requirements with `pip install -r requirements.txt`."
+        ) from _CRYPTOGRAPHY_IMPORT_ERROR
     return Fernet.generate_key().decode("utf-8")
 
 
@@ -38,6 +49,11 @@ class SecretBox:
     """
 
     def __init__(self, workdir: Path):
+        if Fernet is None:
+            raise RuntimeError(
+                "Missing dependency `cryptography` while initializing commercial credential storage. "
+                "Install backend requirements with `pip install -r requirements.txt`."
+            ) from _CRYPTOGRAPHY_IMPORT_ERROR
         self.workdir = Path(workdir)
         self.key_source = "env"
         raw = os.getenv("APP_SECRET_KEY", "").strip()

@@ -41,8 +41,8 @@ const dashboard = {
     ]
   },
   artifacts: [
-    { name: 'soil_model_summary.md', path: 'derived/soil_model_summary.md', download_url: '/api/files/artifact?path=derived/soil_model_summary.md', type: 'document' },
-    { name: 'soil_metrics_fig_metric_r.png', path: 'plots/soil_metrics_fig_metric_r.png', download_url: '/api/files/artifact?path=plots/soil_metrics_fig_metric_r.png', type: 'plot' }
+    { artifact_id: 'artifact_summary_001', name: 'soil_model_summary.md', path: 'derived/soil_model_summary.md', download_url: '/api/files/artifact?path=derived/soil_model_summary.md', type: 'document' },
+    { artifact_id: 'artifact_plot_001', name: 'soil_metrics_fig_metric_r.png', path: 'plots/soil_metrics_fig_metric_r.png', download_url: '/api/files/artifact?path=plots/soil_metrics_fig_metric_r.png', type: 'plot' }
   ]
 };
 
@@ -52,11 +52,40 @@ assert.equal(view.title, 'database_training_pipeline');
 assert.deepEqual(view.cards.map((card) => [card.label, card.value]), [['R', '0.730'], ['RMSE', '0.036'], ['NSE', '0.510']]);
 assert.deepEqual(view.chartData.map((row) => row.name), ['BTCH', 'RF', 'XGBoost', 'LSTM']);
 assert.equal(view.bestModel?.name, 'XGBoost');
+assert.equal(view.bestModel?.modelResultId, '');
 assert.equal(view.downloads.length, 2);
+assert.equal(view.downloads[0].artifactId, 'artifact_summary_001');
+assert.equal(view.downloads[1].artifactId, 'artifact_plot_001');
+
+const boundModelView = analysis.buildAnalysisPanelView({
+  model_results: [
+    { model_result_id: 'model_result_xgb_001', model: 'XGBoost', metrics_dataset: 'xgb_metrics', metrics: { R: 0.8, RMSE: 0.1, NSE: 0.7 } }
+  ],
+  artifacts: []
+});
+assert.equal(boundModelView.bestModel?.modelResultId, 'model_result_xgb_001');
 
 const empty = analysis.buildAnalysisPanelView({ artifacts: [], latest_pipeline: null, analysis: {} });
 assert.equal(empty.hasResults, false);
 assert.equal(empty.cards.length, 0);
 assert.equal(empty.downloads.length, 0);
+
+const resultPanelView = analysis.buildAnalysisPanelView(
+  { artifacts: [], latest_pipeline: null, analysis: {} },
+  {
+    has_results: true,
+    title: 'XGBoost model finished',
+    files: [
+      { artifact_id: 'artifact_metrics_001', label: 'metrics', path: 'derived/xgb_metrics.csv', download_url: '/api/files/artifact?path=derived/xgb_metrics.csv', kind: 'report' }
+    ],
+    recommendations: ['check metrics']
+  }
+);
+assert.equal(resultPanelView.hasResults, true);
+assert.equal(resultPanelView.title, 'XGBoost model finished');
+assert.equal(resultPanelView.downloads.length, 1);
+assert.equal(resultPanelView.downloads[0].label, 'metrics');
+assert.equal(resultPanelView.downloads[0].artifactId, 'artifact_metrics_001');
+assert.equal(resultPanelView.recommendations[0], 'check metrics');
 
 console.log('analysis panel data tests passed');

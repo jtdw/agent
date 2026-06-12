@@ -85,9 +85,7 @@ export function LayerPanel({
   setBasemap,
   onClose,
   layerVisibility,
-  layerOpacity,
   onLayerToggle,
-  onLayerOpacityChange,
   onLayerLocate,
   onRunWorkflowAction
 }: {
@@ -96,9 +94,7 @@ export function LayerPanel({
   setBasemap: (value: Basemap) => void;
   onClose?: () => void;
   layerVisibility: LayerVisibility;
-  layerOpacity: LayerOpacity;
   onLayerToggle: (id: keyof LayerVisibility) => void;
-  onLayerOpacityChange: (id: keyof LayerOpacity, value: number) => void;
   onLayerLocate: (id: keyof LayerOpacity) => void;
   onRunWorkflowAction: (action: WorkflowAction) => void;
 }) {
@@ -120,6 +116,10 @@ export function LayerPanel({
   };
 
   const refreshJobs = () => {
+    if (!user) {
+      setJobs([]);
+      return;
+    }
     api.jobs(userId)
       .then((r) => {
         const nextJobs = r.jobs || [];
@@ -330,14 +330,14 @@ export function LayerPanel({
   return (
     <motion.aside
       layout
-      className={cn('no-drag fixed top-8 z-30 w-[min(360px,calc(100vw-1.5rem))]', side === 'right' ? 'right-3 sm:right-4' : 'left-3 sm:left-[470px]')}
+      className={cn('no-drag fixed bottom-3 top-3 z-30 w-[min(360px,calc(100vw-1.5rem))] sm:bottom-4 sm:top-8', side === 'right' ? 'right-3 sm:right-4' : 'left-3 sm:left-[470px]')}
       initial={{ opacity: 0, x: 18 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: 22, scale: 0.98 }}
       transition={{ type: 'spring', stiffness: 300, damping: 30 }}
     >
-      <GlassCard className="max-h-[calc(100vh-4rem)] overflow-hidden p-0">
-        <div className="sticky top-0 z-10 border-b border-white/30 bg-white/45 px-4 py-4 backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/35">
+      <GlassCard className="flex h-full min-h-0 flex-col overflow-hidden p-0">
+        <div className="shrink-0 border-b border-white/30 bg-white/45 px-4 py-4 backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/35">
           <div className="mb-4 flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2 text-lg font-black tracking-tight"><Layers3 size={20} strokeWidth={1.5} /> 数据与工具</div>
@@ -352,7 +352,7 @@ export function LayerPanel({
           <SegmentedControl value={basemap} onChange={(v) => setBasemap(v as Basemap)} options={[{ label: '矢量', value: 'standard' }, { label: '影像', value: 'satellite' }, { label: '地形', value: 'terrain' }, { label: '暗色', value: 'dark' }]} />
         </div>
 
-        <div className="max-h-[calc(100vh-12rem)] overflow-y-auto px-4 pb-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-10">
           <div className="mt-4 grid grid-cols-4 gap-2">
             {[['矢量', counts.vector || 0], ['栅格', counts.raster || 0], ['表格', counts.table || 0], ['文档', counts.document || 0]].map(([k, v]) => (
               <div key={String(k)} className="rounded-2xl border border-white/30 bg-white/35 p-2 text-center dark:border-white/10 dark:bg-white/5">
@@ -360,42 +360,6 @@ export function LayerPanel({
                 <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">{String(k)}</div>
               </div>
             ))}
-          </div>
-
-          <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
-            <div className="mb-3 flex items-center gap-2 text-sm font-black"><Layers3 size={16} strokeWidth={1.5} /> 图层透明度</div>
-            {([
-              ['stations', '站点观测'],
-              ['boundary', '研究区边界'],
-              ['dem', 'DEM / 高程'],
-              ['soil', '土壤水分'],
-              ['draw', '绘制结果']
-            ] as Array<[keyof LayerOpacity, string]>).map(([id, label]) => (
-              <label key={id} className="mb-2 grid grid-cols-[72px_minmax(0,1fr)_34px] items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
-                <span>{label}</span>
-                <input type="range" min={0.15} max={1} step={0.05} value={layerOpacity[id]} onChange={(event) => onLayerOpacityChange(id, Number(event.target.value))} />
-                <span className="text-right">{Math.round(layerOpacity[id] * 100)}%</span>
-              </label>
-            ))}
-          </div>
-
-          <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
-            <div className="mb-3 flex items-center gap-2 text-sm font-black"><Layers3 size={16} strokeWidth={1.5} /> 图例</div>
-            <div className="grid grid-cols-2 gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300">
-              {[
-                ['站点偏低', '#f59e0b'],
-                ['站点中等', '#22D3EE'],
-                ['站点偏高', '#10b981'],
-                ['研究区边界', '#22D3EE'],
-                ['DEM / 高程', '#38bdf8'],
-                ['土壤水分', '#10b981']
-              ].map(([label, color]) => (
-                <div key={label} className="flex items-center gap-2 rounded-xl bg-white/35 px-2 py-1.5 dark:bg-white/5">
-                  <span className="h-2.5 w-2.5 rounded-full" style={{ background: color }} />
-                  <span>{label}</span>
-                </div>
-              ))}
-            </div>
           </div>
 
           <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">

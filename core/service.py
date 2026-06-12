@@ -7,14 +7,32 @@ from uuid import uuid4
 
 from collections import defaultdict
 from datetime import datetime
+import csv
+import json
 import re
 import shutil
 import zipfile
 
-from .agent import GISAgent
 from .config import AUTO_ROUTE_LABEL, Settings, is_vision_model, load_settings, pick_preferred_model
-from .data_manager import DataManager
-from .resource_tools import get_export_task_overview
+from .context_builder import build_conversation_context, format_context_for_agent
+from .conversation_intent import classify_user_intent
+from .conversation_state import ConversationState, recover_conversation_state, save_conversation_state
+from .followup_resolver import resolve_followup
+from .frontend_context import apply_frontend_context_to_state, sanitize_frontend_context
+from .model_results import generate_model_result_id
+from .result_interpreter import interpret_result
+from .task_planner import build_task_plan
+from .task_outcome_advisor import build_task_outcome
+from .tool_executor import execute_validated_tool_plan
+from .workflow_executor import execute_workflow_plan
+
+try:
+    from .data_manager import DataManager
+except ModuleNotFoundError as exc:  # pragma: no cover - depends on environment
+    DataManager = None  # type: ignore[assignment]
+    _DATA_MANAGER_IMPORT_ERROR = exc
+else:
+    _DATA_MANAGER_IMPORT_ERROR = None
 
 
 VISUAL_KEYWORDS = (
@@ -107,6 +125,11 @@ CAPABILITY_GROUPS = {
 class GISWorkspaceService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or load_settings()
+        if DataManager is None:
+            raise RuntimeError(
+                "Missing GIS workspace dependency while initializing GISWorkspaceService. "
+                "Install the full backend requirements with `pip install -r requirements.txt`."
+            ) from _DATA_MANAGER_IMPORT_ERROR
         self.manager = DataManager(self.settings.workdir)
         self.route_mode = "auto"
         self.selected_model = self.settings.model
@@ -126,12 +149,19 @@ class GISWorkspaceService:
             "phase": "idle",
             "progress": 0,
         }
-        self._agents: dict[str, GISAgent] = {}
+        self._agents: dict[str, Any] = {}
         self.current_session_id = self._ensure_session()
 
-    def _get_agent(self, model_name: str) -> GISAgent:
+    def _get_agent(self, model_name: str) -> Any:
         if model_name not in self._agents:
             agent_settings = replace(self.settings, model=model_name)
+            try:
+                from .agent import GISAgent
+            except ModuleNotFoundError as exc:
+                raise RuntimeError(
+                    "Missing AI agent dependency while creating GISAgent. "
+                    "Install LangChain dependencies with `pip install -r requirements.txt`."
+                ) from exc
             self._agents[model_name] = GISAgent(agent_settings, self.manager)
         return self._agents[model_name]
 
@@ -198,6 +228,23 @@ class GISWorkspaceService:
         self.manager.database.set_current_conversation_id(session_id)
         self.manager.log_operation("切换对话", session_id, "chat")
 
+    def use_session_or_current(self, session_id: str) -> bool:
+        clean = str(session_id or "").strip()
+        if not clean:
+            self.current_session_id = self._ensure_session()
+            return False
+
+        existing = {item["session_id"] for item in self.manager.database.list_conversations()}
+        if clean in existing:
+            self.current_session_id = clean
+            self.manager.database.set_current_conversation_id(clean)
+            self.manager.log_operation("切换对话", clean, "chat")
+            return True
+
+        self.current_session_id = self._ensure_session()
+        self.manager.log_operation("会话已失效，使用当前会话继续", clean, "chat")
+        return False
+
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = self.manager.database.list_conversations()
         changed = False
@@ -245,6 +292,7 @@ class GISWorkspaceService:
 
     def clear_current_chat(self) -> None:
         self.manager.database.clear_conversation_messages(self.current_session_id)
+        self.manager.database.rename_conversation(self.current_session_id, "新对话")
         self.manager.log_operation("清空对话", self.current_session_id, "chat")
 
     def rename_session(self, session_id: str, title: str) -> None:
@@ -357,11 +405,25 @@ class GISWorkspaceService:
         return model_name, [], "自动路由到快速文本模型：常规 GIS 问答/处理请求"
 
     def upload_path(self, file_path: str) -> str:
-        return self._get_agent(self.selected_model).register_file(file_path)
+        message = self._register_uploaded_file(Path(file_path))
+        self._mark_latest_upload_state()
+        return message
 
     def upload_bytes(self, filename: str, data: bytes) -> str:
         saved_path = self.manager.save_uploaded_bytes(filename, data)
-        return self._get_agent(self.selected_model).register_file(str(saved_path))
+        message = self._register_uploaded_file(saved_path)
+        self._mark_latest_upload_state()
+        return message
+
+    def _register_uploaded_file(self, path: Path) -> str:
+        try:
+            return self._get_agent(self.selected_model).register_file(str(path))
+        except RuntimeError as exc:
+            if "LLM provider is not ready" not in str(exc) and "API_KEY_MISSING" not in str(exc):
+                raise
+            dataset_name = self.manager.load_path(str(path))
+            record = self.manager.get(dataset_name)
+            return f"Loaded dataset {dataset_name} ({record.data_type}) from {Path(path).name} using deterministic registration because the LLM provider is unavailable."
 
     def upload_bytes_batch(self, files: list[tuple[str, bytes]]) -> list[str]:
         if not files:
@@ -384,7 +446,7 @@ class GISWorkspaceService:
 
         for path in other_paths:
             try:
-                messages.append(self._get_agent(self.selected_model).register_file(str(path)))
+                messages.append(self._register_uploaded_file(path))
             except Exception as exc:
                 # ISMN/SMN-SDR station archives contain .stm time-series files. They are
                 # not ordinary tables, but the map endpoint can parse them directly from
@@ -405,9 +467,23 @@ class GISWorkspaceService:
             shp_path = next((p for p in paths if p.suffix.lower() == ".shp"), None)
             if shp_path is None:
                 continue
-            messages.append(self._get_agent(self.selected_model).register_file(str(shp_path)))
+            messages.append(self._register_uploaded_file(shp_path))
 
+        self._mark_latest_upload_state()
         return messages
+
+    def _mark_latest_upload_state(self) -> None:
+        if not self.current_session_id:
+            return
+        state = recover_conversation_state(self.manager, self.current_session_id)
+        names = self.manager.list_dataset_names()
+        if names:
+            state.active_dataset = names[-1]
+        state.active_artifacts = self.manager.list_artifacts()[:3]
+        state.last_task_type = "data_upload_analysis"
+        state.last_user_goal = "上传数据后的检查与理解"
+        state.pending_clarification = None
+        save_conversation_state(self.manager, self.current_session_id, state)
 
     def import_local_library_item(self, item: dict[str, Any]) -> str:
         """Load a registered local-library item into the current user workspace.
@@ -504,12 +580,513 @@ class GISWorkspaceService:
         }
 
     def list_export_tasks(self, refresh: bool = False, limit: int = 8) -> dict[str, Any]:
+        try:
+            from .resource_tools import get_export_task_overview
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Missing agent tool dependency while listing export tasks. "
+                "Install the full backend requirements with `pip install -r requirements.txt`."
+            ) from exc
         return get_export_task_overview(self.manager, refresh=refresh, limit=limit)
 
     def refresh_export_tasks(self, limit: int = 8) -> dict[str, Any]:
         return self.list_export_tasks(refresh=True, limit=limit)
 
-    def ask(self, prompt: str, visible_prompt: str | None = None) -> dict[str, Any]:
+    def _column_names_for_record(self, record: Any) -> list[str]:
+        columns = record.meta.get("columns") if isinstance(record.meta, dict) else None
+        if isinstance(columns, list):
+            return [str(item) for item in columns if str(item)]
+        return []
+
+    def _find_columns_by_keywords(self, columns: list[str], keywords: tuple[str, ...]) -> list[str]:
+        matched: list[str] = []
+        for column in columns:
+            lowered = column.lower()
+            normalized = re.sub(r"[^a-z0-9]+", "", lowered)
+            has_match = False
+            for keyword in keywords:
+                key = keyword.lower()
+                if key in {"x", "y"}:
+                    has_match = normalized == key
+                else:
+                    has_match = key in lowered or keyword in column
+                if has_match:
+                    break
+            if has_match:
+                matched.append(column)
+        return matched
+
+    def _record_row_label(self, record: Any) -> str:
+        meta = record.meta if isinstance(record.meta, dict) else {}
+        if record.data_type == "table":
+            return f"{meta.get('rows', 0)} 行"
+        if record.data_type == "vector":
+            return f"{meta.get('rows', 0)} 个要素"
+        if record.data_type == "raster":
+            width = meta.get("width") or "?"
+            height = meta.get("height") or "?"
+            count = meta.get("count") or "?"
+            return f"{width}x{height} 像元，{count} 个波段"
+        if record.data_type == "document":
+            return f"{meta.get('characters', 0)} 字符"
+        return "规模未知"
+
+    def _missing_summary_for_record(self, name: str, record: Any) -> str:
+        try:
+            if record.data_type == "table":
+                df = self.manager.get_table(name)
+            elif record.data_type == "vector":
+                gdf = self.manager.get_vector(name)
+                df = gdf.drop(columns=["geometry"], errors="ignore")
+            else:
+                return "不适用"
+            missing = df.isna().sum()
+            total = int(missing.sum())
+            if total == 0:
+                return "未发现缺失值"
+            top = [f"{col}={int(count)}" for col, count in missing[missing > 0].sort_values(ascending=False).head(5).items()]
+            return f"共 {total} 个缺失值，主要字段：{', '.join(top)}"
+        except Exception as exc:
+            return f"缺失值统计失败：{exc}"
+
+    def _workspace_dataset_profiles(self) -> list[dict[str, Any]]:
+        profiles: list[dict[str, Any]] = []
+        for name, record in self.manager.datasets.items():
+            columns = self._column_names_for_record(record)
+            lon_cols = self._find_columns_by_keywords(columns, ("lon", "lng", "longitude", "经度", "x"))
+            lat_cols = self._find_columns_by_keywords(columns, ("lat", "latitude", "纬度", "y"))
+            time_cols = self._find_columns_by_keywords(columns, ("time", "date", "datetime", "year", "month", "day", "时间", "日期", "年", "月", "日"))
+            value_cols = [col for col in columns if col not in {"geometry"} and col not in lon_cols and col not in lat_cols and col not in time_cols]
+            profiles.append(
+                {
+                    "name": name,
+                    "type": record.data_type,
+                    "row_label": self._record_row_label(record),
+                    "columns": columns,
+                    "lon_cols": lon_cols,
+                    "lat_cols": lat_cols,
+                    "time_cols": time_cols,
+                    "value_cols": value_cols,
+                    "missing": self._missing_summary_for_record(name, record),
+                    "meta": record.meta if isinstance(record.meta, dict) else {},
+                }
+            )
+        return profiles
+
+    def _format_workspace_summary_reply(self) -> str:
+        profiles = self._workspace_dataset_profiles()
+        if not profiles:
+            return (
+                "当前工作区还没有可分析的数据。\n\n"
+                "下一步：请先上传 CSV/XLSX 表格、Shapefile/GeoJSON 边界、GeoTIFF 栅格或文档材料。上传后我会自动识别字段、坐标、时间和可用于建模的变量。"
+            )
+
+        counts = {
+            "table": sum(1 for item in profiles if item["type"] == "table"),
+            "vector": sum(1 for item in profiles if item["type"] == "vector"),
+            "raster": sum(1 for item in profiles if item["type"] == "raster"),
+            "document": sum(1 for item in profiles if item["type"] == "document"),
+        }
+        lines = [
+            "当前工作区数据概况：",
+            f"- 共 {len(profiles)} 个数据集：表格 {counts['table']} 个，矢量 {counts['vector']} 个，栅格 {counts['raster']} 个，文档 {counts['document']} 个。",
+            "",
+            "数据集清单：",
+        ]
+        for item in profiles[:12]:
+            columns = item["columns"]
+            field_preview = "、".join(columns[:8]) if columns else "无属性字段"
+            lines.append(f"- {item['name']}：{item['type']}，{item['row_label']}，字段：{field_preview}")
+
+        map_ready = [item["name"] for item in profiles if item["type"] in {"vector", "raster"} or (item["lon_cols"] and item["lat_cols"])]
+        model_ready = [item["name"] for item in profiles if item["type"] in {"table", "vector"} and item["value_cols"]]
+        analysis_ready = [item["name"] for item in profiles if item["type"] in {"table", "vector", "raster"}]
+        lines.extend(
+            [
+                "",
+                "可用性判断：",
+                f"- 可直接用于制图：{', '.join(map_ready) if map_ready else '暂未发现。表格需要经纬度字段，或上传矢量/栅格数据。'}",
+                f"- 可用于建模：{', '.join(model_ready) if model_ready else '暂未发现明确变量字段。需要目标变量、特征变量，最好包含坐标或时间。'}",
+                f"- 可用于结果分析：{', '.join(analysis_ready) if analysis_ready else '暂无可分析数据。'}",
+                "",
+                "下一步建议：先运行字段与缺失值检查；如果表格包含经纬度，可生成点图层；如果有边界和栅格，可继续做裁剪、提取和专题制图。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _format_workspace_field_check_reply(self) -> str:
+        profiles = self._workspace_dataset_profiles()
+        if not profiles:
+            return (
+                "当前没有检测到已上传数据，因此无法检查字段、坐标、时间和缺失值。\n\n"
+                "下一步：上传数据后再点击该推荐问题，我会给出字段清单、坐标识别、时间字段识别、缺失值统计和处理计划。"
+            )
+
+        lines = ["字段、坐标、时间和缺失值检查结果："]
+        for item in profiles[:12]:
+            columns = item["columns"]
+            lines.extend(
+                [
+                    "",
+                    f"{item['name']}（{item['type']}，{item['row_label']}）",
+                    f"- 字段：{'、'.join(columns[:18]) if columns else '无属性字段'}",
+                    f"- 坐标字段：经度={', '.join(item['lon_cols']) if item['lon_cols'] else '未识别'}；纬度={', '.join(item['lat_cols']) if item['lat_cols'] else '未识别'}",
+                    f"- 时间字段：{', '.join(item['time_cols']) if item['time_cols'] else '未识别'}",
+                    f"- 缺失值：{item['missing']}",
+                ]
+            )
+            if item["type"] == "vector":
+                meta = item["meta"]
+                lines.append(f"- 空间信息：CRS={meta.get('crs') or '未知'}；几何类型={', '.join(meta.get('geometry_types') or []) or '未知'}")
+            elif item["type"] == "raster":
+                meta = item["meta"]
+                lines.append(f"- 栅格信息：CRS={meta.get('crs') or '未知'}；nodata={meta.get('nodata')}")
+
+        lines.extend(
+            [
+                "",
+                "下一步处理计划：",
+                "1. 先确认坐标字段和坐标系；表格若已识别经纬度，可转为点图层并检查空间范围。",
+                "2. 对有缺失值的关键变量先做缺失统计、剔除或插补；不要直接进入建模。",
+                "3. 若存在时间字段，统一时间格式并按日、月或季节聚合。",
+                "4. 若目标是土壤水分融合，下一步需要明确目标变量、候选特征、研究区边界和训练/验证划分方式。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _format_soil_workflow_readiness_reply(self) -> str:
+        profiles = self._workspace_dataset_profiles()
+        table_or_vector = [item for item in profiles if item["type"] in {"table", "vector"}]
+        has_space = any(item["type"] == "vector" or (item["lon_cols"] and item["lat_cols"]) for item in profiles)
+        has_time = any(item["time_cols"] for item in profiles)
+        has_value = any(item["value_cols"] for item in table_or_vector)
+        missing_parts = []
+        if not has_space:
+            missing_parts.append("坐标字段或研究区矢量边界")
+        if not has_time:
+            missing_parts.append("时间字段")
+        if not has_value:
+            missing_parts.append("可作为目标/特征的数值字段")
+        status = "具备初步检查条件" if profiles else "尚未上传数据"
+        if profiles and not missing_parts:
+            status = "具备进入土壤水分融合流程的基础条件"
+
+        lines = [
+            "闪电河流域土壤水分融合流程准备度检查：",
+            f"- 当前状态：{status}。",
+            f"- 空间信息：{'已具备' if has_space else '不足'}。",
+            f"- 时间信息：{'已具备' if has_time else '不足'}。",
+            f"- 建模变量：{'已发现候选字段' if has_value else '不足'}。",
+        ]
+        if missing_parts:
+            lines.append(f"- 需要补充或确认：{', '.join(missing_parts)}。")
+        lines.extend(
+            [
+                "",
+                "建议流程：",
+                "1. 完成字段、坐标、时间和缺失值检查。",
+                "2. 生成统一训练表，明确土壤水分目标变量和遥感/地形/时序特征。",
+                "3. 依次运行 BTCH、RF、XGBoost、LSTM，并保存指标表。",
+                "4. 在模型预测结果基础上运行 GCP，输出预测区间和 PICP/MPIW 等可靠性指标。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _format_download_readiness_reply(self) -> str:
+        profiles = self._workspace_dataset_profiles()
+        map_context = [item["name"] for item in profiles if item["type"] in {"vector", "raster"} or (item["lon_cols"] and item["lat_cols"])]
+        time_context = [item["name"] for item in profiles if item["time_cols"]]
+        lines = [
+            "下载准备检查：",
+            f"- 当前工作区数据：{len(profiles)} 个数据集。",
+            f"- 可作为空间范围或点位参考：{', '.join(map_context) if map_context else '暂未发现明确边界、栅格或经纬度表格。'}",
+            f"- 可作为时间筛选参考：{', '.join(time_context) if time_context else '暂未识别时间字段，需要用户指定年份、月份或日期范围。'}",
+            "",
+            "可准备的数据方向：",
+            "- DEM / 高程：需要研究区边界或经纬度范围，适合地形因子、坡度坡向和裁剪制图。",
+            "- Sentinel-2：需要研究区、日期范围和云量阈值，适合植被、水体或地表覆盖特征。",
+            "- 土壤水分/遥感产品：需要研究区和时间范围，适合与站点观测做匹配、融合或验证。",
+            "",
+            "当前数据集：",
+        ]
+        if profiles:
+            for item in profiles[:12]:
+                lines.append(f"- {item['name']}：{item['type']}，{item['row_label']}")
+        else:
+            lines.append("- 暂无。请先上传边界、站点表或指定行政区。")
+        lines.extend(
+            [
+                "",
+                "下一步：请补充或确认产品类型、研究区、时间范围和输出名；如果已有研究区边界，我可以直接用于下载任务的空间筛选。",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _format_capability_reply(self) -> str:
+        lines = ["我可以围绕当前工作区做这些事，包括数据检查、制图、建模、下载和结果解释："]
+        for group, items in CAPABILITY_GROUPS.items():
+            lines.append(f"- {group}：{'；'.join(items[:3])}")
+        lines.append("")
+        lines.append("你可以直接上传数据后点击推荐问题，我会优先用本地工作区数据给出确定性检查结果；需要复杂推理时再调用模型。")
+        return "\n".join(lines)
+
+    def _read_first_csv_record(self, path: str | Path) -> dict[str, Any]:
+        with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        if not rows:
+            return {}
+        preferred = next((row for row in rows if str(row.get("scope") or "").lower() in {"overall", "test", "spatial_cv"}), rows[0])
+        out: dict[str, Any] = {}
+        for key, value in preferred.items():
+            if value is None:
+                out[key] = value
+                continue
+            text = str(value).strip()
+            try:
+                out[key] = float(text)
+            except ValueError:
+                out[key] = text
+        return out
+
+    def _read_top_importance(self, path: str | Path, limit: int = 5) -> list[dict[str, Any]]:
+        try:
+            with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))[:limit]
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item: dict[str, Any] = {}
+            for key, value in row.items():
+                if value is None:
+                    item[key] = value
+                    continue
+                text = str(value).strip()
+                try:
+                    item[key] = float(text)
+                except ValueError:
+                    item[key] = text
+            out.append(item)
+        return out
+
+    def _model_recommendations(self, model: str, metrics: dict[str, Any], importance: list[dict[str, Any]], summary: dict[str, Any]) -> list[str]:
+        recommendations: list[str] = []
+        rmse = metrics.get("RMSE")
+        r_value = metrics.get("R")
+        nse = metrics.get("NSE")
+        if isinstance(rmse, (int, float)):
+            recommendations.append(f"RMSE={rmse:.4g}，建议结合目标变量量纲判断误差是否可接受，并与 RF/BTCH/LSTM 做横向比较。")
+        if isinstance(r_value, (int, float)) and r_value >= 0.85:
+            recommendations.append(f"R={r_value:.3f}，拟合相关性较高，但仍需要独立验证或空间分块验证排除过拟合。")
+        if isinstance(nse, (int, float)) and nse < 0.5:
+            recommendations.append("NSE 偏低，建议检查目标变量、异常值、时间对齐和特征缺失。")
+        if importance:
+            top = str(importance[0].get("feature") or importance[0].get("variable") or "")
+            if top:
+                recommendations.append(f"当前最重要特征是 {top}，建议在论文中解释其水文或遥感机理，并检查特征重要性是否稳定。")
+        if model == "XGBoost" and not summary.get("spatial_validation"):
+            recommendations.append("本次 XGBoost 未启用或未完成空间验证；正式论文结果建议补做空间分块 CV 与 GCP 不确定性分析。")
+        if not recommendations:
+            recommendations.append("建议打开指标表、重要性表和 summary 文件，先确认样本量、目标字段和训练参数，再进入论文结果解释。")
+        return recommendations[:5]
+
+    def discover_model_results(self) -> list[dict[str, Any]]:
+        registered = self.manager.list_model_results(limit=50)
+        registered_keys = {
+            (
+                str(item.get("metrics_dataset") or ""),
+                str(item.get("metrics_path") or ""),
+                str(item.get("output_prefix") or ""),
+                str(item.get("model") or item.get("model_name") or ""),
+            )
+            for item in registered
+        }
+        artifacts = self.manager.list_artifacts()
+        by_name = {str(item.get("name") or ""): item for item in artifacts}
+        model_keys = {"xgb": "XGBoost", "rf": "RF", "lstm": "LSTM", "gcp": "GCP"}
+        results: list[dict[str, Any]] = list(registered)
+        for item in artifacts:
+            name = str(item.get("name") or "")
+            match = re.match(r"(.+)_(xgb|rf|lstm|gcp)_metrics\.csv$", name, flags=re.IGNORECASE)
+            if not match:
+                continue
+            prefix, key = match.group(1), match.group(2).lower()
+            model = model_keys.get(key, key.upper())
+            metrics_dataset = Path(name).stem
+            metrics_path = str(item.get("path") or "")
+            if (metrics_dataset, metrics_path, prefix, model) in registered_keys:
+                continue
+            metrics = self._read_first_csv_record(metrics_path)
+            importance_name = f"{prefix}_{key}_importance.csv"
+            summary_name = f"{prefix}_{key}_summary.json"
+            model_name = f"{prefix}_{key}_model.joblib"
+            importance_artifact = by_name.get(importance_name)
+            summary_artifact = by_name.get(summary_name)
+            model_artifact = by_name.get(model_name)
+            importance_rows = self._read_top_importance(str(importance_artifact.get("path"))) if importance_artifact else []
+            summary: dict[str, Any] = {}
+            if summary_artifact:
+                try:
+                    summary = json.loads(Path(str(summary_artifact.get("path"))).read_text(encoding="utf-8"))
+                except Exception:
+                    summary = {}
+            related = [{"label": "指标表", **item}]
+            if importance_artifact:
+                related.append({"label": "特征重要性表", **importance_artifact})
+            if summary_artifact:
+                related.append({"label": "摘要文件", **summary_artifact})
+            if model_artifact:
+                related.append({"label": "模型文件", **model_artifact})
+            results.append({
+                "model_result_id": generate_model_result_id(model, prefix, legacy_key=metrics_path or name),
+                "task_id": "",
+                "dataset_id": str(summary.get("dataset") or ""),
+                "model": model,
+                "model_name": model,
+                "output_prefix": prefix,
+                "metrics_dataset": metrics_dataset,
+                "metrics_path": metrics_path,
+                "figure_path": "",
+                "importance_dataset": Path(importance_name).stem if importance_artifact else "",
+                "summary_dataset": Path(summary_name).stem if summary_artifact else "",
+                "metrics": metrics,
+                "top_importance": importance_rows,
+                "summary": summary,
+                "artifacts": related,
+                "recommendations": self._model_recommendations(model, metrics, importance_rows, summary),
+                "modified": item.get("modified") or "",
+            })
+        results.sort(key=lambda row: str(row.get("modified") or ""), reverse=True)
+        return results[:12]
+
+    def _format_latest_model_result_context(self) -> str:
+        results = self.discover_model_results()
+        if not results:
+            return ""
+        result = results[0]
+        metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+        metric_parts = []
+        for key in ["R", "RMSE", "ubRMSE", "Bias", "NSE", "MAE"]:
+            value = metrics.get(key)
+            if isinstance(value, (int, float)):
+                metric_parts.append(f"{key}={value:.4g}")
+        artifact_lines = []
+        for artifact in result.get("artifacts", [])[:4]:
+            if not isinstance(artifact, dict):
+                continue
+            label = str(artifact.get("label") or artifact.get("name") or "成果文件")
+            display_path = str(artifact.get("display_path") or artifact.get("path") or "")
+            artifact_lines.append(f"- {label}：{display_path}")
+        recommendation_lines = [f"- {item}" for item in result.get("recommendations", [])[:4]]
+        return "\n".join([
+            "",
+            "处理后的数据位置：",
+            *artifact_lines,
+            "",
+            f"最新模型结果：{result.get('model')}（{result.get('output_prefix')}）",
+            f"关键指标：{', '.join(metric_parts) if metric_parts else '请打开指标表查看详细数值'}",
+            "",
+            "下一步建议：",
+            *recommendation_lines,
+        ])
+
+    def _should_append_model_result_context(self, prompt: str, reply: str) -> bool:
+        text = f"{prompt}\n{reply}".lower()
+        if "处理后的数据位置" in reply:
+            return False
+        tokens = ("xgboost", "xgb", "rf", "lstm", "gcp", "模型", "建模", "分析结果", "结果在哪里", "处理后的数据")
+        return any(token in text for token in tokens)
+
+    def _builtin_workspace_reply(self, prompt: str) -> str | None:
+        clean = " ".join(str(prompt or "").strip().split())
+        if not clean:
+            return None
+        if "概括当前工作区" in clean or ("工作区数据" in clean and ("制图" in clean or "建模" in clean or "结果分析" in clean)):
+            return self._format_workspace_summary_reply()
+        if "检查当前上传数据" in clean or ("字段" in clean and "缺失值" in clean and ("坐标" in clean or "时间" in clean)):
+            return self._format_workspace_field_check_reply()
+        if "BTCH" in clean and "GCP" in clean and ("土壤水分" in clean or "融合" in clean):
+            return self._format_soil_workflow_readiness_reply()
+        if ("下载" in clean or "DEM" in clean or "Sentinel" in clean or "遥感" in clean) and ("当前工作区" in clean or "准备" in clean or "检查" in clean):
+            return self._format_download_readiness_reply()
+        if "你能做什么" in clean or "有什么功能" in clean or "可以做什么" in clean:
+            return self._format_capability_reply()
+        return None
+
+    def _update_conversation_state_after_turn(
+        self,
+        state: ConversationState,
+        *,
+        user_message: str,
+        intent: dict[str, Any],
+        plan: dict[str, Any],
+        context: dict[str, Any],
+        reply: str,
+        dashboard_data: dict[str, Any],
+        images: list[str] | None = None,
+        error: Exception | None = None,
+    ) -> ConversationState:
+        task_type = str(plan.get("task_type") or intent.get("intent") or "")
+        state.last_task_type = task_type
+        state.last_user_goal = user_message or state.last_user_goal
+        if context.get("referenced_object"):
+            state.referenced_object = context["referenced_object"]
+        if isinstance(context.get("active_dataset"), dict) and context["active_dataset"].get("name"):
+            state.active_dataset = str(context["active_dataset"]["name"])
+        elif not state.active_dataset:
+            names = self.manager.list_dataset_names()
+            state.active_dataset = names[-1] if names else ""
+
+        artifacts = dashboard_data.get("artifacts") if isinstance(dashboard_data.get("artifacts"), list) else []
+        state.active_artifacts = [item for item in artifacts[:3] if isinstance(item, dict)]
+        last_plot = str(dashboard_data.get("last_plot") or "")
+        if not last_plot and images:
+            last_plot = images[0]
+        if not last_plot:
+            for item in state.active_artifacts:
+                path = str(item.get("path") or "")
+                if path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    last_plot = path
+                    break
+        if last_plot:
+            state.last_map_path = last_plot
+
+        model_results = dashboard_data.get("model_results") if isinstance(dashboard_data.get("model_results"), list) else []
+        if model_results and isinstance(model_results[0], dict):
+            state.last_model_result = model_results[0]
+
+        state.last_tool_results = [
+            {
+                "intent": intent.get("intent"),
+                "task_type": task_type,
+                "recommended_tools": plan.get("recommended_tools", []),
+                "reply_preview": str(reply or "")[:500],
+            },
+            *state.last_tool_results[:2],
+        ]
+        state.pending_clarification = (
+            {"question": plan.get("clarification_question"), "missing_inputs": plan.get("missing_inputs", [])}
+            if plan.get("should_ask_clarification")
+            else None
+        )
+        if error is not None:
+            state.last_error = {"message": str(error), "task_type": task_type, "prompt": user_message}
+        elif task_type != "troubleshooting":
+            state.last_error = state.last_error
+        save_conversation_state(self.manager, self.current_session_id, state)
+        return state
+
+    def apply_frontend_context(self, frontend_context: dict[str, Any] | None) -> None:
+        if not self.current_session_id:
+            self.current_session_id = self._ensure_session()
+        clean_frontend_context = sanitize_frontend_context(frontend_context or {})
+        if not clean_frontend_context:
+            return
+        state = recover_conversation_state(self.manager, self.current_session_id)
+        apply_frontend_context_to_state(state, clean_frontend_context)
+        save_conversation_state(self.manager, self.current_session_id, state)
+
+    def ask(self, prompt: str, visible_prompt: str | None = None, frontend_context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.current_session_id:
             self.current_session_id = self._ensure_session()
 
@@ -522,17 +1099,261 @@ class GISWorkspaceService:
         self._set_runtime_status("智能体正在运行", "正在解析任务与选择模型", busy=True, phase="routing", progress=10)
 
         try:
+            state = recover_conversation_state(self.manager, self.current_session_id)
+            clean_frontend_context = sanitize_frontend_context(frontend_context or {})
+            if clean_frontend_context:
+                apply_frontend_context_to_state(state, clean_frontend_context)
+                save_conversation_state(self.manager, self.current_session_id, state)
+            dashboard_data = self.dashboard()
+            intent = classify_user_intent(user_message, state.to_dict(), self.manager.workspace_summary())
+            followup = resolve_followup(user_message, state.to_dict(), dashboard_data) if intent.get("needs_followup_resolution") or intent.get("intent") in {"follow_up_question", "result_analysis", "troubleshooting"} else {}
+            if followup.get("referenced_object"):
+                state.referenced_object = followup["referenced_object"]
+            context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+            plan = build_task_plan(user_message, intent, context, manager=self.manager)
+            builtin_reply = self._builtin_workspace_reply(user_message)
+
+            if plan.get("should_ask_clarification") and builtin_reply is None:
+                reply = interpret_result(user_message, intent, plan, str(plan.get("clarification_question") or ""), context, dashboard_data)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = {"model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "intent": intent, "plan": plan}
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "clarification", "model": "conversation-coordinator", "reason": "任务规划缺少关键输入", "images": []}
+                self.manager.log_operation("对话澄清", user_message[:180], "chat")
+                self._set_runtime_status("等待补充信息", str(plan.get("clarification_question") or ""), busy=False, phase="clarification", progress=100)
+                return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "images": [], "task_outcome": task_outcome}
+
+            workflow_execution = execute_workflow_plan(self.manager, plan) if plan.get("workflow_plan") else {"executed": False}
+            if workflow_execution.get("executed"):
+                raw_reply = str(workflow_execution.get("raw_reply") or "")
+                dashboard_data = self.dashboard()
+                context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+                reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                images: list[str] = []
+                workflow_result = workflow_execution.get("workflow_result") if isinstance(workflow_execution.get("workflow_result"), dict) else {}
+                artifacts = workflow_result.get("final_artifacts") if isinstance(workflow_result.get("final_artifacts"), list) else []
+                for artifact in artifacts:
+                    if isinstance(artifact, dict) and str(artifact.get("type") or "") == "map" and artifact.get("path"):
+                        images.append(str(artifact["path"]))
+                if not workflow_execution.get("ok"):
+                    state.last_error = {
+                        "message": raw_reply,
+                        "task_type": plan.get("task_type") or intent.get("intent"),
+                        "prompt": user_message,
+                        "failed_step": workflow_execution.get("failed_step"),
+                    }
+                assistant_meta = {
+                    "model": "conversation-coordinator",
+                    "mode": "deterministic_workflow",
+                    "reason": "workflow_plan",
+                    "intent": intent,
+                    "plan": plan,
+                    "workflow_execution": workflow_execution,
+                }
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                    images=images,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {
+                    "mode": "deterministic_workflow",
+                    "model": "conversation-coordinator",
+                    "reason": "workflow_plan",
+                    "images": images,
+                }
+                self.manager.log_operation("deterministic_workflow_execution", ",".join(workflow_execution.get("executed_steps", [])), "workflow")
+                self._set_runtime_status("运行完成", "已执行经过验证的 GIS 工作流", busy=False, phase="complete", progress=100)
+                return {
+                    "reply": reply,
+                    "model": "conversation-coordinator",
+                    "mode": "deterministic_workflow",
+                    "reason": "workflow_plan",
+                    "images": images,
+                    "task_outcome": task_outcome,
+                }
+
+            deterministic_execution = execute_validated_tool_plan(self.manager, plan)
+            if deterministic_execution.get("executed"):
+                raw_reply = str(deterministic_execution.get("raw_reply") or "")
+                dashboard_data = self.dashboard()
+                context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+                reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                images: list[str] = []
+                for tool_result in deterministic_execution.get("tool_results", []):
+                    if not isinstance(tool_result, dict):
+                        continue
+                    artifacts = tool_result.get("artifacts") if isinstance(tool_result.get("artifacts"), list) else []
+                    for artifact in artifacts:
+                        if isinstance(artifact, dict) and str(artifact.get("type") or "") == "map" and artifact.get("path"):
+                            images.append(str(artifact["path"]))
+                if not deterministic_execution.get("ok"):
+                    state.last_error = {
+                        "message": raw_reply,
+                        "task_type": plan.get("task_type") or intent.get("intent"),
+                        "prompt": user_message,
+                        "failed_tool": deterministic_execution.get("failed_tool"),
+                    }
+                assistant_meta = {
+                    "model": "conversation-coordinator",
+                    "mode": "deterministic_tool",
+                    "reason": "validated_tool_args",
+                    "intent": intent,
+                    "plan": plan,
+                    "tool_execution": deterministic_execution,
+                }
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                    images=images,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {
+                    "mode": "deterministic_tool",
+                    "model": "conversation-coordinator",
+                    "reason": "validated_tool_args",
+                    "images": images,
+                }
+                self.manager.log_operation("deterministic_tool_execution", ",".join(deterministic_execution.get("executed_tools", [])), "tool")
+                self._set_runtime_status("运行完成", "已执行经过验证的 GIS 工具计划", busy=False, phase="complete", progress=100)
+                return {
+                    "reply": reply,
+                    "model": "conversation-coordinator",
+                    "mode": "deterministic_tool",
+                    "reason": "validated_tool_args",
+                    "images": images,
+                    "task_outcome": task_outcome,
+                }
+
+            if builtin_reply is not None:
+                dashboard_data = self.dashboard()
+                task_outcome = build_task_outcome("analysis", {"reply": builtin_reply}, dashboard=dashboard_data)
+                builtin_reply = interpret_result(user_message, intent, plan, builtin_reply, context, dashboard_data)
+                assistant_meta = {"model": "builtin-workspace", "mode": "builtin", "reason": "builtin_workspace_prompt", "intent": intent, "plan": plan}
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=builtin_reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", builtin_reply, meta=assistant_meta)
+                self.last_route = {"mode": "builtin", "model": "builtin-workspace", "reason": "内置工作区推荐问题", "images": []}
+                self.manager.log_operation("内置推荐问题回复", user_message[:180], "chat")
+                self._set_runtime_status("运行完成", "已基于本地工作区生成回答", busy=False, phase="complete", progress=100)
+                return {"reply": builtin_reply, "model": "builtin-workspace", "mode": "builtin", "reason": "builtin_workspace_prompt", "images": [], "task_outcome": task_outcome}
+
+            referenced = context.get("referenced_object") if isinstance(context.get("referenced_object"), dict) else {}
+            if referenced and str(intent.get("intent") or "") in {"follow_up_question", "result_analysis", "troubleshooting"}:
+                ref_type = str(referenced.get("type") or "object")
+                ref_id = str(referenced.get("id") or referenced.get("artifact_id") or referenced.get("model_result_id") or "")
+                ref_label = str(referenced.get("label") or referenced.get("name") or ref_id or ref_type)
+                ref_path = str(referenced.get("path") or "")
+                raw_parts = [
+                    f"已定位当前引用对象：{ref_label}",
+                    f"对象类型：{ref_type}",
+                ]
+                if ref_id:
+                    raw_parts.append(f"对象 ID：{ref_id}")
+                if ref_path:
+                    raw_parts.append(f"对象路径：{ref_path}")
+                raw_parts.append("本轮基于当前工作区记录和前端选中对象进行解释，没有重新生成或编造新的指标。")
+                raw_reply = "\n".join(raw_parts)
+                reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = {
+                    "model": "conversation-coordinator",
+                    "mode": "deterministic_context",
+                    "reason": "referenced_object_context",
+                    "intent": intent,
+                    "plan": plan,
+                    "referenced_object": referenced,
+                }
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "deterministic_context", "model": "conversation-coordinator", "reason": "referenced_object_context", "images": []}
+                self.manager.log_operation("deterministic_context_reply", ref_label[:180], "chat")
+                self._set_runtime_status("运行完成", "已基于当前选中对象生成解释", busy=False, phase="complete", progress=100)
+                return {
+                    "reply": reply,
+                    "model": "conversation-coordinator",
+                    "mode": "deterministic_context",
+                    "reason": "referenced_object_context",
+                    "images": [],
+                    "task_outcome": task_outcome,
+                }
+
             model_name, image_paths, reason = self._decide_model(prompt)
             self._set_runtime_status("智能体正在运行", f"正在调用 {model_name} 并执行 GIS 工具", busy=True, phase="reasoning", progress=45)
             agent = self._get_agent(model_name)
-            reply, _ = agent.ask(prompt, history=self._history_for_agent()[:-1], image_paths=image_paths)
+            enhanced_prompt = (
+                f"{prompt}\n\n【对话协调上下文】\n{format_context_for_agent(context)}"
+                f"\n\n【结构化任务计划】\n{json.dumps(plan, ensure_ascii=False, indent=2, default=str)}"
+                "\n\n请严格基于以上上下文、当前工作区和工具结果回答；不要编造字段、路径、指标或图件内容。"
+            )
+            reply, _ = agent.ask(enhanced_prompt, history=self._history_for_agent()[:-1], image_paths=image_paths)
+            if self._should_append_model_result_context(user_message, reply):
+                model_context = self._format_latest_model_result_context()
+                if model_context:
+                    reply = f"{reply.rstrip()}\n{model_context}"
+            dashboard_data = self.dashboard()
+            context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+            reply = interpret_result(user_message, intent, plan, reply, context, dashboard_data)
+            task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
             self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
-            assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths}
+            assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "intent": intent, "plan": plan}
+            self._update_conversation_state_after_turn(
+                state,
+                user_message=user_message,
+                intent=intent,
+                plan=plan,
+                context=context,
+                reply=reply,
+                dashboard_data=dashboard_data,
+                images=image_paths,
+            )
             self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
             self.manager.log_operation("模型路由", f"{model_name} | {reason}", "route")
             self._set_runtime_status("运行完成", f"已完成任务，使用模型 {model_name}", busy=False, phase="complete", progress=100)
-            return {"reply": reply, "model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths}
-        except Exception:
+            return {"reply": reply, "model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "task_outcome": task_outcome}
+        except Exception as exc:
+            try:
+                state = recover_conversation_state(self.manager, self.current_session_id)
+                state.last_error = {"message": str(exc), "task_type": "unknown", "prompt": user_message}
+                save_conversation_state(self.manager, self.current_session_id, state)
+            except Exception:
+                pass
             self._set_runtime_status("运行失败", "处理任务时出现错误", busy=False, phase="error", progress=0)
             raise
 
@@ -582,6 +1403,7 @@ class GISWorkspaceService:
         latest_pipeline = recent_runs[0] if recent_runs else None
         if latest_pipeline:
             latest_pipeline = self.manager.pipeline_run_detail(latest_pipeline["run_id"])
+        model_results = self.discover_model_results()
 
         return {
             "summary": self.manager.workspace_summary(),
@@ -602,6 +1424,7 @@ class GISWorkspaceService:
             "capability_groups": CAPABILITY_GROUPS,
             "database": db_status,
             "latest_pipeline": latest_pipeline,
+            "model_results": model_results,
             "current_session_id": self.current_session_id,
             "sessions": self.list_sessions(),
             "messages": self.current_messages(),

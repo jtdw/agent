@@ -39,6 +39,9 @@ def _safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
     root = target_dir.resolve()
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.infolist():
+            mode = member.external_attr >> 16
+            if mode & 0o170000 == 0o120000:
+                raise ValueError(f"Unsafe admin boundary zip symlink: {member.filename}")
             target = (root / member.filename).resolve()
             try:
                 target.relative_to(root)

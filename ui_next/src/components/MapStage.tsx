@@ -5,6 +5,8 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, Download, Layers3, MapPin, MousePointerClick, Ruler, Trash2, Triangle, Undo2 } from 'lucide-react';
 import { api, ResultMapLayer, StationCollection, StationPoint, TiandituConfig } from '@/lib/api';
+import type { ChatContextPayload } from '@/lib/chatContext';
+import { sanitizeFeatureProperties } from '@/lib/chatContext';
 import { cn } from '@/lib/cn';
 import { getOverlayVisibilityPlan, type LayerOpacity, type LayerVisibility } from './mapLayerPolicy';
 import type { MapCommand } from './mapCommands';
@@ -13,6 +15,51 @@ type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
 
 const fallbackCenter: [number, number] = [116.18, 41.78];
 const fallbackBounds: [number, number, number, number] = [115.5, 41.5, 116.5, 42.5];
+type MapBounds = [number, number, number, number];
+
+function normalizeMapBounds(value: unknown): MapBounds | null {
+  if (!Array.isArray(value) || value.length !== 4) return null;
+  const bounds = value.map((item) => Number(item));
+  if (!bounds.every((item) => Number.isFinite(item))) return null;
+  const [minx, miny, maxx, maxy] = bounds;
+  if (minx >= maxx || miny >= maxy) return null;
+  if (minx < -180 || maxx > 180 || miny < -90 || maxy > 90) return null;
+  return [minx, miny, maxx, maxy];
+}
+
+function mapBoundsPayload(map: MapLibreMap): MapBounds | undefined {
+  const bounds = map.getBounds();
+  return normalizeMapBounds([bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]) || undefined;
+}
+
+function fitPaddingForCanvas(map: MapLibreMap) {
+  const canvas = map.getCanvas();
+  const width = canvas.clientWidth || canvas.offsetWidth || 0;
+  const height = canvas.clientHeight || canvas.offsetHeight || 0;
+  if (width < 80 || height < 80) return null;
+  const horizontal = width < 640 ? Math.max(16, Math.floor(width * 0.06)) : Math.min(180, Math.floor(width * 0.12));
+  const vertical = height < 640 ? Math.max(16, Math.floor(height * 0.06)) : Math.min(110, Math.floor(height * 0.12));
+  if (horizontal * 2 >= width - 24 || vertical * 2 >= height - 24) return null;
+  return { top: vertical, right: horizontal, bottom: vertical, left: horizontal };
+}
+
+function safeFitBounds(map: MapLibreMap, rawBounds: unknown, maxZoom: number, duration: number = 900) {
+  const bounds = normalizeMapBounds(rawBounds);
+  const padding = fitPaddingForCanvas(map);
+  if (!bounds || !padding) return false;
+  try {
+    map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], { padding, maxZoom, duration });
+    return true;
+  } catch {
+    try {
+      map.setCenter([(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]);
+      map.setZoom(Math.min(maxZoom, Math.max(2, map.getZoom())));
+    } catch {
+      // Keep the current view when MapLibre cannot safely fit the requested bounds.
+    }
+    return false;
+  }
+}
 
 function expandTiandituTemplate(template: string, subdomains: string[]) {
   return (subdomains.length ? subdomains : ['0', '1', '2', '3', '4', '5', '6', '7']).map((s) => template.replace('{s}', s));
@@ -76,31 +123,6 @@ function buildFallbackStyle(theme: 'light' | 'dark'): StyleSpecification {
   };
 }
 
-function addDemoLayers(map: MapLibreMap) {
-  if (!map.getSource('demo_aoi')) {
-    map.addSource('demo_aoi', {
-      type: 'geojson',
-      data: {
-        type: 'FeatureCollection',
-        features: [
-          {
-            type: 'Feature',
-            properties: { name: 'Shandian River Basin AOI' },
-            geometry: {
-              type: 'Polygon',
-              coordinates: [[[115.50, 41.50], [116.48, 41.50], [116.48, 42.48], [115.50, 42.48], [115.50, 41.50]]]
-            }
-          }
-        ]
-      }
-    });
-  }
-  if (!map.getLayer('demo_aoi_fill')) {
-    map.addLayer({ id: 'demo_aoi_fill', type: 'fill', source: 'demo_aoi', paint: { 'fill-color': '#22D3EE', 'fill-opacity': 0.08 } });
-    map.addLayer({ id: 'demo_aoi_line', type: 'line', source: 'demo_aoi', paint: { 'line-color': '#22D3EE', 'line-width': 1.6, 'line-blur': 0.2, 'line-opacity': 0.62 } });
-  }
-}
-
 function stationColor(station: StationPoint) {
   const value = station.mean_sm ?? null;
   if (value === null) return '#94a3b8';
@@ -140,90 +162,111 @@ function stationGeoJson(stations: StationPoint[]) {
   };
 }
 
-function setStationLayer(map: MapLibreMap, stations: StationPoint[]) {
-  if (!map.isStyleLoaded()) return;
-  const data = stationGeoJson(stations);
-  const source = map.getSource('station_points') as GeoJSONSource | undefined;
-  if (source) {
-    source.setData(data);
-  } else {
-    map.addSource('station_points', { type: 'geojson', data });
-  }
+function stationPopupHtml(station: StationPoint) {
+  const lng = Number(station.longitude);
+  const lat = Number(station.latitude);
+  const mean = station.mean_sm == null ? '--' : Number(station.mean_sm).toFixed(3);
+  const name = escapeHtml(String(station.name || station.station_id || 'station'));
+  return `
+    <div class="font-black text-sm mb-1">${name}</div>
+    <div class="text-xs text-slate-500">2019 5 cm mean soil moisture: ${mean} m3/m3</div>
+    <div class="text-xs text-slate-500 mt-1">Samples: ${station.sample_count ?? 0}; elevation: ${station.elevation_m ?? '--'} m</div>
+    <div class="text-xs text-slate-500 mt-1">Lon/lat: ${lng.toFixed(5)}, ${lat.toFixed(5)}</div>
+    <div class="mt-3 h-2 rounded-full bg-slate-200/70 overflow-hidden"><div style="width:${stationWidth(station)}%; background:linear-gradient(90deg,#0B5FF4,#22D3EE,#10b981)" class="h-full rounded-full"></div></div>
+  `;
+}
 
-  if (!map.getLayer('station_points_halo')) {
-    map.addLayer({
-      id: 'station_points_halo',
-      type: 'circle',
-      source: 'station_points',
-      paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 5, 8, 10, 12, 16],
-        'circle-color': ['get', 'color'],
-        'circle-opacity': 0.18,
-        'circle-stroke-color': ['get', 'color'],
-        'circle-stroke-width': 1
-      }
-    });
+function removeStationCircleLayers(map: MapLibreMap) {
+  for (const layerId of ['station_points_outer', 'station_points_halo', 'station_points_core']) {
+    if (map.getLayer(layerId)) map.removeLayer(layerId);
   }
-  if (!map.getLayer('station_points_core')) {
-    map.addLayer({
-      id: 'station_points_core',
-      type: 'circle',
-      source: 'station_points',
-      paint: {
-        'circle-radius': ['interpolate', ['linear'], ['zoom'], 4, 3.5, 8, 6, 12, 9],
-        'circle-color': ['get', 'color'],
-        'circle-stroke-color': '#ffffff',
-        'circle-stroke-width': 2,
-        'circle-opacity': 0.96
-      }
-    });
-  }
+  if (map.getSource('station_points')) map.removeSource('station_points');
+}
 
-  const boundKey = '__stationClickBound';
-  if (!(map as unknown as Record<string, unknown>)[boundKey]) {
-    map.on('click', 'station_points_core', (event) => {
-      const feature = event.features?.[0];
-      const props = feature?.properties as Record<string, unknown> | undefined;
-      const coords = (feature?.geometry as GeoJSON.Point | undefined)?.coordinates;
-      if (!props || !coords) return;
-      const lng = Number(props.longitude);
-      const lat = Number(props.latitude);
-      const mean = props.mean_sm == null ? '--' : Number(props.mean_sm).toFixed(3);
-      const name = escapeHtml(String(props.name || props.station_id || '站点'));
-      new maplibregl.Popup({ closeButton: false, offset: 14, className: 'tdt-glass-popup' })
-        .setLngLat([lng, lat])
-        .setHTML(`
-          <div class="font-black text-sm mb-1">${name}</div>
-          <div class="text-xs text-slate-500">2019 年 5 cm 平均土壤水分：${mean} m³/m³</div>
-          <div class="text-xs text-slate-500 mt-1">样本数：${props.sample_count ?? 0}；高程：${props.elevation_m ?? '--'} m</div>
-          <div class="text-xs text-slate-500 mt-1">经纬度：${lng.toFixed(5)}, ${lat.toFixed(5)}</div>
-          <div class="mt-3 h-2 rounded-full bg-slate-200/70 overflow-hidden"><div style="width:${Number(props.width || 0)}%; background:linear-gradient(90deg,#0B5FF4,#22D3EE,#10b981)" class="h-full rounded-full"></div></div>
-        `)
-        .addTo(map);
-    });
-    map.on('mouseenter', 'station_points_core', () => { map.getCanvas().style.cursor = 'pointer'; });
-    map.on('mouseleave', 'station_points_core', () => { map.getCanvas().style.cursor = ''; });
-    (map as unknown as Record<string, unknown>)[boundKey] = true;
+function setStationMarkerVisibility(map: MapLibreMap, visible: boolean, opacity: number) {
+  const markers = (((map as unknown as Record<string, unknown>).__stationMarkers || []) as maplibregl.Marker[]);
+  for (const marker of markers) {
+    const element = marker.getElement();
+    element.style.display = visible ? '' : 'none';
+    element.style.opacity = String(Math.max(0, Math.min(1, opacity)));
   }
 }
 
+function setStationMarkers(map: MapLibreMap, stations: StationPoint[], onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
+  const state = map as unknown as Record<string, unknown>;
+  const previous = ((state.__stationMarkers || []) as maplibregl.Marker[]);
+  previous.forEach((marker) => marker.remove());
+  state.__stationMarkers = stations.map((station) => {
+    const color = stationColor(station);
+    const element = document.createElement('button');
+    element.type = 'button';
+    element.className = 'station-dom-marker';
+    element.dataset.testid = 'map-station-marker';
+    element.title = `${station.name || station.station_id} ${Number(station.longitude).toFixed(5)}, ${Number(station.latitude).toFixed(5)}`;
+    element.style.cssText = [
+      'width:17px',
+      'height:17px',
+      'border-radius:999px',
+      'border:2px solid #ffffff',
+      `background:${color}`,
+      `box-shadow:0 0 0 2px ${color}66, 0 2px 7px rgba(15,23,42,.18)`,
+      'cursor:pointer',
+      'padding:0',
+      'pointer-events:auto'
+    ].join(';');
+    element.addEventListener('click', (event) => {
+      event.stopPropagation();
+      onChatContextChange?.({
+        selected_layer_id: 'station_points',
+        selected_feature_id: String(station.station_id || station.id || ''),
+        selected_feature_properties: {
+          station_id: station.station_id,
+          name: station.name,
+          mean_sm: station.mean_sm ?? null,
+          sample_count: station.sample_count,
+          elevation_m: station.elevation_m ?? null,
+          longitude: station.longitude,
+          latitude: station.latitude
+        },
+        selected_map_bounds: mapBoundsPayload(map),
+        last_visible_panel: 'map',
+        user_focus_hint: 'selected station point'
+      });
+      new maplibregl.Popup({ closeButton: false, offset: 14, className: 'tdt-glass-popup' })
+        .setLngLat([station.longitude, station.latitude])
+        .setHTML(stationPopupHtml(station))
+        .addTo(map);
+    });
+    return new maplibregl.Marker({ element, anchor: 'center' })
+      .setLngLat([station.longitude, station.latitude])
+      .addTo(map);
+  });
+}
+
+function setStationLayer(map: MapLibreMap, stations: StationPoint[], onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
+  if (map.isStyleLoaded()) removeStationCircleLayers(map);
+  setStationMarkers(map, stations, onChatContextChange);
+}
 function fitToStations(map: MapLibreMap, collection: StationCollection | null) {
   const bounds = collection?.bounds || fallbackBounds;
-  if (!bounds || bounds.length !== 4) return;
-  try {
-    map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], {
-      padding: { top: 110, right: 430, bottom: 120, left: 470 },
-      maxZoom: 9.6,
-      duration: 900
-    });
-  } catch {
-    map.setCenter(collection?.center || fallbackCenter);
-    map.setZoom(8.2);
-  }
+  if (safeFitBounds(map, bounds, 9.6)) return;
+  map.setCenter(collection?.center || fallbackCenter);
+  map.setZoom(8.2);
 }
 
 function setLayerPaintIfPresent(map: MapLibreMap, layer: string, property: string, value: unknown) {
   if (map.getLayer(layer)) map.setPaintProperty(layer, property, value);
+}
+
+function raiseStationLayers(map: MapLibreMap) {
+  for (const layerId of ['station_points_outer', 'station_points_halo', 'station_points_core']) {
+    if (!map.getLayer(layerId)) continue;
+    try {
+      map.moveLayer(layerId);
+    } catch {
+      // Layer order can only be changed after the style is fully restored.
+    }
+  }
 }
 
 function setDrawLayer(map: MapLibreMap, points: DrawPoint[], tool: DrawTool, opacity: number) {
@@ -249,6 +292,17 @@ function setDrawLayer(map: MapLibreMap, points: DrawPoint[], tool: DrawTool, opa
   setLayerPaintIfPresent(map, 'draw_points', 'circle-opacity', opacity);
 }
 
+function raiseDrawLayers(map: MapLibreMap) {
+  for (const layerId of ['draw_polygon', 'draw_line', 'draw_points']) {
+    if (!map.getLayer(layerId)) continue;
+    try {
+      map.moveLayer(layerId);
+    } catch {
+      // Layer order can only be changed after the style is fully restored.
+    }
+  }
+}
+
 function setLayerVisibility(map: MapLibreMap, layers: string[], visible: boolean) {
   for (const layer of layers) {
     if (map.getLayer(layer)) {
@@ -264,12 +318,44 @@ function layerColor(kind: string, index: number) {
   return ['#0B5FF4', '#f59e0b', '#fb7185'][index % 3];
 }
 
-function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLayer) {
+function hasBoundaryLayer(layers: ResultMapLayer[]) {
+  return layers.some((layer) => (layer.kind || 'boundary') === 'boundary');
+}
+
+function hasStations(collection: StationCollection | null) {
+  return Boolean(collection?.stations?.length);
+}
+
+function publishMapDebugState(map: MapLibreMap | null, stationCollection: StationCollection | null, resultLayers: ResultMapLayer[]) {
+  if (typeof window === 'undefined') return;
+  (window as unknown as Record<string, unknown>).__gisMapDebug = {
+    stationCount: stationCollection?.stations?.length || 0,
+    resultLayerCount: resultLayers.length,
+    boundaryCount: resultLayers.filter((layer) => (layer.kind || 'boundary') === 'boundary').length,
+    layers: map
+      ? {
+          stationMarkers: (((map as unknown as Record<string, unknown>).__stationMarkers || []) as maplibregl.Marker[]).length,
+          drawPolygon: Boolean(map.getLayer('draw_polygon'))
+        }
+      : {}
+  };
+}
+
+function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLayer, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
   const key = `__query_${layerId}`;
   if ((map as unknown as Record<string, unknown>)[key]) return;
   map.on('click', layerId, (event) => {
     const feature = event.features?.[0];
     const props = feature?.properties as Record<string, unknown> | undefined;
+    onChatContextChange?.({
+      active_dataset_id: String(layer.meta?.dataset_name || layer.name || layer.id || ''),
+      selected_layer_id: String(layer.id || layerId),
+      selected_feature_id: String(props?.id || props?.station_id || props?.name || feature?.id || ''),
+      selected_feature_properties: sanitizeFeatureProperties(props || {}),
+      selected_map_bounds: mapBoundsPayload(map),
+      last_visible_panel: 'map',
+      user_focus_hint: `selected map layer ${layer.name || layer.id}`
+    });
     const rows = Object.entries(props || {}).filter(([name, value]) => value !== null && value !== undefined && name !== 'kind').slice(0, 6);
     const body = rows.length
       ? rows.map(([name, value]) => `<div class="text-xs text-slate-500 mt-1">${escapeHtml(name)}：${escapeHtml(String(value))}</div>`).join('')
@@ -284,7 +370,7 @@ function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLaye
   (map as unknown as Record<string, unknown>)[key] = true;
 }
 
-function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, opacity: LayerOpacity) {
+function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, opacity: LayerOpacity, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
   if (!map.isStyleLoaded()) return;
   const activeIds = new Set<string>();
   layers.forEach((layer, index) => {
@@ -307,7 +393,7 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
       }
       setLayerPaintIfPresent(map, rasterId, 'raster-opacity', 0.72 * layerOpacity);
       setLayerVisibility(map, [rasterId], visible);
-      bindResultQuery(map, rasterId, layer);
+      bindResultQuery(map, rasterId, layer, onChatContextChange);
       return;
     }
 
@@ -330,7 +416,7 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
     setLayerPaintIfPresent(map, fillId, 'fill-opacity', (layer.kind === 'boundary' ? 0.08 : 0.22) * layerOpacity);
     setLayerPaintIfPresent(map, lineId, 'line-opacity', 0.82 * layerOpacity);
     setLayerPaintIfPresent(map, pointId, 'circle-opacity', 0.9 * layerOpacity);
-    [fillId, lineId, pointId].forEach((queryLayerId) => bindResultQuery(map, queryLayerId, layer));
+    [fillId, lineId, pointId].forEach((queryLayerId) => bindResultQuery(map, queryLayerId, layer, onChatContextChange));
     setLayerVisibility(map, [fillId, lineId, pointId], visible);
   });
 
@@ -342,21 +428,13 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
     if (map.getSource(id)) map.removeSource(id);
   });
   (map as unknown as Record<string, string[]>).__resultSourceIds = Array.from(activeIds);
+  raiseStationLayers(map);
+  raiseDrawLayers(map);
 }
 
 function fitToResultLayers(map: MapLibreMap, layers: ResultMapLayer[]) {
   const bounds = layers.map((layer) => layer.bounds).find((b) => b && b.length === 4);
-  if (!bounds) return false;
-  try {
-    map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], {
-      padding: { top: 110, right: 430, bottom: 120, left: 470 },
-      maxZoom: 11,
-      duration: 900
-    });
-    return true;
-  } catch {
-    return false;
-  }
+  return safeFitBounds(map, bounds, 11);
 }
 
 export function MapStage({
@@ -367,7 +445,8 @@ export function MapStage({
   setDrawMode,
   layerVisibility,
   layerOpacity,
-  mapCommand
+  mapCommand,
+  onChatContextChange
 }: {
   theme: 'light' | 'dark';
   basemap: Basemap;
@@ -377,6 +456,7 @@ export function MapStage({
   layerVisibility: LayerVisibility;
   layerOpacity: LayerOpacity;
   mapCommand?: MapCommand | null;
+  onChatContextChange?: (patch: Partial<ChatContextPayload>) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -395,20 +475,19 @@ export function MapStage({
     setLayerVisibility(map, plan.stations.layers, plan.stations.visible);
     setLayerVisibility(map, plan.boundary.layers, plan.boundary.visible);
     setLayerVisibility(map, plan.draw.layers, plan.draw.visible);
-    setLayerPaintIfPresent(map, 'station_points_halo', 'circle-opacity', 0.18 * layerOpacity.stations);
-    setLayerPaintIfPresent(map, 'station_points_core', 'circle-opacity', 0.96 * layerOpacity.stations);
-    setLayerPaintIfPresent(map, 'demo_aoi_fill', 'fill-opacity', 0.08 * layerOpacity.boundary);
-    setLayerPaintIfPresent(map, 'demo_aoi_line', 'line-opacity', 0.62 * layerOpacity.boundary);
+    setStationMarkerVisibility(map, plan.stations.visible, layerOpacity.stations);
   };
 
   const refreshMapOverlays = (map: MapLibreMap, collection: StationCollection | null, fit: boolean = false) => {
     if (!map.isStyleLoaded()) return;
     try {
-      addDemoLayers(map);
-      setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity);
-      setStationLayer(map, collection?.stations || []);
+      setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+      setStationLayer(map, collection?.stations || [], onChatContextChange);
       setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
+      raiseStationLayers(map);
+      raiseDrawLayers(map);
       applyOverlayVisibility(map);
+      publishMapDebugState(map, collection, resultLayers);
       if (fit) {
         if (!fitToResultLayers(map, resultLayers)) fitToStations(map, collection);
         hasFitRef.current = true;
@@ -440,27 +519,74 @@ export function MapStage({
   }, []);
 
   useEffect(() => {
-    api.mapStations(userId)
-      .then((data) => {
-        setStationCollection(data);
-        setStationError(data.message || '');
-      })
-      .catch((err) => {
-        setStationCollection(null);
-        setStationError(err instanceof Error ? err.message : '站点数据读取失败');
-      });
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data = await api.mapStations(userId);
+        if (userId && !hasStations(data)) {
+          const fallback = await api.mapStations();
+          if (!cancelled) {
+            setStationCollection(fallback);
+            setStationError(fallback.message || data.message || '');
+          }
+          return;
+        }
+        if (!cancelled) {
+          setStationCollection(data);
+          setStationError(data.message || '');
+        }
+      } catch (err) {
+        if (!userId) {
+          if (!cancelled) {
+            setStationCollection(null);
+            setStationError(err instanceof Error ? err.message : 'Station data failed to load');
+          }
+          return;
+        }
+        try {
+          const fallback = await api.mapStations();
+          if (!cancelled) {
+            setStationCollection(fallback);
+            setStationError(fallback.message || '');
+          }
+        } catch {
+          if (!cancelled) {
+            setStationCollection(null);
+            setStationError(err instanceof Error ? err.message : 'Station data failed to load');
+          }
+        }
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, [userId]);
 
   useEffect(() => {
     let cancelled = false;
-    const load = () => {
-      api.mapLayers(userId)
-        .then((data) => {
-          if (!cancelled) setResultLayers(data.layers || []);
-        })
-        .catch(() => {
+    const load = async () => {
+      try {
+        const data = await api.mapLayers(userId);
+        let layers = data.layers || [];
+        if (userId && !hasBoundaryLayer(layers)) {
+          const fallback = await api.mapLayers();
+          const fallbackLayers = (fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary');
+          layers = [...fallbackLayers, ...layers];
+        }
+        if (!cancelled) setResultLayers(layers);
+      } catch {
+        if (!userId) {
           if (!cancelled) setResultLayers([]);
-        });
+          return;
+        }
+        try {
+          const fallback = await api.mapLayers();
+          if (!cancelled) setResultLayers((fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary'));
+        } catch {
+          if (!cancelled) setResultLayers([]);
+        }
+      }
     };
     load();
     const timer = window.setInterval(load, 8000);
@@ -505,6 +631,10 @@ export function MapStage({
       map.on('load', () => {
         forceResize();
         refreshMapOverlays(map, stationCollection, true);
+        onChatContextChange?.({ selected_map_bounds: mapBoundsPayload(map), last_visible_panel: 'map' });
+      });
+      map.on('moveend', () => {
+        onChatContextChange?.({ selected_map_bounds: mapBoundsPayload(map), last_visible_panel: 'map' });
       });
       window.addEventListener('resize', forceResize);
       forceResize();
@@ -529,6 +659,11 @@ export function MapStage({
   }, [style]);
 
   useEffect(() => {
+    if (mapRef.current) {
+      setStationLayer(mapRef.current, stationCollection?.stations || [], onChatContextChange);
+      applyOverlayVisibility(mapRef.current);
+      publishMapDebugState(mapRef.current, stationCollection, resultLayers);
+    }
     refreshMapOverlaysWhenReady(false);
     if (!mapRef.current) return;
     if (mapRef.current.isStyleLoaded() && stationCollection?.stations?.length && !hasFitRef.current) {
@@ -544,11 +679,16 @@ export function MapStage({
       refreshMapOverlaysWhenReady(false);
       return;
     }
-    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity);
+    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+    setStationLayer(map, stationCollection?.stations || [], onChatContextChange);
+    raiseStationLayers(map);
+    raiseDrawLayers(map);
+    applyOverlayVisibility(map);
+    publishMapDebugState(map, stationCollection, resultLayers);
     if (resultLayers.length && !hasFitRef.current && fitToResultLayers(map, resultLayers)) {
       hasFitRef.current = true;
     }
-  }, [resultLayers, layerVisibility, layerOpacity]);
+  }, [resultLayers, layerVisibility, layerOpacity, stationCollection]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -558,7 +698,9 @@ export function MapStage({
       return;
     }
     setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
+    raiseDrawLayers(map);
     applyOverlayVisibility(map);
+    publishMapDebugState(map, stationCollection, resultLayers);
   }, [drawPoints, drawTool, layerOpacity]);
 
   useEffect(() => {
@@ -568,10 +710,13 @@ export function MapStage({
       refreshMapOverlaysWhenReady(false);
       return;
     }
-    setStationLayer(map, stationCollection?.stations || []);
+    setStationLayer(map, stationCollection?.stations || [], onChatContextChange);
     setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
+    raiseStationLayers(map);
+    raiseDrawLayers(map);
     applyOverlayVisibility(map);
-    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity);
+    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+    publishMapDebugState(map, stationCollection, resultLayers);
   }, [layerVisibility, layerOpacity]);
 
   useEffect(() => {
@@ -656,7 +801,7 @@ export function MapStage({
 
   return (
     <main className={cn('map-stage-root fixed inset-0 z-0 overflow-hidden transition-colors duration-500', drawMode && 'cursor-crosshair')}>
-      <div ref={containerRef} className="map-stage-map absolute inset-0 h-full w-full" />
+      <div ref={containerRef} data-testid="map-stage" className="map-stage-map absolute inset-0 h-full w-full" />
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_14%_18%,rgba(255,255,255,.08),transparent_24%),radial-gradient(circle_at_76%_22%,rgba(0,212,255,.08),transparent_28%)] dark:bg-[radial-gradient(circle_at_18%_18%,rgba(34,211,238,.08),transparent_24%),radial-gradient(circle_at_76%_22%,rgba(59,130,246,.08),transparent_30%)]" />
 
       {tdtConfig !== undefined && !tdtConfig?.enabled && (

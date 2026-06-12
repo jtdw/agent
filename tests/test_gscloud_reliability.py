@@ -20,6 +20,7 @@ class GSCloudReliabilityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "missing_storage_state")
         self.assertEqual(result["action"], "relogin")
+        self.assertNotIn("path", result)
 
     def test_inspect_storage_state_accepts_gscloud_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -33,6 +34,7 @@ class GSCloudReliabilityTests(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual(result["reason"], "storage_state_ready")
+            self.assertNotIn("path", result)
 
     def test_inspect_storage_state_rejects_expired_gscloud_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:

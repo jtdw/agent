@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from .database import CommercialDB, future_days, json_dumps, json_loads, now_str
+from core.download_status import DownloadJobStatus, decorate_job_record, failure_diagnostic
 from .security import SecretBox, mask_secret, public_record
 
 
@@ -654,6 +655,8 @@ class CommercialService:
             "progress": 0,
             "stage": "queued",
             "result_json": "",
+            "failure_diagnostic_json": "",
+            "artifact_quality_json": "",
             "output_path": "",
             "zip_path": "",
             "error_message": "",
@@ -674,8 +677,7 @@ class CommercialService:
         row = self.db.fetch_one("SELECT * FROM download_jobs WHERE job_id=?", [job_id])
         if not row:
             raise ValueError(f"任务不存在: {job_id}")
-        row["result"] = json_loads(row.get("result_json"))
-        return public_record(row)
+        return public_record(decorate_job_record(row, json_loads))
 
     def list_jobs(self, user_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
         if user_id:
@@ -685,8 +687,7 @@ class CommercialService:
             rows = self.db.fetch_all("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT ?", [int(limit)])
         out = []
         for r in rows:
-            r["result"] = json_loads(r.get("result_json"))
-            out.append(public_record(r))
+            out.append(public_record(decorate_job_record(r, json_loads)))
         return out
 
     def write_audit_event(
@@ -842,15 +843,54 @@ class CommercialService:
             self._update_job(job["job_id"], charged=1, quota_reserved=0)
             self._write_quota_ledger(job["user_id"], job["job_id"], 0, "platform_monthly", "complete_reserved_platform_download")
 
+    def _artifact_quality_for_result(self, result: dict[str, Any]) -> list[dict[str, Any]]:
+        from core.domestic_sources.gscloud_reliability import validate_map_ready_artifact
+
+        keys = ("zip_path", "package_path", "downloaded_path", "output_path", "path")
+        candidates: list[str] = []
+        for key in keys:
+            value = result.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in candidates:
+                candidates.append(value.strip())
+        quality: list[dict[str, Any]] = []
+        for candidate in candidates:
+            try:
+                quality.append(validate_map_ready_artifact(candidate))
+            except Exception as exc:
+                quality.append({"ok": False, "path": str(candidate), "reason": "artifact_validation_failed", "detail": str(exc)})
+        return quality
+
     def run_job_with_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
         zip_path = result.get("zip_path") or result.get("package_path") or ""
         output_path = result.get("downloaded_path") or result.get("path") or result.get("dataset_name") or ""
+        artifact_quality = result.get("artifact_quality") if isinstance(result.get("artifact_quality"), list) else self._artifact_quality_for_result(result)
+        result["artifact_quality"] = artifact_quality
+        if artifact_quality and any(item.get("ok") is False for item in artifact_quality if isinstance(item, dict)):
+            message = next((str(item.get("detail") or item.get("reason") or "") for item in artifact_quality if isinstance(item, dict) and item.get("ok") is False), "Downloaded artifact validation failed")
+            diagnostic = failure_diagnostic(message)
+            self._release_platform_reservation(job_id, "release_invalid_artifact_platform_download")
+            self._update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                stage="artifact_validation_failed",
+                result_json=json_dumps(result),
+                artifact_quality_json=json_dumps(artifact_quality),
+                failure_diagnostic_json=json_dumps(diagnostic),
+                output_path=str(output_path or ""),
+                zip_path=str(zip_path or ""),
+                error_message=diagnostic["user_message"],
+                finished_at=now_str(),
+            )
+            return self.get_job(job_id)
         self._update_job(
             job_id,
             status="completed",
             progress=100,
             stage="completed",
             result_json=json_dumps(result),
+            artifact_quality_json=json_dumps(artifact_quality),
+            failure_diagnostic_json="",
             output_path=str(output_path or ""),
             zip_path=str(zip_path or ""),
             error_message="",
@@ -860,8 +900,17 @@ class CommercialService:
         return self.get_job(job_id)
 
     def fail_job(self, job_id: str, error: str) -> dict[str, Any]:
+        diagnostic = failure_diagnostic(error)
         self._release_platform_reservation(job_id, "release_failed_platform_download")
-        self._update_job(job_id, status="failed", progress=100, stage="failed", error_message=str(error), finished_at=now_str())
+        self._update_job(
+            job_id,
+            status="failed",
+            progress=100,
+            stage="failed",
+            error_message=str(error),
+            failure_diagnostic_json=json_dumps(diagnostic),
+            finished_at=now_str(),
+        )
         return self.get_job(job_id)
 
     def cancel_job(self, job_id: str, user_id: str = "", reason: str = "") -> dict[str, Any]:

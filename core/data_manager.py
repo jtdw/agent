@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import re
 import shutil
+import warnings
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 from xml.etree import ElementTree as ET
 
 import geopandas as gpd
 import pandas as pd
 import rasterio
 
+from .archive_utils import safe_extract_zip
+from .model_results import generate_model_result_id
 from .workspace_db import WorkspaceDatabase
 
 
@@ -25,14 +31,89 @@ SHAPE_SIDE_EXTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qix
 
 
 def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: Path) -> None:
+    return safe_extract_zip(zf, target_dir)
     root = target_dir.resolve()
     for member in zf.infolist():
+        mode = member.external_attr >> 16
+        if mode & 0o170000 == 0o120000:
+            raise ValueError(f"Unsafe zip symlink: {member.filename}")
         target = (root / member.filename).resolve()
         try:
             target.relative_to(root)
         except Exception:
             raise ValueError(f"压缩包包含不安全路径：{member.filename}")
     zf.extractall(root)
+
+
+def _safe_output_filename(filename: str, fallback: str, allowed_suffixes: set[str]) -> str:
+    candidate = Path(str(filename or "").strip()).name or fallback
+    stem = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", Path(candidate).stem).strip("._-")
+    suffix = Path(candidate).suffix.lower()
+    fallback_suffix = Path(fallback).suffix.lower()
+    if suffix not in allowed_suffixes:
+        suffix = fallback_suffix if fallback_suffix in allowed_suffixes else sorted(allowed_suffixes)[0]
+    return f"{stem or Path(fallback).stem}{suffix}"
+
+
+def _read_text_with_fallback(path: Path) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            return path.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def _read_station_series_table(path: Path) -> pd.DataFrame | None:
+    text = _read_text_with_fallback(path)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return None
+
+    rows: list[dict[str, Any]] = []
+    date_re = re.compile(r"^\d{4}[/.-]\d{1,2}[/.-]\d{1,2}$")
+    for line in lines[1:]:
+        parts = line.split()
+        if len(parts) < 3 or not date_re.match(parts[0]):
+            continue
+        try:
+            value: Any = float(parts[2])
+        except Exception:
+            value = parts[2]
+        rows.append(
+            {
+                "date": parts[0],
+                "time": parts[1] if len(parts) > 1 else "",
+                "value": value,
+                "quality_flags": parts[3] if len(parts) > 3 else "",
+                "mode": parts[4] if len(parts) > 4 else "",
+            }
+        )
+
+    if not rows:
+        return None
+    return pd.DataFrame(rows, columns=["date", "time", "value", "quality_flags", "mode"])
+
+
+def _read_csv_table(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path)
+    except pd.errors.ParserError as exc:
+        station_df = _read_station_series_table(path)
+        if station_df is not None:
+            return station_df
+
+        for options in (
+            {"sep": None, "engine": "python"},
+            {"sep": r"\s+", "engine": "python"},
+        ):
+            try:
+                return pd.read_csv(path, **options)
+            except Exception:
+                continue
+        raise ValueError(
+            f"CSV 文件 {path.name} 不是标准逗号分隔格式，自动尝试空白分隔和站点时序解析仍失败。"
+        ) from exc
 
 
 @dataclass
@@ -106,7 +187,7 @@ class DataManager:
             self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "raster", str(path), meta)
         elif data_type == "table":
             if path.suffix.lower() == ".csv":
-                df = pd.read_csv(path)
+                df = _read_csv_table(path)
             else:
                 df = pd.read_excel(path)
             self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "table", df, {"rows": len(df), "columns": list(df.columns)})
@@ -217,6 +298,26 @@ class DataManager:
             shutil.copy2(source, target)
         return target
 
+    def _allowed_import_roots(self) -> list[Path]:
+        roots = [self.workdir]
+        local_library = os.getenv("GIS_AGENT_LOCAL_LIBRARY_DIR", "").strip()
+        if local_library:
+            roots.append(Path(local_library).expanduser())
+        roots.append(self.workdir.parent / "local_library")
+        return [root.resolve() for root in roots]
+
+    def _require_allowed_import_source(self, source: Path) -> None:
+        if os.getenv("GIS_AGENT_ALLOW_ABSOLUTE_IMPORTS", "").strip().lower() in {"1", "true", "yes", "on"}:
+            return
+        resolved = source.resolve()
+        for root in self._allowed_import_roots():
+            try:
+                resolved.relative_to(root)
+                return
+            except ValueError:
+                continue
+        raise PermissionError("Local file imports are restricted to the workspace or configured local library.")
+
     def _extract_zip_if_needed(self, path: Path) -> Path:
         if path.suffix.lower() != ".zip":
             return path
@@ -294,6 +395,7 @@ class DataManager:
             if resolved is None:
                 raise FileNotFoundError(f"文件不存在: {file_path}")
             source = resolved
+        self._require_allowed_import_source(source)
         copied = self._copy_to_uploads(source)
         actual = self._extract_zip_if_needed(copied)
         dataset_name = self._unique_name(name or actual.stem)
@@ -329,7 +431,7 @@ class DataManager:
             )
         elif ext in TABLE_EXTS:
             if ext == ".csv":
-                df = pd.read_csv(actual)
+                df = _read_csv_table(actual)
             else:
                 df = pd.read_excel(actual)
             self.datasets[dataset_name] = DatasetRecord(
@@ -401,12 +503,20 @@ class DataManager:
         return files
 
     def list_artifacts(self) -> list[dict[str, Any]]:
+        registered = self.list_registered_artifacts(limit=200)
+        seen_paths = {str(Path(item.get("path", "")).resolve()) for item in registered if item.get("path")}
         artifacts: list[dict[str, Any]] = []
         root_to_category = {
             self.plot_dir.resolve(): "plot",
             self.derived_dir.resolve(): "derived",
         }
         for path in self.result_file_paths()[:100]:
+            try:
+                resolved_path = str(path.resolve())
+            except Exception:
+                resolved_path = str(path)
+            if resolved_path in seen_paths:
+                continue
             try:
                 relative = path.relative_to(path.parents[1])
             except Exception:
@@ -417,8 +527,10 @@ class DataManager:
                     parent_root = candidate.resolve()
                     break
             category = root_to_category.get(parent_root, "derived")
+            artifact_id = "artifact_" + hashlib.sha1(resolved_path.encode("utf-8", errors="ignore")).hexdigest()[:16]
             artifacts.append(
                 {
+                    "artifact_id": artifact_id,
                     "name": path.name,
                     "path": str(path),
                     "display_path": (str(relative).replace("\\", "/") if not isinstance(relative, str) else relative),
@@ -427,7 +539,7 @@ class DataManager:
                     "modified": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
-        return artifacts
+        return registered + artifacts
 
     def get(self, name: str) -> DatasetRecord:
         if name not in self.datasets:
@@ -491,9 +603,11 @@ class DataManager:
 
     def put_vector(self, name: str, gdf: gpd.GeoDataFrame, filename: str | None = None) -> str:
         dataset_name = self._unique_name(name)
-        filename = filename or f"{dataset_name}.geojson"
+        filename = _safe_output_filename(filename or "", f"{dataset_name}.geojson", {".geojson", ".json"})
         output_path = self.derived_dir / filename
-        gdf.to_file(output_path, driver="GeoJSON")
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message=r"'crs' was not provided.*", category=UserWarning)
+            gdf.to_file(output_path, driver="GeoJSON")
         self.datasets[dataset_name] = DatasetRecord(
             name=dataset_name,
             path=output_path,
@@ -506,7 +620,7 @@ class DataManager:
 
     def put_table(self, name: str, df: pd.DataFrame, filename: str | None = None) -> str:
         dataset_name = self._unique_name(name)
-        filename = filename or f"{dataset_name}.csv"
+        filename = _safe_output_filename(filename or "", f"{dataset_name}.csv", {".csv"})
         output_path = self.derived_dir / filename
         df.to_csv(output_path, index=False)
         self.datasets[dataset_name] = DatasetRecord(
@@ -521,7 +635,7 @@ class DataManager:
 
     def put_text_document(self, name: str, text: str, filename: str | None = None) -> str:
         dataset_name = self._unique_name(name)
-        filename = filename or f"{dataset_name}.txt"
+        filename = _safe_output_filename(filename or "", f"{dataset_name}.txt", {".txt", ".md"})
         output_path = self.derived_dir / filename
         output_path.write_text(text, encoding="utf-8")
         self.datasets[dataset_name] = DatasetRecord(
@@ -613,3 +727,127 @@ class DataManager:
 
     def pipeline_run_detail(self, run_id: str) -> dict[str, Any] | None:
         return self.database.pipeline_run_detail(run_id)
+
+    def register_model_result(
+        self,
+        *,
+        model_result_id: str = "",
+        task_id: str = "",
+        dataset_id: str = "",
+        model_name: str,
+        output_prefix: str = "",
+        result_dataset: str = "",
+        metrics_dataset: str = "",
+        metrics_path: str = "",
+        figure_path: str = "",
+        artifact_ids: list[str] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
+        metrics: dict[str, Any] | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        resolved_model_result_id = model_result_id or generate_model_result_id(model_name, output_prefix)
+        synced_artifacts: list[dict[str, Any]] = []
+        for artifact in artifacts or []:
+            artifact_payload = dict(artifact)
+            artifact_payload.setdefault("artifact_id", f"artifact_{uuid4().hex[:10]}")
+            artifact_payload.setdefault("task_id", task_id)
+            artifact_payload.setdefault("model_result_id", resolved_model_result_id)
+            artifact_payload.setdefault("dataset_id", dataset_id)
+            synced_artifacts.append(self.register_artifact(**artifact_payload))
+        payload = {
+            "model_result_id": resolved_model_result_id,
+            "task_id": task_id,
+            "dataset_id": dataset_id,
+            "model_name": model_name,
+            "output_prefix": output_prefix,
+            "result_dataset": result_dataset,
+            "metrics_dataset": metrics_dataset,
+            "metrics_path": metrics_path,
+            "figure_path": figure_path,
+            "artifact_ids": [str(item.get("artifact_id") or "") for item in synced_artifacts if item.get("artifact_id")] or artifact_ids or [],
+            "artifacts": synced_artifacts or artifacts or [],
+            "metrics": metrics or {},
+            "diagnostics": diagnostics or {},
+        }
+        return self.database.upsert_model_result(payload)
+
+    def register_artifact(
+        self,
+        *,
+        artifact_id: str = "",
+        path: str,
+        type: str = "",
+        title: str = "",
+        description: str = "",
+        quality_status: str = "unchecked",
+        preview_available: bool = False,
+        task_id: str = "",
+        model_result_id: str = "",
+        dataset_id: str = "",
+        meta: dict[str, Any] | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        payload = {
+            "artifact_id": artifact_id or f"artifact_{uuid4().hex[:10]}",
+            "path": path,
+            "type": type,
+            "title": title,
+            "description": description,
+            "quality_status": quality_status,
+            "preview_available": preview_available,
+            "task_id": task_id,
+            "model_result_id": model_result_id,
+            "dataset_id": dataset_id,
+            "meta": meta or {k: v for k, v in extra.items() if k not in {"name", "display_path", "category", "size_kb", "modified"}},
+        }
+        artifact = self.database.upsert_artifact(payload)
+        return self._enrich_registered_artifact(artifact)
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        artifact = self.database.get_artifact(artifact_id)
+        return self._enrich_registered_artifact(artifact) if artifact else None
+
+    def list_registered_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        return [self._enrich_registered_artifact(item) for item in self.database.list_artifacts(model_result_id=model_result_id, limit=limit)]
+
+    def _enrich_registered_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        item = dict(artifact)
+        path = Path(str(item.get("path") or ""))
+        try:
+            relative = path.relative_to(path.parents[1])
+        except Exception:
+            relative = path.name
+        item.setdefault("name", path.name)
+        item["display_path"] = str(relative).replace("\\", "/")
+        category = "derived"
+        try:
+            if path.resolve().is_relative_to(self.plot_dir.resolve()):
+                category = "plot"
+            elif path.resolve().is_relative_to(self.derived_dir.resolve()):
+                category = "derived"
+        except Exception:
+            pass
+        item["category"] = category
+        if path.exists():
+            item["size_kb"] = round(path.stat().st_size / 1024, 2)
+            item["modified"] = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            item.setdefault("size_kb", 0)
+            item.setdefault("modified", item.get("updated_at") or "")
+        return item
+
+    def get_model_result(self, model_result_id: str) -> dict[str, Any] | None:
+        result = self.database.get_model_result(model_result_id)
+        return self._attach_registered_model_artifacts(result) if result else None
+
+    def list_model_results(self, limit: int = 50) -> list[dict[str, Any]]:
+        return [self._attach_registered_model_artifacts(item) for item in self.database.list_model_results(limit=limit)]
+
+    def _attach_registered_model_artifacts(self, result: dict[str, Any] | None) -> dict[str, Any]:
+        item = dict(result or {})
+        model_result_id = str(item.get("model_result_id") or "")
+        registered = self.list_registered_artifacts(model_result_id=model_result_id, limit=100) if model_result_id else []
+        if registered:
+            item["artifacts"] = registered
+            item["artifact_ids"] = [str(artifact.get("artifact_id") or "") for artifact in registered if artifact.get("artifact_id")]
+        return item

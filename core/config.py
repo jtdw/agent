@@ -6,6 +6,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .llm_config import load_llm_provider_config, validate_llm_config
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -51,12 +53,15 @@ def pick_preferred_model(candidates: tuple[str, ...], preferred: tuple[str, ...]
 
 @dataclass(slots=True)
 class Settings:
-    api_key: str = os.getenv("ZAI_API_KEY", "")
-    model: str = os.getenv("ZAI_MODEL", "glm-4.5-air")
+    _llm = load_llm_provider_config()
+    api_key: str = os.getenv(_llm.api_key_env, "") if _llm.api_key_env else ""
+    model: str = _llm.model
     supported_models: tuple[str, ...] = field(default_factory=_parse_supported_models)
-    base_url: str = "https://api.z.ai/api/paas/v4/"
+    base_url: str = _llm.base_url
     workdir: Path = Path(os.getenv("GIS_AGENT_WORKDIR", "./workspace"))
-    temperature: float = float(os.getenv("GIS_AGENT_TEMPERATURE", "0.1"))
+    temperature: float = _llm.temperature
+    timeout: float = _llm.timeout
+    max_retries: int = _llm.max_retries
     desktop_theme: str = os.getenv("GIS_AGENT_THEME", "dark")
 
     def ensure_dirs(self) -> None:
@@ -79,10 +84,10 @@ class ConfigError(RuntimeError):
 
 def load_settings() -> Settings:
     settings = Settings()
-    if not settings.api_key:
-        raise ConfigError(
-            "未读取到 ZAI_API_KEY。请在 .env 中设置，或在系统环境变量中设置后重启终端。"
-        )
+    validation = validate_llm_config()
+    if validation.get("status") == "invalid":
+        codes = [str(error.get("code") or "") for error in validation.get("errors", [])]
+        raise ConfigError("Invalid LLM configuration: " + ", ".join(code for code in codes if code))
     if settings.model not in settings.supported_models:
         settings.supported_models = (settings.model, *settings.supported_models)
     settings.ensure_dirs()

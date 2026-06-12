@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Bot, Check, ChevronsLeft, FileUp, MessageSquare, Mic, Pencil, PlayCircle, Plus, SendHorizontal, Sparkles, Trash2, UploadCloud, Waves, X } from 'lucide-react';
-import { api, ChatMessage, ChatSession, CommercialUser } from '@/lib/api';
+import { AlertTriangle, Bot, Check, ChevronsLeft, Database, FileUp, MessageSquare, Mic, Pencil, PlayCircle, Plus, RefreshCcw, SendHorizontal, Sparkles, Trash2, UploadCloud, Waves, X } from 'lucide-react';
+import { api, ChatMessage, ChatSession, CommercialUser, ResultPanel, WorkspaceDashboard } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { AuthPanel } from './AuthPanel';
 import { cn } from '@/lib/cn';
 import { isLocalSecureContext } from './mapLayerPolicy';
 import { parseMapTextCommand, type ParsedMapTextCommand } from './mapTextCommands';
+import { assistantErrorContent, assistantReplyContent, normalizeChatMessages } from './chatMessageContent';
+import type { ChatContextPayload } from '@/lib/chatContext';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 
@@ -21,11 +23,97 @@ function ThinkingDots() {
   );
 }
 
-const QUICK_PROMPTS = [
-  '概括当前工作区数据，并判断哪些数据可直接用于制图、建模或结果分析。',
-  '检查当前上传数据的字段、坐标、时间和缺失值，给出下一步处理计划。',
-  '按照闪电河流域土壤水分融合论文流程，检查能否做 BTCH、RF、XGBoost、LSTM 与 GCP。'
+const PROMPT_GROUPS = [
+  {
+    title: '数据检查',
+    prompts: [
+      '概括当前工作区数据，并判断哪些数据可直接用于制图、建模或结果分析。',
+      '检查当前上传数据的字段、坐标、时间和缺失值，给出下一步处理计划。'
+    ]
+  },
+  {
+    title: '制图建模',
+    prompts: [
+      '按照闪电河流域土壤水分融合论文流程，检查能否做 BTCH、RF、XGBoost、LSTM 与 GCP。'
+    ]
+  },
+  {
+    title: '下载准备',
+    prompts: [
+      '根据当前工作区数据，检查是否可以下载 DEM、Sentinel-2 或土壤水分相关数据。'
+    ]
+  }
 ];
+
+const PROMPT_GROUPS_FIXED = [
+  {
+    title: '数据检查',
+    prompts: [
+      '概括当前工作区数据，并判断哪些数据可直接用于制图、建模或结果分析。',
+      '检查当前上传数据的字段、坐标、时间和缺失值，给出下一步处理计划。'
+    ]
+  },
+  {
+    title: '制图建模',
+    prompts: [
+      '按照闪电河流域土壤水分融合论文流程，检查能否做 BTCH、RF、XGBoost、LSTM 与 GCP。'
+    ]
+  },
+  {
+    title: '下载准备',
+    prompts: [
+      '根据当前工作区数据，检查是否可以下载 DEM、Sentinel-2 或土壤水分相关数据。'
+    ]
+  }
+];
+
+const QUICK_PROMPTS = PROMPT_GROUPS_FIXED.flatMap((group) => group.prompts);
+
+function numberValue(value: unknown) {
+  const n = Number(value || 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function WorkspaceQuickStats({ dashboard }: { dashboard: WorkspaceDashboard | null }) {
+  const counts = dashboard?.dataset_type_counts || {};
+  const total = numberValue(counts.table) + numberValue(counts.vector) + numberValue(counts.raster) + numberValue(counts.document);
+  const runtime = dashboard?.runtime_status || {};
+  const status = String(runtime.label || '就绪');
+  return (
+    <div className="rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs font-black text-slate-600 dark:text-slate-300"><Database size={14} strokeWidth={1.7} /> 数据概览</div>
+        <span className="rounded-full bg-white/45 px-2 py-0.5 text-[11px] font-black text-slate-500 dark:bg-white/10 dark:text-slate-300">{status}</span>
+      </div>
+      <div className="grid grid-cols-4 gap-2 text-center">
+        {[
+          ['总数', total],
+          ['表格', counts.table || 0],
+          ['矢量', counts.vector || 0],
+          ['栅格', counts.raster || 0]
+        ].map(([label, value]) => (
+          <div key={String(label)} className="rounded-2xl bg-white/40 px-2 py-2 dark:bg-white/5">
+            <div className="text-sm font-black text-ocean dark:text-cyan-glow">{String(value)}</div>
+            <div className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">{String(label)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MessageSourceBadge({ message }: { message: ChatMessage }) {
+  const model = String(message.meta?.model || '');
+  const reason = String(message.meta?.reason || '');
+  if (!model && !reason) return null;
+  const label = reason === 'error' ? '错误提示' : model === 'builtin-workspace' ? '本地工作区' : model || '智能体';
+  return (
+    <div className={cn('mb-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-black', reason === 'error' ? 'bg-coral/10 text-coral' : 'bg-cyan-glow/10 text-ocean dark:text-cyan-glow')}>
+      {reason === 'error' ? <AlertTriangle size={12} /> : <Sparkles size={12} />}
+      {label}
+    </div>
+  );
+}
 
 function renderInlineMarkdown(text: string) {
   return String(text || '').split(/(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*)/g).map((part, idx) => {
@@ -59,13 +147,17 @@ export function ChatPanel({
   setUser,
   onClose,
   onMapTextCommand,
-  externalPrompt
+  externalPrompt,
+  onResultPanel,
+  chatContext = {}
 }: {
   user: CommercialUser | null;
   setUser: (u: CommercialUser | null) => void;
   onClose?: () => void;
   onMapTextCommand?: (command: ParsedMapTextCommand) => string;
   externalPrompt?: ExternalPromptCommand | null;
+  onResultPanel?: (panel: ResultPanel) => void;
+  chatContext?: ChatContextPayload;
 }) {
   const [width, setWidth] = useState(430);
   const [input, setInput] = useState('');
@@ -77,6 +169,8 @@ export function ChatPanel({
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
+  const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
+  const [lastFailedPrompt, setLastFailedPrompt] = useState('');
   const [listening, setListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
@@ -86,11 +180,26 @@ export function ChatPanel({
   const recognitionRef = useRef<unknown>(null);
   const userId = user?.user_id || '';
 
+  const refreshDashboard = async () => {
+    try {
+      setDashboard(await api.dashboard(userId));
+    } catch {
+      setDashboard(null);
+    }
+  };
+
   const refreshSessions = async () => {
+    if (!userId) {
+      setSessions([]);
+      setCurrentSessionId('');
+      setMessages([]);
+      return;
+    }
     const r = await api.chatSessions(userId);
     setSessions(r.sessions || []);
     setCurrentSessionId(r.current_session_id || '');
-    setMessages(r.messages || []);
+    setMessages(normalizeChatMessages(r.messages));
+    refreshDashboard().catch(() => {});
   };
 
   useEffect(() => {
@@ -99,6 +208,7 @@ export function ChatPanel({
       setCurrentSessionId('');
       setMessages([]);
     });
+    refreshDashboard().catch(() => {});
   }, [userId]);
 
   useEffect(() => {
@@ -153,6 +263,10 @@ export function ChatPanel({
   const sendPrompt = async (prompt: string) => {
     const text = prompt.trim();
     if (!text || thinking) return;
+    if (!userId) {
+      setError('请先登录账号，再使用智能助手对话。');
+      return;
+    }
     setInput('');
     setError('');
     const mapCommand = parseMapTextCommand(text);
@@ -164,11 +278,19 @@ export function ChatPanel({
     setMessages((v) => [...v, { role: 'user', content: text }]);
     setThinking(true);
     try {
-      const r = await api.ask(text, userId, currentSessionId);
-      setMessages((v) => [...v, { role: 'assistant', content: r.reply, meta: { model: r.model, reason: r.reason } }]);
+      const r = await api.ask(text, userId, currentSessionId, { ...chatContext, session_id: currentSessionId });
+      if (r.messages) setMessages(normalizeChatMessages(r.messages));
+      else setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason } }]);
+      if (r.sessions) setSessions(r.sessions);
+      if (r.result_panel) onResultPanel?.(r.result_panel);
+      setCurrentSessionId(r.current_session_id || currentSessionId);
+      setLastFailedPrompt('');
       refreshSessions().catch(() => {});
     } catch (e) {
-      setError(e instanceof Error ? e.message : '智能体调用失败');
+      const content = assistantErrorContent(e);
+      setMessages((v) => [...v, { role: 'assistant', content, meta: { reason: 'error' } }]);
+      setLastFailedPrompt(text);
+      setError('');
     } finally {
       setThinking(false);
     }
@@ -205,11 +327,15 @@ export function ChatPanel({
   const newSession = async () => {
     if (thinking) return;
     setError('');
+    if (!userId) {
+      setError('请先登录账号，再新建对话。');
+      return;
+    }
     try {
       const r = await api.createChatSession(userId);
       setSessions(r.sessions || []);
       setCurrentSessionId(r.current_session_id || r.session_id);
-      setMessages(r.messages || []);
+      setMessages(normalizeChatMessages(r.messages));
       setInput('');
     } catch (e) {
       setError(e instanceof Error ? e.message : '新建对话失败');
@@ -219,11 +345,15 @@ export function ChatPanel({
   const switchSession = async (sessionId: string) => {
     if (!sessionId || sessionId === currentSessionId || thinking) return;
     setError('');
+    if (!userId) {
+      setError('请先登录账号，再切换对话。');
+      return;
+    }
     try {
       const r = await api.switchChatSession(sessionId, userId);
       setSessions(r.sessions || []);
       setCurrentSessionId(r.current_session_id || sessionId);
-      setMessages(r.messages || []);
+      setMessages(normalizeChatMessages(r.messages));
       setEditingId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : '切换对话失败');
@@ -233,11 +363,17 @@ export function ChatPanel({
   const deleteSession = async () => {
     if (!currentSessionId || thinking) return;
     setError('');
+    if (!userId) {
+      setError('请先登录账号，再管理对话。');
+      return;
+    }
     try {
-      const r = await api.deleteChatSession(currentSessionId, userId);
+      const r = sessions.length > 1
+        ? await api.deleteChatSession(currentSessionId, userId)
+        : await api.clearChatSession(currentSessionId, userId);
       setSessions(r.sessions || []);
       setCurrentSessionId(r.current_session_id || '');
-      setMessages(r.messages || []);
+      setMessages(normalizeChatMessages(r.messages));
       setEditingId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : '删除对话失败');
@@ -254,11 +390,15 @@ export function ChatPanel({
     if (!editingId || thinking) return;
     const text = editText.trim();
     if (!text) return;
+    if (!userId) {
+      setError('请先登录账号，再重新生成回答。');
+      return;
+    }
     setThinking(true);
     setError('');
     try {
       const r = await api.retryMessage(editingId, text, userId, currentSessionId);
-      setMessages(r.messages || []);
+      setMessages(normalizeChatMessages(r.messages));
       setSessions(r.sessions || []);
       setCurrentSessionId(r.current_session_id || currentSessionId);
       setEditingId(null);
@@ -272,11 +412,17 @@ export function ChatPanel({
 
   const uploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+    if (!userId) {
+      setError('请先登录账号，再上传数据。');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
     setUploading(true);
     setError('');
     try {
       const r = await api.uploadFiles(files, userId);
-      const summary = r.messages.join('\n\n');
+      const summary = [r.messages.join('\n\n'), r.outcome_markdown || ''].filter(Boolean).join('\n\n');
+      setDashboard(r.dashboard);
       appendSystem(`已上传并载入 ${r.count} 个文件。\n${summary}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : '上传失败');
@@ -288,15 +434,23 @@ export function ChatPanel({
 
   const runThesisWorkflow = async () => {
     if (thinking) return;
+    if (!userId) {
+      setError('请先登录账号，再运行论文流程。');
+      return;
+    }
     setThinking(true);
     setError('');
     const prompt = '一键检查并运行闪电河流域土壤水分融合论文流程。';
     setMessages((v) => [...v, { role: 'user', content: prompt }]);
     try {
       const r = await api.runSoilMoistureWorkflow(userId);
-      setMessages((v) => [...v, { role: 'assistant', content: r.reply, meta: { model: r.model, reason: r.reason } }]);
+      setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason } }]);
+      setLastFailedPrompt('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : '论文流程启动失败');
+      const content = assistantErrorContent(e);
+      setMessages((v) => [...v, { role: 'assistant', content, meta: { reason: 'error' } }]);
+      setLastFailedPrompt(prompt);
+      setError('');
     } finally {
       setThinking(false);
     }
@@ -350,6 +504,7 @@ export function ChatPanel({
 
         <div className="space-y-3 px-4 pt-3">
           <AuthPanel user={user} setUser={setUser} />
+          <WorkspaceQuickStats dashboard={dashboard} />
           <div className="rounded-[18px] border border-white/30 bg-white/35 p-2.5 dark:border-white/10 dark:bg-slate-950/20">
             <div className="mb-2 flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-xs font-black text-slate-500 dark:text-slate-400">
@@ -361,25 +516,28 @@ export function ChatPanel({
               <select
                 value={currentSessionId}
                 onChange={(e) => switchSession(e.target.value)}
+                disabled={!userId || thinking}
                 className="min-w-0 flex-1 rounded-2xl border border-white/30 bg-white/50 px-3 py-2 text-xs font-semibold outline-none dark:border-white/10 dark:bg-slate-900/50"
               >
+                {!userId && <option value="">登录后显示对话记录</option>}
                 {sessions.map((s) => (
                   <option key={s.session_id} value={s.session_id}>{s.title || '新对话'}</option>
                 ))}
               </select>
-              <button onClick={newSession} disabled={thinking} className="glass-button h-9 w-9 rounded-2xl p-0 disabled:opacity-60" title="新建对话"><Plus size={16} /></button>
-              <button onClick={deleteSession} disabled={thinking || sessions.length <= 1} className="glass-button h-9 w-9 rounded-2xl p-0 text-coral disabled:opacity-40" title="删除当前对话"><Trash2 size={15} /></button>
+              <button onClick={newSession} disabled={thinking || !userId} className="glass-button h-9 w-9 rounded-2xl p-0 disabled:opacity-60" title="新建对话"><Plus size={16} /></button>
+              <button onClick={deleteSession} disabled={thinking || !userId || !currentSessionId} className="glass-button h-9 w-9 rounded-2xl p-0 text-coral disabled:opacity-40" title="删除当前对话"><Trash2 size={15} /></button>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2">
-            <button onClick={() => fileInputRef.current?.click()} disabled={uploading} className="glass-button gap-2 rounded-2xl text-xs font-black disabled:opacity-60">
+            <button data-testid="chat-upload-button" onClick={() => fileInputRef.current?.click()} disabled={uploading || !userId} className="glass-button gap-2 rounded-2xl text-xs font-black disabled:opacity-60">
               <UploadCloud size={15} strokeWidth={1.7} /> {uploading ? '上传中...' : '上传数据'}
             </button>
-            <button onClick={runThesisWorkflow} disabled={thinking} className="glass-button gap-2 rounded-2xl text-xs font-black disabled:opacity-60">
+            <button onClick={runThesisWorkflow} disabled={thinking || !userId} className="glass-button gap-2 rounded-2xl text-xs font-black disabled:opacity-60">
               <PlayCircle size={15} strokeWidth={1.7} /> 论文流程
             </button>
             <input
               ref={fileInputRef}
+              data-testid="chat-file-input"
               type="file"
               multiple
               className="hidden"
@@ -393,11 +551,18 @@ export function ChatPanel({
           {messages.length === 0 && (
             <div className="rounded-[24px] border border-white/40 bg-white/35 p-5 text-sm text-slate-600 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/30 dark:text-slate-300">
               <div className="mb-3 flex items-center gap-2 font-black text-slate-950 dark:text-slate-50"><Sparkles size={16} /> 试试这样问</div>
-              <div className="space-y-2">
-                {QUICK_PROMPTS.map((p) => (
-                  <button key={p} onClick={() => sendPrompt(p)} className="block w-full rounded-2xl border border-white/30 bg-white/35 px-3 py-2 text-left text-xs leading-5 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10">
-                    {p}
-                  </button>
+              <div className="space-y-3">
+                {PROMPT_GROUPS_FIXED.map((group) => (
+                  <div key={group.title}>
+                    <div className="mb-1 text-[11px] font-black text-slate-400">{group.title}</div>
+                    <div className="space-y-2">
+                      {group.prompts.map((p) => (
+                        <button key={p} onClick={() => sendPrompt(p)} className="block w-full rounded-2xl border border-white/30 bg-white/35 px-3 py-2 text-left text-xs leading-5 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10">
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -430,7 +595,13 @@ export function ChatPanel({
                       </div>
                     ) : (
                       <>
-                        <MarkdownMessage content={m.content} />
+                        {!isUser && !isSystem && <MessageSourceBadge message={m} />}
+                        <MarkdownMessage content={isUser || isSystem ? m.content : assistantReplyContent(m.content)} />
+                        {!isUser && !isSystem && m.meta?.reason === 'error' && lastFailedPrompt && (
+                          <button onClick={() => sendPrompt(lastFailedPrompt)} disabled={thinking} className="mt-3 inline-flex items-center gap-1 rounded-full bg-white/55 px-3 py-1 text-xs font-black text-coral transition hover:bg-white/80 disabled:opacity-50 dark:bg-white/10">
+                            <RefreshCcw size={13} /> 重试
+                          </button>
+                        )}
                         {isUser && m.message_id && (
                           <button onClick={() => beginEdit(m)} className="ml-2 inline-flex translate-y-0.5 opacity-0 transition group-hover:opacity-100" title="编辑并重新生成">
                             <Pencil size={14} strokeWidth={1.7} />
@@ -464,13 +635,14 @@ export function ChatPanel({
               <Mic size={18} strokeWidth={1.5} />
             </button>
             <textarea
+              data-testid="chat-input"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
               placeholder="输入数据下载、融合建模、精度验证、制图或结果追问..."
               className="max-h-28 min-h-10 flex-1 resize-none bg-transparent px-2 py-2 text-sm outline-none placeholder:text-slate-400"
             />
-            <button onClick={send} disabled={thinking || !input.trim()} className="primary-button h-10 w-10 shrink-0 rounded-2xl p-0 disabled:opacity-45"><SendHorizontal size={18} strokeWidth={1.5} /></button>
+            <button data-testid="chat-send" onClick={send} disabled={thinking || !input.trim()} className="primary-button h-10 w-10 shrink-0 rounded-2xl p-0 disabled:opacity-45"><SendHorizontal size={18} strokeWidth={1.5} /></button>
           </div>
         </div>
         <div {...dragHandle} className="absolute right-0 top-0 h-full w-2 cursor-ew-resize" />

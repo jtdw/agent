@@ -4,6 +4,8 @@ import json
 import re
 import time
 import zipfile
+import csv
+from xml.etree import ElementTree as ET
 from math import inf
 from pathlib import Path
 from typing import Any
@@ -35,24 +37,30 @@ BUILTIN_REGION_BOUNDS: dict[str, tuple[float, float, float, float]] = {
 }
 
 
-def inspect_storage_state(path: str | Path) -> dict[str, Any]:
+def _with_optional_path(payload: dict[str, Any], state_path: Path, include_path: bool) -> dict[str, Any]:
+    if include_path:
+        payload["path"] = str(state_path)
+    return payload
+
+
+def inspect_storage_state(path: str | Path, *, include_path: bool = False) -> dict[str, Any]:
     state_path = Path(path)
     if not state_path.exists():
-        return {"ok": False, "reason": "missing_storage_state", "action": "relogin", "path": str(state_path)}
+        return _with_optional_path({"ok": False, "reason": "missing_storage_state", "action": "relogin"}, state_path, include_path)
     if state_path.stat().st_size <= 0:
-        return {"ok": False, "reason": "empty_storage_state", "action": "relogin", "path": str(state_path)}
+        return _with_optional_path({"ok": False, "reason": "empty_storage_state", "action": "relogin"}, state_path, include_path)
     try:
         data = json.loads(state_path.read_text(encoding="utf-8"))
     except Exception as exc:
-        return {"ok": False, "reason": "invalid_storage_state_json", "action": "relogin", "path": str(state_path), "detail": str(exc)}
+        return _with_optional_path({"ok": False, "reason": "invalid_storage_state_json", "action": "relogin", "detail": str(exc)}, state_path, include_path)
 
     cookies = data.get("cookies") if isinstance(data, dict) else None
     if not isinstance(cookies, list) or not cookies:
-        return {"ok": False, "reason": "no_cookies", "action": "relogin", "path": str(state_path)}
+        return _with_optional_path({"ok": False, "reason": "no_cookies", "action": "relogin"}, state_path, include_path)
 
     gscloud = [c for c in cookies if "gscloud.cn" in str(c.get("domain") or "")]
     if not gscloud:
-        return {"ok": False, "reason": "no_gscloud_cookie", "action": "relogin", "path": str(state_path), "cookie_count": len(cookies)}
+        return _with_optional_path({"ok": False, "reason": "no_gscloud_cookie", "action": "relogin", "cookie_count": len(cookies)}, state_path, include_path)
 
     now = time.time()
     expiring = []
@@ -68,23 +76,21 @@ def inspect_storage_state(path: str | Path) -> dict[str, Any]:
         else:
             expiring.append(cookie)
     if not valid:
-        return {
+        return _with_optional_path({
             "ok": False,
             "reason": "expired_gscloud_cookies",
             "action": "relogin",
-            "path": str(state_path),
             "gscloud_cookie_count": len(gscloud),
             "expired_cookie_count": len(expiring),
-        }
-    return {
+        }, state_path, include_path)
+    return _with_optional_path({
         "ok": True,
         "reason": "storage_state_ready",
         "action": "continue",
-        "path": str(state_path),
         "cookie_count": len(cookies),
         "gscloud_cookie_count": len(gscloud),
         "valid_gscloud_cookie_count": len(valid),
-    }
+    }, state_path, include_path)
 
 
 def classify_gscloud_failure(error: str | Exception) -> dict[str, str]:
@@ -148,6 +154,76 @@ def _looks_like_html_error(path: Path) -> bool:
     return any(marker.lower() in head for marker in HTML_ERROR_MARKERS)
 
 
+def _zip_shapefile_quality(zf: zipfile.ZipFile) -> dict[str, Any]:
+    by_stem: dict[str, set[str]] = {}
+    for name in zf.namelist():
+        if name.endswith("/"):
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix in {".shp", ".shx", ".dbf", ".prj"}:
+            stem = str(Path(name).with_suffix("")).replace("\\", "/").lower()
+            by_stem.setdefault(stem, set()).add(suffix)
+    if not by_stem:
+        return {}
+    best_stem, best_exts = max(by_stem.items(), key=lambda item: len(item[1]))
+    missing = sorted({".shp", ".shx", ".dbf"} - best_exts)
+    if missing:
+        raise RuntimeError(f"Shapefile archive is missing required sidecar files for {best_stem}: {', '.join(missing)}")
+    return {
+        "shapefile": True,
+        "shapefile_stem": best_stem,
+        "shapefile_components": sorted(best_exts),
+        "has_prj": ".prj" in best_exts,
+    }
+
+
+def _read_csv_header(path: Path) -> list[str]:
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        for row in csv.reader(fh):
+            header = [str(item).strip() for item in row]
+            if any(header):
+                return header
+    raise RuntimeError(f"CSV file has no readable header: {path}")
+
+
+def _xlsx_shared_strings(zf: zipfile.ZipFile) -> list[str]:
+    try:
+        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    strings: list[str] = []
+    for item in root.findall(".//x:si", ns):
+        strings.append("".join(node.text or "" for node in item.findall(".//x:t", ns)))
+    return strings
+
+
+def _read_xlsx_header(path: Path) -> list[str]:
+    with zipfile.ZipFile(path, "r") as zf:
+        sheet_names = sorted(name for name in zf.namelist() if re.match(r"xl/worksheets/sheet\d+\.xml$", name))
+        if not sheet_names:
+            raise RuntimeError(f"XLSX file has no worksheet: {path}")
+        shared = _xlsx_shared_strings(zf)
+        root = ET.fromstring(zf.read(sheet_names[0]))
+        ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        row = root.find(".//x:sheetData/x:row", ns)
+        if row is None:
+            raise RuntimeError(f"XLSX file has no readable header row: {path}")
+        header: list[str] = []
+        for cell in row.findall("x:c", ns):
+            value = cell.find("x:v", ns)
+            text = value.text if value is not None else ""
+            if cell.attrib.get("t") == "s":
+                try:
+                    text = shared[int(text or "0")]
+                except Exception:
+                    pass
+            header.append(str(text or "").strip())
+        if not any(header):
+            raise RuntimeError(f"XLSX file has an empty header row: {path}")
+        return header
+
+
 def validate_download_artifact(path: str | Path) -> dict[str, Any]:
     file_path = Path(path)
     if not file_path.exists():
@@ -158,7 +234,27 @@ def validate_download_artifact(path: str | Path) -> dict[str, Any]:
     if _looks_like_html_error(file_path):
         raise RuntimeError(f"下载文件疑似 HTML 错误页，不是有效数据文件: {file_path}")
     suffix = file_path.suffix.lower()
-    if suffix == ".zip":
+    extra: dict[str, Any] = {}
+    if suffix == ".csv":
+        extra["header"] = _read_csv_header(file_path)
+    elif suffix == ".xlsx":
+        if not zipfile.is_zipfile(file_path):
+            raise RuntimeError(f"XLSX file is not a valid zip package: {file_path}")
+        extra["header"] = _read_xlsx_header(file_path)
+    elif suffix in {".tif", ".tiff"}:
+        try:
+            import rasterio  # type: ignore
+
+            with rasterio.open(file_path) as src:
+                extra.update({
+                    "width": int(src.width),
+                    "height": int(src.height),
+                    "crs": str(src.crs or ""),
+                    "bounds": (float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top)),
+                })
+        except Exception as exc:
+            raise RuntimeError(f"GeoTIFF metadata cannot be read: {file_path}: {exc}") from exc
+    elif suffix == ".zip":
         if not zipfile.is_zipfile(file_path):
             raise RuntimeError(f"下载压缩包损坏或不是 ZIP 文件: {file_path}")
         try:
@@ -166,6 +262,8 @@ def validate_download_artifact(path: str | Path) -> dict[str, Any]:
                 bad = zf.testzip()
                 if bad:
                     raise RuntimeError(f"下载压缩包中存在损坏文件: {bad}")
+                extra.update({"zip_member_count": len([name for name in zf.namelist() if not name.endswith("/")])})
+                extra.update(_zip_shapefile_quality(zf))
         except RuntimeError:
             raise
         except Exception as exc:
@@ -176,6 +274,7 @@ def validate_download_artifact(path: str | Path) -> dict[str, Any]:
         "size_bytes": size,
         "size_mb": round(size / 1024 / 1024, 3),
         "suffix": suffix,
+        **extra,
     }
 
 

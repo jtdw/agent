@@ -1,4 +1,6 @@
 
+import type { ChatContextPayload } from './chatContext';
+
 export type TiandituConfig = {
   enabled: boolean;
   token_masked?: string;
@@ -85,13 +87,37 @@ export type AuthSession = {
   expires_at?: string;
 };
 
+export type CurrentAuthSession = {
+  authenticated: boolean;
+  user: CommercialUser | null;
+  session_id?: string;
+  expires_at?: string;
+};
+
 export type WorkspaceArtifact = {
+  artifact_id?: string;
   name?: string;
   path: string;
   type?: string;
   size?: number;
   updated_at?: string;
   download_url?: string;
+};
+
+export type ResultPanelFile = {
+  artifact_id?: string;
+  label: string;
+  path?: string;
+  download_url?: string;
+  kind?: string;
+};
+
+export type ResultPanel = {
+  has_results?: boolean;
+  title?: string;
+  files?: ResultPanelFile[];
+  result_paths?: string[];
+  recommendations?: string[];
 };
 
 export type ResultMapLayer = {
@@ -106,6 +132,8 @@ export type ResultMapLayer = {
   meta?: Record<string, unknown>;
 };
 
+import type { DownloadJobStatus } from './downloadStatus';
+
 export type DownloadJob = {
   job_id: string;
   user_id?: string;
@@ -114,7 +142,10 @@ export type DownloadJob = {
   region?: string;
   account_mode?: string;
   output_name?: string;
-  status?: string;
+  status?: DownloadJobStatus | string;
+  state?: DownloadJobStatus | string;
+  status_label?: string;
+  message?: string;
   progress?: number;
   stage?: string;
   error_message?: string;
@@ -162,6 +193,7 @@ export type WorkspaceDashboard = {
   summary: string;
   datasets: Array<Record<string, unknown>>;
   artifacts: WorkspaceArtifact[];
+  model_results?: Array<Record<string, unknown>>;
   activity: Array<Record<string, unknown>>;
   dataset_type_counts: Record<string, number>;
   runtime_status: Record<string, unknown>;
@@ -221,6 +253,17 @@ function authHeaders(): Record<string, string> {
   return {};
 }
 
+export function formatApiError(status: number, statusText: string, detail: unknown): Error {
+  const detailText = typeof detail === 'string' ? detail.trim() : '';
+  if (status === 401) {
+    return new Error(`登录已过期，请重新登录后再试。${detailText ? ` ${detailText}` : ''}`.trim());
+  }
+  if (status === 403) {
+    return new Error(detailText || '没有权限执行该操作。');
+  }
+  return new Error(detailText || `${status} ${statusText}`);
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: 'include',
@@ -237,10 +280,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const data = await res.json();
       detail = data.detail || data.error || detail;
     } catch {}
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`登录已过期或没有权限，请重新登录后再试。${typeof detail === 'string' ? ` ${detail}` : ''}`.trim());
-    }
-    throw new Error(detail);
+    throw formatApiError(res.status, res.statusText, detail);
   }
   return res.json() as Promise<T>;
 }
@@ -253,10 +293,7 @@ async function multipart<T>(path: string, data: FormData): Promise<T> {
       const payload = await res.json();
       detail = payload.detail || payload.error || detail;
     } catch {}
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`登录已过期或没有权限，请重新登录后再试。${typeof detail === 'string' ? ` ${detail}` : ''}`.trim());
-    }
-    throw new Error(detail);
+    throw formatApiError(res.status, res.statusText, detail);
   }
   return res.json() as Promise<T>;
 }
@@ -269,10 +306,7 @@ async function downloadWithAuth(url: string, fallbackName = 'download') {
       const payload = await res.json();
       detail = payload.detail || payload.error || detail;
     } catch {}
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(`登录已过期或没有权限，请重新登录后再试。${typeof detail === 'string' ? ` ${detail}` : ''}`.trim());
-    }
-    throw new Error(detail);
+    throw formatApiError(res.status, res.statusText, detail);
   }
   const blob = await res.blob();
   const disposition = res.headers.get('content-disposition') || '';
@@ -322,7 +356,7 @@ export const api = {
     });
   },
   async me() {
-    return request<{ user: CommercialUser; expires_at?: string }>('/api/auth/me');
+    return request<CurrentAuthSession>('/api/auth/me');
   },
   async logout() {
     return request<{ ok: boolean }>('/api/auth/logout', {
@@ -356,16 +390,22 @@ export const api = {
       body: JSON.stringify({ user_id: user_id || '', session_id })
     });
   },
+  async clearChatSession(session_id: string, user_id?: string) {
+    return request<{ sessions: ChatSession[]; current_session_id: string; messages: ChatMessage[] }>('/api/chat/sessions/clear', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: user_id || '', session_id })
+    });
+  },
   async renameChatSession(session_id: string, title: string, user_id?: string) {
     return request<{ sessions: ChatSession[]; current_session_id: string }>('/api/chat/sessions/rename', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', session_id, title })
     });
   },
-  async ask(prompt: string, user_id?: string, session_id?: string) {
-    return request<{ reply: string; model?: string; reason?: string }>('/api/chat/ask', {
+  async ask(prompt: string, user_id?: string, session_id?: string, frontend_context?: ChatContextPayload) {
+    return request<{ reply: string; model?: string; reason?: string; messages?: ChatMessage[]; sessions?: ChatSession[]; current_session_id?: string; task_outcome?: Record<string, unknown>; result_panel?: ResultPanel }>('/api/chat/ask', {
       method: 'POST',
-      body: JSON.stringify({ prompt, user_id: user_id || '', session_id: session_id || '' })
+      body: JSON.stringify({ prompt, user_id: user_id || '', session_id: session_id || '', frontend_context: frontend_context || {} })
     });
   },
   async retryMessage(message_id: number, content: string, user_id?: string, session_id?: string) {
@@ -378,7 +418,7 @@ export const api = {
     const fd = new FormData();
     fd.append('user_id', user_id || '');
     Array.from(files).forEach((file) => fd.append('files', file));
-    return multipart<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard }>('/api/files/upload', fd);
+    return multipart<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/files/upload', fd);
   },
   async dashboard(user_id?: string) {
     const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
@@ -412,7 +452,7 @@ export const api = {
     });
   },
   async importLocalLibrary(item_ids: string[], user_id?: string) {
-    return request<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard }>('/api/local-library/import', {
+    return request<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/local-library/import', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', item_ids })
     });

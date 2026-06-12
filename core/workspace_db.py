@@ -97,6 +97,47 @@ class WorkspaceDatabase:
                     FOREIGN KEY(session_id) REFERENCES conversations(session_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS conversation_state (
+                    session_id TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES conversations(session_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS model_results (
+                    model_result_id TEXT PRIMARY KEY,
+                    task_id TEXT,
+                    dataset_id TEXT,
+                    model_name TEXT NOT NULL,
+                    output_prefix TEXT,
+                    result_dataset TEXT,
+                    metrics_dataset TEXT,
+                    metrics_path TEXT,
+                    figure_path TEXT,
+                    artifact_ids_json TEXT,
+                    artifacts_json TEXT,
+                    metrics_json TEXT,
+                    diagnostics_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    path TEXT NOT NULL,
+                    type TEXT,
+                    title TEXT,
+                    description TEXT,
+                    quality_status TEXT,
+                    preview_available INTEGER NOT NULL DEFAULT 0,
+                    task_id TEXT,
+                    model_result_id TEXT,
+                    dataset_id TEXT,
+                    meta_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS app_state (
                     state_key TEXT PRIMARY KEY,
                     state_value TEXT,
@@ -104,6 +145,182 @@ class WorkspaceDatabase:
                 );
                 """
             )
+
+    def upsert_model_result(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        model_result_id = str(payload.get("model_result_id") or "").strip()
+        if not model_result_id:
+            raise ValueError("model_result_id is required")
+        created_at = str(payload.get("created_at") or now)
+        row = {
+            "model_result_id": model_result_id,
+            "task_id": str(payload.get("task_id") or ""),
+            "dataset_id": str(payload.get("dataset_id") or ""),
+            "model_name": str(payload.get("model_name") or payload.get("model") or ""),
+            "output_prefix": str(payload.get("output_prefix") or ""),
+            "result_dataset": str(payload.get("result_dataset") or ""),
+            "metrics_dataset": str(payload.get("metrics_dataset") or ""),
+            "metrics_path": str(payload.get("metrics_path") or ""),
+            "figure_path": str(payload.get("figure_path") or ""),
+            "artifact_ids_json": json.dumps(payload.get("artifact_ids") or [], ensure_ascii=False),
+            "artifacts_json": json.dumps(payload.get("artifacts") or [], ensure_ascii=False, default=str),
+            "metrics_json": json.dumps(payload.get("metrics") or {}, ensure_ascii=False, default=str),
+            "diagnostics_json": json.dumps(payload.get("diagnostics") or {}, ensure_ascii=False, default=str),
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO model_results (
+                    model_result_id, task_id, dataset_id, model_name, output_prefix,
+                    result_dataset, metrics_dataset, metrics_path, figure_path,
+                    artifact_ids_json, artifacts_json, metrics_json, diagnostics_json,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :model_result_id, :task_id, :dataset_id, :model_name, :output_prefix,
+                    :result_dataset, :metrics_dataset, :metrics_path, :figure_path,
+                    :artifact_ids_json, :artifacts_json, :metrics_json, :diagnostics_json,
+                    :created_at, :updated_at
+                )
+                ON CONFLICT(model_result_id) DO UPDATE SET
+                    task_id=excluded.task_id,
+                    dataset_id=excluded.dataset_id,
+                    model_name=excluded.model_name,
+                    output_prefix=excluded.output_prefix,
+                    result_dataset=excluded.result_dataset,
+                    metrics_dataset=excluded.metrics_dataset,
+                    metrics_path=excluded.metrics_path,
+                    figure_path=excluded.figure_path,
+                    artifact_ids_json=excluded.artifact_ids_json,
+                    artifacts_json=excluded.artifacts_json,
+                    metrics_json=excluded.metrics_json,
+                    diagnostics_json=excluded.diagnostics_json,
+                    updated_at=excluded.updated_at
+                """,
+                row,
+            )
+        return self.get_model_result(model_result_id) or {}
+
+    @staticmethod
+    def _decode_model_result(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["artifact_ids"] = json.loads(payload.pop("artifact_ids_json") or "[]")
+        payload["artifacts"] = json.loads(payload.pop("artifacts_json") or "[]")
+        payload["metrics"] = json.loads(payload.pop("metrics_json") or "{}")
+        payload["diagnostics"] = json.loads(payload.pop("diagnostics_json") or "{}")
+        payload["model"] = payload.get("model_name") or ""
+        return payload
+
+    def get_model_result(self, model_result_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM model_results WHERE model_result_id = ?",
+                (str(model_result_id or ""),),
+            ).fetchone()
+        return self._decode_model_result(row) if row else None
+
+    def list_model_results(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM model_results
+                ORDER BY updated_at DESC, created_at DESC, model_result_id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [self._decode_model_result(row) for row in rows]
+
+    def upsert_artifact(self, payload: dict[str, Any]) -> dict[str, Any]:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        artifact_id = str(payload.get("artifact_id") or "").strip()
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        path = str(payload.get("path") or "").strip()
+        if not path:
+            raise ValueError("artifact path is required")
+        created_at = str(payload.get("created_at") or now)
+        row = {
+            "artifact_id": artifact_id,
+            "path": path,
+            "type": str(payload.get("type") or ""),
+            "title": str(payload.get("title") or payload.get("name") or ""),
+            "description": str(payload.get("description") or ""),
+            "quality_status": str(payload.get("quality_status") or "unchecked"),
+            "preview_available": 1 if bool(payload.get("preview_available")) else 0,
+            "task_id": str(payload.get("task_id") or ""),
+            "model_result_id": str(payload.get("model_result_id") or ""),
+            "dataset_id": str(payload.get("dataset_id") or ""),
+            "meta_json": json.dumps(payload.get("meta") or {}, ensure_ascii=False, default=str),
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO artifacts (
+                    artifact_id, path, type, title, description, quality_status,
+                    preview_available, task_id, model_result_id, dataset_id,
+                    meta_json, created_at, updated_at
+                )
+                VALUES (
+                    :artifact_id, :path, :type, :title, :description, :quality_status,
+                    :preview_available, :task_id, :model_result_id, :dataset_id,
+                    :meta_json, :created_at, :updated_at
+                )
+                ON CONFLICT(artifact_id) DO UPDATE SET
+                    path=excluded.path,
+                    type=excluded.type,
+                    title=excluded.title,
+                    description=excluded.description,
+                    quality_status=excluded.quality_status,
+                    preview_available=excluded.preview_available,
+                    task_id=excluded.task_id,
+                    model_result_id=excluded.model_result_id,
+                    dataset_id=excluded.dataset_id,
+                    meta_json=excluded.meta_json,
+                    updated_at=excluded.updated_at
+                """,
+                row,
+            )
+        return self.get_artifact(artifact_id) or {}
+
+    @staticmethod
+    def _decode_artifact(row: sqlite3.Row) -> dict[str, Any]:
+        payload = dict(row)
+        payload["preview_available"] = bool(payload.get("preview_available"))
+        payload["meta"] = json.loads(payload.pop("meta_json") or "{}")
+        payload["name"] = Path(str(payload.get("path") or "")).name
+        return payload
+
+    def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM artifacts WHERE artifact_id = ?",
+                (str(artifact_id or ""),),
+            ).fetchone()
+        return self._decode_artifact(row) if row else None
+
+    def list_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if str(model_result_id or "").strip():
+            where = "WHERE model_result_id = ?"
+            params.append(str(model_result_id))
+        params.append(int(limit))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM artifacts
+                {where}
+                ORDER BY updated_at DESC, created_at DESC, artifact_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._decode_artifact(row) for row in rows]
 
     def _set_state(self, key: str, value: str) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -359,6 +576,35 @@ class WorkspaceDatabase:
             )
         self.touch_conversation(session_id)
 
+    def get_conversation_state(self, session_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT state_json FROM conversation_state WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        try:
+            payload = json.loads(row["state_json"] or "{}")
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def set_conversation_state(self, session_id: str, state: dict[str, Any]) -> None:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conversation_state (session_id, state_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    state_json=excluded.state_json,
+                    updated_at=excluded.updated_at
+                """,
+                (session_id, json.dumps(state or {}, ensure_ascii=False), now),
+            )
+        self.touch_conversation(session_id)
+
     def update_message(self, message_id: int, content: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
@@ -406,6 +652,7 @@ class WorkspaceDatabase:
         current = self.get_current_conversation_id()
         with self._connect() as conn:
             conn.execute("DELETE FROM conversation_messages WHERE session_id = ?", (session_id,))
+            conn.execute("DELETE FROM conversation_state WHERE session_id = ?", (session_id,))
             conn.execute("DELETE FROM conversations WHERE session_id = ?", (session_id,))
         if current == session_id:
             self._set_state("current_conversation_id", "")

@@ -1,0 +1,249 @@
+[
+  {
+    "id": "uploaded_shp_capabilities",
+    "prompt": "这个数据能做什么",
+    "state": {
+      "active_dataset": "county_boundary",
+      "last_task_type": "data_upload_analysis"
+    },
+    "workspace_summary": {
+      "dataset_count": 1,
+      "artifact_count": 0,
+      "datasets": [
+        {"name": "county_boundary", "type": "vector", "format": "shp"}
+      ]
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "county_boundary", "type": "vector"}
+    },
+    "expected_intent": "data_upload_analysis",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "uploaded_csv_map",
+    "prompt": "帮我制图",
+    "state": {
+      "active_dataset": "stations_csv"
+    },
+    "workspace_summary": {
+      "dataset_count": 1,
+      "datasets": [
+        {"name": "stations_csv", "type": "table", "format": "csv"}
+      ]
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "stations_csv", "type": "table"}
+    },
+    "expected_intent": "map_generation",
+    "expected_plan_flags": {"should_ask_clarification": true}
+  },
+  {
+    "id": "population_density_approx_field",
+    "prompt": "画人口密度图",
+    "state": {
+      "active_dataset": "population_table"
+    },
+    "workspace_summary": {
+      "dataset_count": 1,
+      "datasets": [
+        {
+          "name": "population_table",
+          "type": "table",
+          "columns": ["county", "pop_density", "geometry"]
+        }
+      ]
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "population_table", "type": "table"}
+    },
+    "expected_intent": "map_generation",
+    "expected_plan_flags": {"should_ask_clarification": true}
+  },
+  {
+    "id": "explain_this_result",
+    "prompt": "这个结果说明什么",
+    "state": {
+      "last_model_result": {"model": "XGBoost", "output_prefix": "soil_xgb"}
+    },
+    "workspace_summary": {
+      "dataset_count": 1,
+      "artifact_count": 2
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "recent_model_result": {"model": "XGBoost", "output_prefix": "soil_xgb"}
+    },
+    "expected_intent": "result_analysis",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "continue_previous_task",
+    "prompt": "继续",
+    "state": {
+      "active_dataset": "soil_station",
+      "last_user_goal": "检查并建模",
+      "last_task_type": "data_upload_analysis"
+    },
+    "workspace_summary": {
+      "dataset_count": 1
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "soil_station", "type": "table"},
+      "referenced_object": {"type": "task", "label": "检查并建模"}
+    },
+    "expected_intent": "follow_up_question",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "explain_recent_map",
+    "prompt": "刚才那张图怎么看",
+    "state": {
+      "last_map_path": "plots/soil_map.png"
+    },
+    "workspace_summary": {
+      "dataset_count": 1,
+      "artifact_count": 1
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "referenced_object": {"type": "map", "path": "plots/soil_map.png"}
+    },
+    "expected_intent": "follow_up_question",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "modeling_missing_target",
+    "prompt": "帮我训练一个预测模型",
+    "state": {
+      "active_dataset": "soil_station"
+    },
+    "workspace_summary": {
+      "dataset_count": 1
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "soil_station", "type": "table"}
+    },
+    "expected_intent": "modeling",
+    "expected_plan_flags": {"should_ask_clarification": true}
+  },
+  {
+    "id": "auto_process_and_map",
+    "prompt": "自动处理并制图",
+    "state": {
+      "active_dataset": "soil_station"
+    },
+    "workspace_summary": {
+      "dataset_count": 1
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "soil_station", "type": "table"}
+    },
+    "expected_intent": "data_processing",
+    "expected_secondary_intents": ["map_generation"],
+    "expected_plan_flags": {"should_ask_clarification": true}
+  },
+  {
+    "id": "why_failed",
+    "prompt": "为什么失败",
+    "state": {
+      "last_error": {"message": "字段 target 不存在", "task_type": "modeling"}
+    },
+    "workspace_summary": {
+      "dataset_count": 1
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "recent_error": {"message": "字段 target 不存在", "task_type": "modeling"}
+    },
+    "expected_intent": "troubleshooting",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "clip_map_explain_mixed",
+    "prompt": "先裁剪再画图并解释",
+    "state": {
+      "active_dataset": "landuse",
+      "referenced_object": {"type": "dataset", "name": "boundary"}
+    },
+    "workspace_summary": {
+      "dataset_count": 2
+    },
+    "context": {
+      "workspace": {"dataset_count": 2},
+      "active_dataset": {"name": "landuse", "type": "vector"},
+      "referenced_object": {"type": "dataset", "name": "boundary"}
+    },
+    "expected_intent": "data_processing",
+    "expected_secondary_intents": ["map_generation", "result_analysis"],
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "real_chinese_clip_then_population_density_map",
+    "prompt": "把这个 shp 裁剪到研究区，然后画人口密度图",
+    "state": {
+      "active_dataset": "county_points"
+    },
+    "workspace_summary": {
+      "dataset_count": 2,
+      "datasets": [
+        {"name": "county_points", "type": "vector", "columns": ["pop_density", "geometry"]},
+        {"name": "study_area", "type": "vector", "columns": ["name", "geometry"]}
+      ]
+    },
+    "context": {
+      "workspace": {"dataset_count": 2},
+      "active_dataset": {"name": "county_points", "type": "vector"},
+      "available_fields": ["pop_density", "geometry"],
+      "numeric_fields": ["pop_density"],
+      "available_datasets": [
+        {"name": "county_points", "type": "vector", "path": "county_points.geojson"},
+        {"name": "study_area", "type": "vector", "path": "study_area.geojson"}
+      ]
+    },
+    "expected_intent": "data_processing",
+    "expected_secondary_intents": ["map_generation"],
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "real_chinese_why_failed",
+    "prompt": "为什么失败",
+    "state": {
+      "last_error": {"message": "字段 target 不存在", "task_type": "modeling"}
+    },
+    "workspace_summary": {
+      "dataset_count": 1
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "recent_error": {"message": "字段 target 不存在", "task_type": "modeling"}
+    },
+    "expected_intent": "troubleshooting",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  },
+  {
+    "id": "real_chinese_this_data_capabilities",
+    "prompt": "这个数据能做什么",
+    "state": {
+      "active_dataset": "county_boundary",
+      "last_task_type": "data_upload_analysis"
+    },
+    "workspace_summary": {
+      "dataset_count": 1,
+      "datasets": [
+        {"name": "county_boundary", "type": "vector", "format": "shp"}
+      ]
+    },
+    "context": {
+      "workspace": {"dataset_count": 1},
+      "active_dataset": {"name": "county_boundary", "type": "vector"}
+    },
+    "expected_intent": "data_upload_analysis",
+    "expected_plan_flags": {"should_ask_clarification": false}
+  }
+]

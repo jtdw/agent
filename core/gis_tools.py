@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import difflib
+import io
 import json
 import math
+import os
 import re
 import shutil
 import warnings
+import zipfile
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,11 +20,13 @@ import geopandas as gpd
 import matplotlib
 import numpy as np
 import pandas as pd
+import pyogrio
 import rasterio
 import torch
 from langchain.tools import tool
 from matplotlib import font_manager as fm
 from matplotlib import pyplot as plt
+from pyproj import CRS
 from scipy.optimize import minimize
 from rasterio.mask import mask
 from rasterio.plot import show as raster_show
@@ -39,7 +45,24 @@ except Exception:
     XGBRegressor = None
 
 from .data_manager import DataManager
+from .model_results import generate_model_result_id
 from .resource_tools import build_resource_tools
+from .tool_contracts import ArtifactInfo, parse_tool_result, tool_result_error, tool_result_ok
+from .tool_preconditions import (
+    first_error,
+    merge_next_actions,
+    validate_crs,
+    validate_dataset_exists,
+    validate_geometry_type,
+    validate_model_target,
+    validate_numeric_fields,
+    validate_output_file_path,
+    validate_output_path,
+    validate_raster_readable,
+    validate_required_fields,
+    validate_vector_readable,
+    validation_diagnostics,
+)
 
 
 matplotlib.use("Agg")
@@ -92,6 +115,33 @@ def _safe_map_title(title: str) -> str:
 
 def _json(data: dict | list) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+def _tool_error_from_validation(tool_name: str, inputs: dict[str, Any], errors: list[dict[str, Any]]) -> str:
+    first = first_error(errors) or {}
+    return tool_result_error(
+        tool_name,
+        inputs=inputs,
+        error_code=str(first.get("error_code") or "TOOL_PRECONDITION_FAILED"),
+        error_title=str(first.get("error_title") or "工具前置条件不满足"),
+        user_message=str(first.get("user_message") or "工具执行前缺少必要条件。"),
+        diagnostics=validation_diagnostics(errors),
+        next_actions=merge_next_actions(errors),
+        technical_detail=str(first.get("diagnostics", {}).get("technical_detail") or ""),
+    ).to_json()
+
+
+def _tool_internal_error(tool_name: str, inputs: dict[str, Any], exc: Exception) -> str:
+    return tool_result_error(
+        tool_name,
+        inputs=inputs,
+        error_code="INTERNAL_TOOL_ERROR",
+        error_title="工具执行失败",
+        user_message="工具执行过程中出现未预期错误，已保留技术细节供排查。",
+        diagnostics={"exception_type": type(exc).__name__},
+        next_actions=["检查输入数据、字段、坐标系和输出名称后重试。"],
+        technical_detail=f"{type(exc).__name__}: {exc}",
+    ).to_json()
 
 
 def _estimate_projected_gdf(gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, str]:
@@ -1559,21 +1609,41 @@ def build_tools(manager: DataManager):
     @tool
     def describe_dataset(dataset_name: str) -> str:
         """查看指定数据集的详细摘要，包括类型、坐标系、字段、尺寸或文档长度等。"""
-        record = manager.get(dataset_name)
-        preview = None
-        if record.data_type in {"table", "vector"}:
-            preview = manager.preview_table_rows(dataset_name, rows=5)
-        elif record.data_type == "document":
-            preview = manager.preview_document(dataset_name, max_chars=500)
-        return _json(
-            {
+        inputs = {"dataset_name": dataset_name}
+        errors = validate_dataset_exists(manager, dataset_name)
+        if errors:
+            return _tool_error_from_validation("describe_dataset", inputs, errors)
+        try:
+            record = manager.get(dataset_name)
+            preview = None
+            fields: list[str] = []
+            if record.data_type in {"table", "vector"}:
+                preview = manager.preview_table_rows(dataset_name, rows=5)
+                fields = [str(col) for col in (record.meta.get("columns") or [])] if isinstance(record.meta, dict) else []
+            elif record.data_type == "document":
+                preview = manager.preview_document(dataset_name, max_chars=500)
+            outputs = {
                 "name": record.name,
                 "type": record.data_type,
                 "path": str(record.path),
                 "meta": record.meta,
                 "preview": preview,
             }
-        )
+            return tool_result_ok(
+                "describe_dataset",
+                inputs=inputs,
+                outputs=outputs,
+                summary=f"已读取数据集 {record.name} 的结构摘要。",
+                diagnostics={
+                    "field_count": len(fields),
+                    "fields": fields,
+                    "dataset_type": record.data_type,
+                    "crs": record.meta.get("crs") if isinstance(record.meta, dict) else None,
+                },
+                next_actions=["根据字段、坐标系和缺失值情况选择制图、处理或建模步骤。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("describe_dataset", inputs, exc)
 
     @tool
     def preview_table(dataset_name: str, rows: int = 8) -> str:
@@ -1737,18 +1807,120 @@ def build_tools(manager: DataManager):
     @tool
     def vector_buffer(dataset_name: str, distance: float, output_name: str) -> str:
         """对矢量数据进行缓冲区分析。distance 单位为图层投影坐标系单位，若原始数据为经纬度则会自动估计 UTM 投影。"""
-        gdf = manager.get_vector(dataset_name)
-        projected, used_crs = _estimate_projected_gdf(gdf)
-        buffered = projected.copy()
-        buffered["geometry"] = projected.buffer(distance)
-        buffered = buffered.to_crs(gdf.crs)
-        saved_name = manager.put_vector(output_name, buffered)
-        manager.log_operation("缓冲区分析", f"{dataset_name} -> {saved_name} | 距离: {distance}", "analysis")
-        return f"缓冲区分析完成，结果: {saved_name}，缓冲距离: {distance}，处理投影: {used_crs}，保存路径: {manager.get(saved_name).path}"
+        inputs = {"dataset_name": dataset_name, "distance": distance, "output_name": output_name}
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        try:
+            distance_value = float(distance)
+            if distance_value <= 0:
+                raise ValueError("distance must be positive")
+        except Exception:
+            return tool_result_error(
+                "vector_buffer",
+                inputs=inputs,
+                error_code="BUFFER_DISTANCE_INVALID",
+                error_title="Invalid buffer distance",
+                user_message="Buffer distance must be a positive number.",
+                diagnostics={"distance": distance},
+                next_actions=["Provide a positive buffer distance before running buffer analysis."],
+            ).to_json()
+        if not errors:
+            errors.extend(validate_vector_readable(manager, dataset_name))
+            errors.extend(validate_crs(manager, dataset_name))
+        if errors:
+            return _tool_error_from_validation("vector_buffer", inputs, errors)
+        try:
+            gdf = manager.get_vector(dataset_name)
+            projected, used_crs = _estimate_projected_gdf(gdf)
+            buffered = projected.copy()
+            buffered["geometry"] = projected.buffer(distance_value)
+            buffered = buffered.to_crs(gdf.crs)
+            saved_name = manager.put_vector(output_name, buffered)
+            record = manager.get(saved_name)
+            manager.log_operation("缓冲区分析", f"{dataset_name} -> {saved_name} | 距离: {distance_value}", "analysis")
+            warnings_list = ["Buffer result is empty; check source geometry and distance."] if buffered.empty else []
+            return tool_result_ok(
+                "vector_buffer",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "feature_count": int(len(buffered)),
+                    "path": str(record.path),
+                    "distance": distance_value,
+                    "processing_crs": used_crs,
+                },
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"Buffer result from {dataset_name}.",
+                        quality_status="empty" if buffered.empty else "ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"Created buffer dataset {saved_name} with {len(buffered)} features.",
+                diagnostics={
+                    "source_dataset": dataset_name,
+                    "source_count": int(len(gdf)),
+                    "result_count": int(len(buffered)),
+                    "source_crs": str(gdf.crs),
+                    "processing_crs": used_crs,
+                },
+                warnings=warnings_list,
+                next_actions=["Inspect the buffer result, then continue with clipping, overlay, mapping, or export."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("vector_buffer", inputs, exc)
 
     @tool
     def vector_clip_by_vector(dataset_name: str, clip_name: str, output_name: str) -> str:
         """使用一个矢量图层裁剪另一个矢量图层，常用于按研究区裁剪道路、点位或行政区。"""
+        inputs = {"dataset_name": dataset_name, "clip_name": clip_name, "output_name": output_name}
+        errors = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_dataset_exists(manager, clip_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, dataset_name))
+            errors.extend(validate_vector_readable(manager, clip_name))
+            errors.extend(validate_crs(manager, dataset_name))
+            errors.extend(validate_crs(manager, clip_name))
+        if errors:
+            return _tool_error_from_validation("vector_clip_by_vector", inputs, errors)
+        try:
+            source = manager.get_vector(dataset_name)
+            clipper = manager.get_vector(clip_name)
+            source, clipper = _align_crs(source, clipper)
+            clipped = gpd.clip(source, clipper)
+            saved_name = manager.put_vector(output_name, clipped)
+            output_path = manager.get(saved_name).path
+            manager.log_operation("鐭㈤噺瑁佸壀", f"{dataset_name} by {clip_name} -> {saved_name}", "analysis")
+            warnings_list = ["裁剪结果为空，请检查两个图层是否相交。"] if clipped.empty else []
+            return tool_result_ok(
+                "vector_clip_by_vector",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(clipped)), "path": str(output_path)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset_{uuid4().hex[:10]}",
+                        path=str(output_path),
+                        type="dataset",
+                        title=f"{saved_name} clipped vector",
+                        description=f"{dataset_name} 被 {clip_name} 裁剪后的矢量结果。",
+                        quality_status="empty" if clipped.empty else "created",
+                        preview_available=False,
+                    )
+                ],
+                summary=f"矢量裁剪完成，结果数据集 {saved_name}，要素数 {len(clipped)}。",
+                diagnostics={"source_count": int(len(source)), "clip_count": int(len(clipper)), "result_count": int(len(clipped)), "crs": str(source.crs)},
+                warnings=warnings_list,
+                next_actions=["检查裁剪结果范围和要素数量。", "如结果为空，请确认两个图层坐标系和空间范围。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("vector_clip_by_vector", inputs, exc)
         source = manager.get_vector(dataset_name)
         clipper = manager.get_vector(clip_name)
         source, clipper = _align_crs(source, clipper)
@@ -1761,6 +1933,76 @@ def build_tools(manager: DataManager):
     def vector_overlay(dataset_name: str, overlay_name: str, how: str, output_name: str) -> str:
         """执行常见矢量叠加分析。how 可选 intersection、union、difference、identity、symmetric_difference。"""
         allowed = {"intersection", "union", "difference", "identity", "symmetric_difference"}
+        inputs = {
+            "dataset_name": dataset_name,
+            "overlay_name": overlay_name,
+            "how": how,
+            "output_name": output_name,
+        }
+        if how not in allowed:
+            return tool_result_error(
+                "vector_overlay",
+                inputs=inputs,
+                error_code="OVERLAY_MODE_UNSUPPORTED",
+                error_title="叠加方式不支持",
+                user_message=f"how 必须是 {', '.join(sorted(allowed))} 之一。",
+                diagnostics={"allowed": sorted(allowed), "received": how},
+                next_actions=["请选择一种受支持的叠加方式后重试。"],
+            ).to_json()
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_dataset_exists(manager, overlay_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, dataset_name))
+            errors.extend(validate_vector_readable(manager, overlay_name))
+            errors.extend(validate_crs(manager, dataset_name))
+            errors.extend(validate_crs(manager, overlay_name))
+        if errors:
+            return _tool_error_from_validation("vector_overlay", inputs, errors)
+
+        try:
+            left = manager.get_vector(dataset_name)
+            right = manager.get_vector(overlay_name)
+            left, right = _align_crs(left, right)
+            result = gpd.overlay(left, right, how=how)
+            saved_name = manager.put_vector(output_name, result)
+            record = manager.get(saved_name)
+            warnings_list = ["叠加结果为空，请检查两个图层是否存在空间重叠或叠加方式是否合适。"] if result.empty else []
+            manager.log_operation("鐭㈤噺鍙犲姞", f"{dataset_name} {how} {overlay_name} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "vector_overlay",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "feature_count": int(len(result)),
+                    "path": str(record.path),
+                    "how": how,
+                },
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"{dataset_name} {how} {overlay_name} overlay result",
+                        quality_status="empty" if result.empty else "ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"已完成 {dataset_name} 与 {overlay_name} 的 {how} 叠加，输出 {saved_name}，要素数 {len(result)}。",
+                diagnostics={
+                    "left_count": int(len(left)),
+                    "right_count": int(len(right)),
+                    "result_count": int(len(result)),
+                    "how": how,
+                    "crs": str(left.crs) if left.crs is not None else None,
+                },
+                warnings=warnings_list,
+                next_actions=["可继续对叠加结果制图、统计属性字段，或检查空结果区域。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("vector_overlay", inputs, exc)
         if how not in allowed:
             raise ValueError(f"how 必须是 {sorted(allowed)} 之一")
         left = manager.get_vector(dataset_name)
@@ -1774,6 +2016,43 @@ def build_tools(manager: DataManager):
     @tool
     def vector_dissolve(dataset_name: str, by_field: str, output_name: str) -> str:
         """按字段融合矢量面或线，适合按分类字段汇总区域。"""
+        inputs = {"dataset_name": dataset_name, "by_field": by_field, "output_name": output_name}
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, dataset_name))
+            errors.extend(validate_crs(manager, dataset_name))
+            errors.extend(validate_required_fields(manager, dataset_name, [by_field]))
+        if errors:
+            return _tool_error_from_validation("vector_dissolve", inputs, errors)
+        try:
+            gdf = manager.get_vector(dataset_name)
+            dissolved = gdf.dissolve(by=by_field).reset_index()
+            saved_name = manager.put_vector(output_name, dissolved)
+            record = manager.get(saved_name)
+            manager.log_operation("矢量融合", f"{dataset_name} by {by_field} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "vector_dissolve",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(dissolved)), "path": str(record.path)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"{dataset_name} dissolved by {by_field}",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"已按字段 {by_field} 融合 {dataset_name}，输出 {saved_name}，要素数 {len(dissolved)}。",
+                diagnostics={"source_count": int(len(gdf)), "result_count": int(len(dissolved)), "by_field": by_field, "crs": str(gdf.crs)},
+                next_actions=["可继续对融合结果制图、叠加分析或导出。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("vector_dissolve", inputs, exc)
         gdf = manager.get_vector(dataset_name)
         if by_field not in gdf.columns:
             raise ValueError(f"字段不存在: {by_field}。可用字段: {list(gdf.columns)}")
@@ -1786,6 +2065,76 @@ def build_tools(manager: DataManager):
     def vector_spatial_join(target_name: str, join_name: str, predicate: str, output_name: str, how: str = "left") -> str:
         """对两个矢量图层执行空间连接。predicate 常用 intersects、within、contains、touches、overlaps。"""
         allowed = {"intersects", "within", "contains", "touches", "overlaps", "crosses"}
+        inputs = {"target_name": target_name, "join_name": join_name, "predicate": predicate, "output_name": output_name, "how": how}
+        if predicate not in allowed:
+            return tool_result_error(
+                "vector_spatial_join",
+                inputs=inputs,
+                error_code="SPATIAL_PREDICATE_UNSUPPORTED",
+                error_title="空间关系不支持",
+                user_message=f"predicate 必须是 {', '.join(sorted(allowed))} 之一。",
+                diagnostics={"allowed": sorted(allowed), "received": predicate},
+                next_actions=["请选择一种受支持的空间关系后重试。"],
+            ).to_json()
+        if how not in {"left", "right", "inner"}:
+            return tool_result_error(
+                "vector_spatial_join",
+                inputs=inputs,
+                error_code="JOIN_MODE_UNSUPPORTED",
+                error_title="连接方式不支持",
+                user_message="how 必须是 left、right 或 inner。",
+                diagnostics={"allowed": ["inner", "left", "right"], "received": how},
+                next_actions=["请选择 left、right 或 inner 后重试。"],
+            ).to_json()
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, target_name))
+        errors.extend(validate_dataset_exists(manager, join_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, target_name))
+            errors.extend(validate_vector_readable(manager, join_name))
+            errors.extend(validate_crs(manager, target_name))
+            errors.extend(validate_crs(manager, join_name))
+        if errors:
+            return _tool_error_from_validation("vector_spatial_join", inputs, errors)
+        try:
+            target = manager.get_vector(target_name)
+            join_gdf = manager.get_vector(join_name)
+            target, join_gdf = _align_crs(target, join_gdf)
+            joined = gpd.sjoin(target, join_gdf, how=how, predicate=predicate)
+            if "index_right" in joined.columns:
+                joined = joined.drop(columns=["index_right"])
+            saved_name = manager.put_vector(output_name, joined)
+            record = manager.get(saved_name)
+            manager.log_operation("空间连接", f"{target_name} {predicate} {join_name} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "vector_spatial_join",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(joined)), "path": str(record.path)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"{target_name} {predicate} {join_name} spatial join result",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"已完成 {target_name} 与 {join_name} 的空间连接，输出 {saved_name}，要素数 {len(joined)}。",
+                diagnostics={
+                    "target_count": int(len(target)),
+                    "join_count": int(len(join_gdf)),
+                    "result_count": int(len(joined)),
+                    "predicate": predicate,
+                    "how": how,
+                    "crs": str(target.crs),
+                },
+                next_actions=["可继续统计连接结果、制图或导出。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("vector_spatial_join", inputs, exc)
         if predicate not in allowed:
             raise ValueError(f"predicate 必须是 {sorted(allowed)} 之一")
         target = manager.get_vector(target_name)
@@ -1801,15 +2150,128 @@ def build_tools(manager: DataManager):
     @tool
     def reproject_vector(dataset_name: str, target_crs: str, output_name: str) -> str:
         """将矢量数据重投影到目标坐标系，例如 EPSG:3857 或 EPSG:4326。"""
-        gdf = manager.get_vector(dataset_name)
-        reproj = gdf.to_crs(target_crs)
-        saved_name = manager.put_vector(output_name, reproj)
-        manager.log_operation("矢量重投影", f"{dataset_name} -> {saved_name} | {target_crs}", "analysis")
-        return f"重投影完成，结果: {saved_name}，目标坐标系: {target_crs}，保存路径: {manager.get(saved_name).path}"
+        inputs = {"dataset_name": dataset_name, "target_crs": target_crs, "output_name": output_name}
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        target_crs_value = str(target_crs or "").strip()
+        try:
+            if not target_crs_value:
+                raise ValueError("target CRS is required")
+            CRS.from_user_input(target_crs_value)
+        except Exception as exc:
+            return tool_result_error(
+                "reproject_vector",
+                inputs=inputs,
+                error_code="TARGET_CRS_INVALID",
+                error_title="Invalid target CRS",
+                user_message=f"Target CRS {target_crs!r} is not a valid CRS identifier.",
+                diagnostics={"target_crs": target_crs, "exception_type": type(exc).__name__},
+                next_actions=["Use an EPSG code such as EPSG:4326 or EPSG:3857."],
+                technical_detail=f"{type(exc).__name__}: {exc}",
+            ).to_json()
+        if not errors:
+            errors.extend(validate_vector_readable(manager, dataset_name))
+            errors.extend(validate_crs(manager, dataset_name))
+        if errors:
+            return _tool_error_from_validation("reproject_vector", inputs, errors)
+        try:
+            gdf = manager.get_vector(dataset_name)
+            reproj = gdf.to_crs(target_crs_value)
+            saved_name = manager.put_vector(output_name, reproj)
+            record = manager.get(saved_name)
+            manager.log_operation("矢量重投影", f"{dataset_name} -> {saved_name} | {target_crs_value}", "analysis")
+            return tool_result_ok(
+                "reproject_vector",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "feature_count": int(len(reproj)),
+                    "path": str(record.path),
+                    "source_crs": str(gdf.crs),
+                    "target_crs": target_crs_value,
+                },
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"{dataset_name} reprojected to {target_crs_value}.",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"Reprojected {dataset_name} to {target_crs_value} as {saved_name}.",
+                diagnostics={"source_count": int(len(gdf)), "result_count": int(len(reproj)), "source_crs": str(gdf.crs), "target_crs": target_crs_value},
+                next_actions=["Use the reprojected dataset for overlay, clipping, mapping, or export."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("reproject_vector", inputs, exc)
 
     @tool
     def table_to_points(dataset_name: str, x_col: str, y_col: str, crs: str, output_name: str) -> str:
         """将表格按经纬度或平面坐标字段转换为点图层。"""
+        inputs = {"dataset_name": dataset_name, "x_col": x_col, "y_col": y_col, "crs": crs, "output_name": output_name}
+        errors = validate_dataset_exists(manager, dataset_name)
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not str(crs or "").strip():
+            errors.append(
+                {
+                    "error_code": "CRS_REQUIRED",
+                    "error_title": "缺少坐标系",
+                    "user_message": "表格转点需要指定输出点图层的 CRS。",
+                    "next_actions": ["如果坐标是经纬度，通常使用 EPSG:4326。", "如果是投影坐标，请填写对应 EPSG 代码。"],
+                    "diagnostics": {},
+                }
+            )
+        if not errors:
+            try:
+                record = manager.get(dataset_name)
+                if record.data_type != "table":
+                    return tool_result_error(
+                        "table_to_points",
+                        inputs=inputs,
+                        error_code="UNSUPPORTED_DATASET_TYPE",
+                        error_title="数据类型不支持",
+                        user_message="table_to_points 只能处理表格数据。",
+                        diagnostics={"dataset_type": record.data_type},
+                        next_actions=["选择 CSV/Excel 表格数据，或直接使用已有矢量数据制图。"],
+                    ).to_json()
+            except Exception as exc:
+                return _tool_internal_error("table_to_points", inputs, exc)
+            errors.extend(validate_required_fields(manager, dataset_name, [x_col, y_col]))
+            if not errors:
+                errors.extend(validate_numeric_fields(manager, dataset_name, [x_col, y_col]))
+        if errors:
+            return _tool_error_from_validation("table_to_points", inputs, errors)
+        try:
+            df = manager.get_table(dataset_name)
+            gdf = gpd.GeoDataFrame(df.copy(), geometry=gpd.points_from_xy(df[x_col], df[y_col]), crs=crs)
+            saved_name = manager.put_vector(output_name, gdf)
+            output_path = manager.get(saved_name).path
+            manager.log_operation("琛ㄦ牸杞偣", f"{dataset_name} -> {saved_name} | {x_col},{y_col}", "analysis")
+            return tool_result_ok(
+                "table_to_points",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(gdf)), "path": str(output_path)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset_{uuid4().hex[:10]}",
+                        path=str(output_path),
+                        type="dataset",
+                        title=f"{saved_name} point layer",
+                        description=f"由表格 {dataset_name} 转换得到的点图层。",
+                        quality_status="created",
+                        preview_available=False,
+                    )
+                ],
+                summary=f"表格转点完成，结果数据集 {saved_name}，点数量 {len(gdf)}。",
+                diagnostics={"x_col": x_col, "y_col": y_col, "crs": crs, "row_count": int(len(df))},
+                next_actions=["使用 plot_dataset 生成点位分布图。", "继续叠加边界或提取栅格值。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("table_to_points", inputs, exc)
         df = manager.get_table(dataset_name)
         if x_col not in df.columns or y_col not in df.columns:
             raise ValueError(f"字段不存在。可用字段: {list(df.columns)}")
@@ -1858,23 +2320,93 @@ def build_tools(manager: DataManager):
     @tool
     def join_attributes(left_name: str, right_name: str, left_key: str, right_key: str, output_name: str) -> str:
         """按字段把表格或矢量属性连接到另一张表或图层上，适合行政区属性补充、统计结果回连等场景。"""
-        left_obj, left_type = _prepare_join_frame(left_name, manager)
-        right_obj, _ = _prepare_join_frame(right_name, manager)
+        inputs = {
+            "left_name": left_name,
+            "right_name": right_name,
+            "left_key": left_key,
+            "right_key": right_key,
+            "output_name": output_name,
+        }
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, left_name))
+        errors.extend(validate_dataset_exists(manager, right_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if errors:
+            return _tool_error_from_validation("join_attributes", inputs, errors)
+        try:
+            left_obj, left_type = _prepare_join_frame(left_name, manager)
+            right_obj, _ = _prepare_join_frame(right_name, manager)
+        except Exception as exc:
+            return _tool_internal_error("join_attributes", inputs, exc)
 
+        missing: list[str] = []
         if left_key not in left_obj.columns:
-            raise ValueError(f"左侧字段不存在: {left_key}。可用字段: {list(left_obj.columns)}")
+            missing.append(str(left_key))
         if right_key not in right_obj.columns:
-            raise ValueError(f"右侧字段不存在: {right_key}。可用字段: {list(right_obj.columns)}")
+            missing.append(str(right_key))
+        if missing:
+            return tool_result_error(
+                "join_attributes",
+                inputs=inputs,
+                error_code="FIELD_NOT_FOUND",
+                error_title="Join key field not found",
+                user_message="One or more join key fields do not exist in the selected datasets.",
+                diagnostics={
+                    "missing_fields": missing,
+                    "left_fields": [str(col) for col in left_obj.columns],
+                    "right_fields": [str(col) for col in right_obj.columns],
+                },
+                next_actions=["Choose existing key fields from both datasets, then retry the attribute join."],
+            ).to_json()
 
-        right_attrs = right_obj.drop(columns=["geometry"], errors="ignore").copy()
-        merged = left_obj.merge(right_attrs, how="left", left_on=left_key, right_on=right_key, suffixes=("", "_joined"))
+        try:
+            right_attrs = right_obj.drop(columns=["geometry"], errors="ignore").copy()
+            merged = left_obj.merge(right_attrs, how="left", left_on=left_key, right_on=right_key, suffixes=("", "_joined"))
+            matched_rows = int(merged[right_key].notna().sum()) if right_key in merged.columns else 0
 
-        if left_type == "vector":
-            saved_name = manager.put_vector(output_name, gpd.GeoDataFrame(merged, geometry=left_obj.geometry, crs=getattr(left_obj, "crs", None)))
-        else:
-            saved_name = manager.put_table(output_name, pd.DataFrame(merged))
-        manager.log_operation("属性连接", f"{left_name} <- {right_name} | {left_key}={right_key}", "analysis")
-        return f"属性连接完成，结果: {saved_name}，保存路径: {manager.get(saved_name).path}"
+            if left_type == "vector":
+                saved_name = manager.put_vector(output_name, gpd.GeoDataFrame(merged, geometry=left_obj.geometry, crs=getattr(left_obj, "crs", None)))
+                artifact_type = "dataset"
+            else:
+                saved_name = manager.put_table(output_name, pd.DataFrame(merged))
+                artifact_type = "dataset"
+            record = manager.get(saved_name)
+            manager.log_operation("属性连接", f"{left_name} <- {right_name} | {left_key}={right_key}", "analysis")
+            return tool_result_ok(
+                "join_attributes",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "row_count": int(len(merged)),
+                    "path": str(record.path),
+                    "left_type": left_type,
+                    "matched_rows": matched_rows,
+                },
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type=artifact_type,
+                        title=saved_name,
+                        description=f"Attribute join result from {left_name} and {right_name}.",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"Joined attributes from {right_name} to {left_name} into {saved_name}.",
+                diagnostics={
+                    "left_rows": int(len(left_obj)),
+                    "right_rows": int(len(right_obj)),
+                    "result_rows": int(len(merged)),
+                    "matched_rows": matched_rows,
+                    "left_key": left_key,
+                    "right_key": right_key,
+                },
+                warnings=[] if matched_rows else ["No rows matched the selected join keys."],
+                next_actions=["Inspect join match counts, then map, model, or export the joined dataset."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("join_attributes", inputs, exc)
 
     @tool
     def summarize_points_within_polygons(
@@ -1886,6 +2418,196 @@ def build_tools(manager: DataManager):
         stat: str = "mean",
     ) -> str:
         """统计面内点数量，并可对点属性做聚合统计。适合 POI、站点、样点等点位汇总到行政区或网格。"""
+        inputs = {
+            "point_name": point_name,
+            "polygon_name": polygon_name,
+            "output_name": output_name,
+            "count_field": count_field,
+            "numeric_field": numeric_field,
+            "stat": stat,
+        }
+        allowed_stats = {"mean", "sum", "min", "max", "median"}
+        if stat not in allowed_stats:
+            return tool_result_error(
+                "summarize_points_within_polygons",
+                inputs=inputs,
+                error_code="STAT_UNSUPPORTED",
+                error_title="统计方式不支持",
+                user_message=f"stat 必须是 {', '.join(sorted(allowed_stats))} 之一。",
+                diagnostics={"allowed": sorted(allowed_stats), "received": stat},
+                next_actions=["请选择一种受支持的统计方式后重试。"],
+            ).to_json()
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, point_name))
+        errors.extend(validate_dataset_exists(manager, polygon_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not str(count_field or "").strip():
+            errors.append(
+                {
+                    "error_code": "OUTPUT_FIELD_REQUIRED",
+                    "error_title": "缺少输出字段",
+                    "user_message": "请指定保存点数量的 count_field。",
+                    "next_actions": ["提供 count_field，例如 point_count。"],
+                    "diagnostics": {},
+                }
+            )
+        if not errors:
+            errors.extend(validate_vector_readable(manager, point_name))
+            errors.extend(validate_vector_readable(manager, polygon_name))
+            errors.extend(validate_crs(manager, point_name))
+            errors.extend(validate_crs(manager, polygon_name))
+            errors.extend(validate_geometry_type(manager, point_name, ["Point"]))
+            errors.extend(validate_geometry_type(manager, polygon_name, ["Polygon", "MultiPolygon"]))
+            if str(numeric_field or "").strip():
+                errors.extend(validate_required_fields(manager, point_name, [numeric_field]))
+                errors.extend(validate_numeric_fields(manager, point_name, [numeric_field]))
+        if errors:
+            return _tool_error_from_validation("summarize_points_within_polygons", inputs, errors)
+        try:
+            points = manager.get_vector(point_name)
+            polygons = manager.get_vector(polygon_name)
+            points, polygons = _align_crs(points, polygons)
+            joined = gpd.sjoin(points, polygons, predicate="within", how="inner")
+            grouped_count = joined.groupby("index_right").size()
+
+            result = polygons.copy()
+            result[count_field] = result.index.to_series().map(grouped_count).fillna(0).astype(int)
+            fields_added = [count_field]
+            if numeric_field:
+                grouped_values = joined.groupby("index_right")[numeric_field].agg(stat)
+                out_field = f"{numeric_field}_{stat}"
+                result[out_field] = result.index.to_series().map(grouped_values)
+                fields_added.append(out_field)
+
+            saved_name = manager.put_vector(output_name, result)
+            record = manager.get(saved_name)
+            manager.log_operation("面内点统计", f"{point_name} in {polygon_name} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "summarize_points_within_polygons",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "feature_count": int(len(result)),
+                    "path": str(record.path),
+                    "fields_added": fields_added,
+                },
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"{point_name} summarized within {polygon_name}",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"已将 {point_name} 汇总到 {polygon_name}，输出 {saved_name}，新增字段 {', '.join(fields_added)}。",
+                diagnostics={
+                    "point_count": int(len(points)),
+                    "polygon_count": int(len(polygons)),
+                    "matched_points": int(len(joined)),
+                    "stat": stat,
+                    "crs": str(polygons.crs),
+                },
+                next_actions=["可继续对统计字段制图、排序检查异常区域，或导出结果。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("summarize_points_within_polygons", inputs, exc)
+        points = manager.get_vector(point_name)
+        polygons = manager.get_vector(polygon_name)
+        points, polygons = _align_crs(points, polygons)
+        joined = gpd.sjoin(points, polygons, predicate="within", how="inner")
+        grouped_count = joined.groupby("index_right").size()
+
+        result = polygons.copy()
+        result[count_field] = result.index.to_series().map(grouped_count).fillna(0).astype(int)
+
+        extra_msg = ""
+        if numeric_field:
+            if numeric_field not in joined.columns:
+                raise ValueError(f"点图层中未找到字段 {numeric_field}。可用字段: {list(joined.columns)}")
+            allowed = {"mean", "sum", "min", "max", "median"}
+            if stat not in allowed:
+                raise ValueError(f"stat 必须是 {sorted(allowed)} 之一")
+            grouped_values = joined.groupby("index_right")[numeric_field].agg(stat)
+            out_field = f"{numeric_field}_{stat}"
+            result[out_field] = result.index.to_series().map(grouped_values)
+            extra_msg = f"，并计算了 {numeric_field} 的 {stat}: 字段 {out_field}"
+
+        saved_name = manager.put_vector(output_name, result)
+        manager.log_operation("面内点统计", f"{point_name} in {polygon_name} -> {saved_name}", "analysis")
+        return f"面内点统计完成，结果: {saved_name}，计数字段 {count_field}{extra_msg}，保存路径 {manager.get(saved_name).path}"
+
+        inputs = {"point_name": point_name, "raster_name": raster_name, "output_name": output_name, "field_name": field_name, "band": band}
+        errors = []
+        errors.extend(validate_dataset_exists(manager, point_name))
+        errors.extend(validate_dataset_exists(manager, raster_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, point_name))
+            errors.extend(validate_raster_readable(manager, raster_name))
+            errors.extend(validate_crs(manager, point_name))
+            errors.extend(validate_geometry_type(manager, point_name, ["Point"]))
+        if not str(field_name or "").strip():
+            errors.append(
+                {
+                    "error_code": "OUTPUT_FIELD_REQUIRED",
+                    "error_title": "缺少输出字段",
+                    "user_message": "请指定用于保存栅格值的输出字段名。",
+                    "next_actions": ["提供 field_name，例如 raster_val。"],
+                    "diagnostics": {},
+                }
+            )
+        if errors:
+            return _tool_error_from_validation("extract_raster_values_to_points", inputs, errors)
+        try:
+            points = manager.get_vector(point_name)
+            raster_path = manager.get_raster_path(raster_name)
+
+            with rasterio.open(raster_path) as src:
+                if band < 1 or band > src.count:
+                    return tool_result_error(
+                        "extract_raster_values_to_points",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_OUT_OF_RANGE",
+                        error_title="栅格波段不存在",
+                        user_message=f"请求的波段 {band} 不在栅格波段范围内。",
+                        diagnostics={"band": band, "band_count": src.count},
+                        next_actions=["选择 1 到栅格波段数之间的 band。"],
+                    ).to_json()
+                pts = points.copy()
+                if pts.crs and src.crs and pts.crs != src.crs:
+                    pts = pts.to_crs(src.crs)
+                coords = [(geom.x, geom.y) for geom in pts.geometry if geom is not None]
+                values = [val[0] if len(val) else None for val in src.sample(coords, indexes=band)]
+                result = points.copy()
+                result[field_name] = values
+
+            saved_name = manager.put_vector(output_name, result)
+            output_path = manager.get(saved_name).path
+            manager.log_operation("鏍呮牸鎶芥牱鍒扮偣", f"{raster_name} -> {point_name} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "extract_raster_values_to_points",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(result)), "field_name": field_name, "path": str(output_path)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset_{uuid4().hex[:10]}",
+                        path=str(output_path),
+                        type="dataset",
+                        title=f"{saved_name} raster sampled points",
+                        description=f"点图层 {point_name} 提取栅格 {raster_name} 后的结果。",
+                        quality_status="created",
+                        preview_available=False,
+                    )
+                ],
+                summary=f"栅格值提取完成，结果数据集 {saved_name}，字段 {field_name}。",
+                diagnostics={"sample_count": int(len(values)), "band": int(band), "raster": raster_name},
+                next_actions=["检查提取字段的缺失值和异常值。", "可继续用于建模或专题制图。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("extract_raster_values_to_points", inputs, exc)
         points = manager.get_vector(point_name)
         polygons = manager.get_vector(polygon_name)
         points, polygons = _align_crs(points, polygons)
@@ -1914,29 +2636,256 @@ def build_tools(manager: DataManager):
     @tool
     def raster_basic_stats(dataset_name: str, band: int = 1) -> str:
         """统计栅格某一波段的最小值、最大值、均值、标准差和有效像元数。"""
-        raster_path = manager.get_raster_path(dataset_name)
-        with rasterio.open(raster_path) as src:
-            arr = src.read(band, masked=True)
-            valid = arr.compressed()
-            if valid.size == 0:
-                raise ValueError("该波段没有有效像元。")
-            result = {
-                "dataset": dataset_name,
-                "band": band,
-                "min": float(valid.min()),
-                "max": float(valid.max()),
-                "mean": float(valid.mean()),
-                "std": float(valid.std()),
-                "valid_count": int(valid.size),
-                "crs": str(src.crs) if src.crs else None,
-                "bounds": tuple(src.bounds),
-            }
-            manager.log_operation("栅格统计", f"{dataset_name} band {band}", "analysis")
-            return _json(result)
+        inputs = {"dataset_name": dataset_name, "band": band}
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        if not errors:
+            errors.extend(validate_raster_readable(manager, dataset_name))
+        if errors:
+            return _tool_error_from_validation("raster_basic_stats", inputs, errors)
+        try:
+            band_value = int(band)
+        except Exception:
+            return tool_result_error(
+                "raster_basic_stats",
+                inputs=inputs,
+                error_code="RASTER_BAND_INVALID",
+                error_title="Invalid raster band",
+                user_message="Band must be an integer starting from 1.",
+                diagnostics={"band": band},
+                next_actions=["Use band=1 for a single-band raster, or choose a valid band number."],
+            ).to_json()
+        try:
+            raster_path = manager.get_raster_path(dataset_name)
+            with rasterio.open(raster_path) as src:
+                if band_value < 1 or band_value > src.count:
+                    return tool_result_error(
+                        "raster_basic_stats",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_OUT_OF_RANGE",
+                        error_title="Raster band out of range",
+                        user_message=f"Dataset {dataset_name} has {src.count} band(s); band {band_value} cannot be read.",
+                        diagnostics={"band": band_value, "band_count": int(src.count)},
+                        next_actions=["Choose a band number between 1 and the raster band count."],
+                    ).to_json()
+                arr = src.read(band_value, masked=True)
+                valid = arr.compressed()
+                if valid.size == 0:
+                    return tool_result_error(
+                        "raster_basic_stats",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_EMPTY",
+                        error_title="Raster band has no valid pixels",
+                        user_message=f"Band {band_value} of {dataset_name} has no valid pixels to summarize.",
+                        diagnostics={"band": band_value},
+                        next_actions=["Check NoData settings or choose another band/raster."],
+                    ).to_json()
+                result = {
+                    "dataset": dataset_name,
+                    "band": band_value,
+                    "min": float(valid.min()),
+                    "max": float(valid.max()),
+                    "mean": float(valid.mean()),
+                    "std": float(valid.std()),
+                    "valid_count": int(valid.size),
+                    "crs": str(src.crs) if src.crs else None,
+                    "bounds": tuple(src.bounds),
+                }
+                manager.log_operation("栅格统计", f"{dataset_name} band {band_value}", "analysis")
+                return tool_result_ok(
+                    "raster_basic_stats",
+                    inputs=inputs,
+                    outputs=result,
+                    summary=f"Calculated raster statistics for {dataset_name} band {band_value}.",
+                    diagnostics={"path": str(raster_path), "band_count": int(src.count), "shape": [int(src.height), int(src.width)]},
+                    next_actions=["Use these statistics for quality checks, threshold selection, or map interpretation."],
+                ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_basic_stats", inputs, exc)
+
+    @tool
+    def raster_zonal_stats(raster_name: str, polygon_name: str, output_name: str, stat: str = "mean", band: int = 1, field_name: str = "") -> str:
+        """按面图层统计栅格值，并把统计结果写回面图层。"""
+        inputs = {
+            "raster_name": raster_name,
+            "polygon_name": polygon_name,
+            "output_name": output_name,
+            "stat": stat,
+            "band": band,
+            "field_name": field_name,
+        }
+        allowed_stats = {"mean", "sum", "min", "max", "median", "count"}
+        if stat not in allowed_stats:
+            return tool_result_error(
+                "raster_zonal_stats",
+                inputs=inputs,
+                error_code="STAT_UNSUPPORTED",
+                error_title="统计方式不支持",
+                user_message=f"stat 必须是 {', '.join(sorted(allowed_stats))} 之一。",
+                diagnostics={"allowed": sorted(allowed_stats), "received": stat},
+                next_actions=["请选择一种受支持的统计方式后重试。"],
+            ).to_json()
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, raster_name))
+        errors.extend(validate_dataset_exists(manager, polygon_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_raster_readable(manager, raster_name))
+            errors.extend(validate_vector_readable(manager, polygon_name))
+            errors.extend(validate_crs(manager, raster_name))
+            errors.extend(validate_crs(manager, polygon_name))
+            errors.extend(validate_geometry_type(manager, polygon_name, ["Polygon", "MultiPolygon"]))
+        if errors:
+            return _tool_error_from_validation("raster_zonal_stats", inputs, errors)
+        try:
+            raster_path = manager.get_raster_path(raster_name)
+            polygons = manager.get_vector(polygon_name)
+            out_field = field_name or f"raster_{stat}"
+            result = polygons.copy()
+            values: list[float | int | None] = []
+            with rasterio.open(raster_path) as src:
+                if band < 1 or band > src.count:
+                    return tool_result_error(
+                        "raster_zonal_stats",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_OUT_OF_RANGE",
+                        error_title="波段编号超出范围",
+                        user_message=f"数据 {raster_name} 只有 {src.count} 个波段，不能读取第 {band} 个波段。",
+                        diagnostics={"band": band, "band_count": int(src.count)},
+                        next_actions=["请选择 1 到波段总数之间的 band 参数后重试。"],
+                    ).to_json()
+                zones = polygons.to_crs(src.crs) if polygons.crs and src.crs and polygons.crs != src.crs else polygons
+                for geom in zones.geometry:
+                    if geom is None or geom.is_empty:
+                        values.append(None)
+                        continue
+                    try:
+                        data, _ = mask(src, [geom], crop=True, indexes=band, filled=False)
+                    except ValueError:
+                        values.append(None)
+                        continue
+                    valid = np.ma.array(data).compressed()
+                    if valid.size == 0:
+                        values.append(None)
+                    elif stat == "mean":
+                        values.append(float(np.mean(valid)))
+                    elif stat == "sum":
+                        values.append(float(np.sum(valid)))
+                    elif stat == "min":
+                        values.append(float(np.min(valid)))
+                    elif stat == "max":
+                        values.append(float(np.max(valid)))
+                    elif stat == "median":
+                        values.append(float(np.median(valid)))
+                    else:
+                        values.append(int(valid.size))
+            result[out_field] = values
+            saved_name = manager.put_vector(output_name, result)
+            record = manager.get(saved_name)
+            manager.log_operation("栅格分区统计", f"{raster_name} by {polygon_name} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "raster_zonal_stats",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "feature_count": int(len(result)),
+                    "path": str(record.path),
+                    "fields_added": [out_field],
+                },
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset:{saved_name}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=saved_name,
+                        description=f"{raster_name} zonal {stat} by {polygon_name}",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"已按 {polygon_name} 统计 {raster_name} 的 {stat} 值，输出 {saved_name}，新增字段 {out_field}。",
+                diagnostics={
+                    "polygon_count": int(len(polygons)),
+                    "non_null_count": int(pd.Series(values).notna().sum()),
+                    "stat": stat,
+                    "band": int(band),
+                },
+                next_actions=["可继续对分区统计字段制图、排序检查异常区域，或导出结果。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_zonal_stats", inputs, exc)
 
     @tool
     def clip_raster_by_vector(raster_name: str, vector_name: str, output_name: str) -> str:
         """使用矢量边界裁剪栅格，并保存为新的 tif 文件。"""
+        inputs = {"raster_name": raster_name, "vector_name": vector_name, "output_name": output_name}
+        errors = []
+        errors.extend(validate_dataset_exists(manager, raster_name))
+        errors.extend(validate_dataset_exists(manager, vector_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name, allowed_suffixes={".tif", ".tiff"}))
+        if not errors:
+            errors.extend(validate_raster_readable(manager, raster_name))
+            errors.extend(validate_vector_readable(manager, vector_name))
+            errors.extend(validate_crs(manager, raster_name))
+            errors.extend(validate_crs(manager, vector_name))
+        if errors:
+            return _tool_error_from_validation("clip_raster_by_vector", inputs, errors)
+        try:
+            raster_path = manager.get_raster_path(raster_name)
+            gdf = manager.get_vector(vector_name)
+            output_stem = output_name
+            if Path(output_stem).suffix.lower() in {".tif", ".tiff"}:
+                output_stem = Path(output_stem).stem
+            output_path = manager.derived_dir / f"{output_stem}.tif"
+
+            with rasterio.open(raster_path) as src:
+                if gdf.crs and src.crs and gdf.crs != src.crs:
+                    gdf = gdf.to_crs(src.crs)
+                geoms = [geom.__geo_interface__ for geom in gdf.geometry if geom is not None]
+                if not geoms:
+                    return tool_result_error(
+                        "clip_raster_by_vector",
+                        inputs=inputs,
+                        error_code="GEOMETRY_REQUIRED",
+                        error_title="缺少裁剪几何",
+                        user_message="裁剪图层没有可用几何。",
+                        diagnostics={"vector_name": vector_name},
+                        next_actions=["检查边界图层是否为空或几何是否有效。"],
+                    ).to_json()
+                out_image, out_transform = mask(src, geoms, crop=True)
+                out_meta = src.meta.copy()
+                out_meta.update({"height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform})
+                with rasterio.open(output_path, "w", **out_meta) as dest:
+                    dest.write(out_image)
+
+            serializable_meta = {
+                **{k: v for k, v in out_meta.items() if k not in {"crs", "transform"}},
+                "crs": str(out_meta.get("crs")) if out_meta.get("crs") else None,
+                "transform": tuple(out_meta.get("transform")) if out_meta.get("transform") is not None else None,
+            }
+            stored_name = manager.put_raster_path(output_stem, output_path, meta=serializable_meta)
+            manager.log_operation("鏍呮牸瑁佸壀", f"{raster_name} by {vector_name} -> {stored_name}", "analysis")
+            return tool_result_ok(
+                "clip_raster_by_vector",
+                inputs=inputs,
+                outputs={"result_dataset": stored_name, "path": str(output_path), "width": int(serializable_meta.get("width") or 0), "height": int(serializable_meta.get("height") or 0)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"raster_{uuid4().hex[:10]}",
+                        path=str(output_path),
+                        type="raster",
+                        title=f"{stored_name} clipped raster",
+                        description=f"{raster_name} 按 {vector_name} 裁剪后的栅格。",
+                        quality_status="created",
+                        preview_available=False,
+                    )
+                ],
+                summary=f"栅格裁剪完成，结果数据集 {stored_name}。",
+                diagnostics={"source_raster": raster_name, "clip_vector": vector_name, "crs": serializable_meta.get("crs")},
+                next_actions=["检查裁剪后的栅格范围和像元值。", "可继续制图或提取到点图层。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("clip_raster_by_vector", inputs, exc)
         raster_path = manager.get_raster_path(raster_name)
         gdf = manager.get_vector(vector_name)
         output_path = manager.derived_dir / f"{output_name}.tif"
@@ -1958,6 +2907,75 @@ def build_tools(manager: DataManager):
     @tool
     def extract_raster_values_to_points(point_name: str, raster_name: str, output_name: str, field_name: str = "raster_val", band: int = 1) -> str:
         """将栅格像元值提取到点图层属性表中，适合站点-栅格匹配、样点验证和建模前特征抽取。"""
+        inputs = {"point_name": point_name, "raster_name": raster_name, "output_name": output_name, "field_name": field_name, "band": band}
+        errors = []
+        errors.extend(validate_dataset_exists(manager, point_name))
+        errors.extend(validate_dataset_exists(manager, raster_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, point_name))
+            errors.extend(validate_raster_readable(manager, raster_name))
+            errors.extend(validate_crs(manager, point_name))
+            errors.extend(validate_geometry_type(manager, point_name, ["Point"]))
+        if not str(field_name or "").strip():
+            errors.append(
+                {
+                    "error_code": "OUTPUT_FIELD_REQUIRED",
+                    "error_title": "缺少输出字段",
+                    "user_message": "请指定用于保存栅格值的输出字段名。",
+                    "next_actions": ["提供 field_name，例如 raster_val。"],
+                    "diagnostics": {},
+                }
+            )
+        if errors:
+            return _tool_error_from_validation("extract_raster_values_to_points", inputs, errors)
+        try:
+            points = manager.get_vector(point_name)
+            raster_path = manager.get_raster_path(raster_name)
+
+            with rasterio.open(raster_path) as src:
+                if band < 1 or band > src.count:
+                    return tool_result_error(
+                        "extract_raster_values_to_points",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_OUT_OF_RANGE",
+                        error_title="栅格波段不存在",
+                        user_message=f"请求的波段 {band} 不在栅格波段范围内。",
+                        diagnostics={"band": band, "band_count": src.count},
+                        next_actions=["选择 1 到栅格波段数之间的 band。"],
+                    ).to_json()
+                pts = points.copy()
+                if pts.crs and src.crs and pts.crs != src.crs:
+                    pts = pts.to_crs(src.crs)
+                coords = [(geom.x, geom.y) for geom in pts.geometry if geom is not None]
+                values = [val[0] if len(val) else None for val in src.sample(coords, indexes=band)]
+                result = points.copy()
+                result[field_name] = values
+
+            saved_name = manager.put_vector(output_name, result)
+            output_path = manager.get(saved_name).path
+            manager.log_operation("鏍呮牸鎶芥牱鍒扮偣", f"{raster_name} -> {point_name} -> {saved_name}", "analysis")
+            return tool_result_ok(
+                "extract_raster_values_to_points",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(result)), "field_name": field_name, "path": str(output_path)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset_{uuid4().hex[:10]}",
+                        path=str(output_path),
+                        type="dataset",
+                        title=f"{saved_name} raster sampled points",
+                        description=f"点图层 {point_name} 提取栅格 {raster_name} 后的结果。",
+                        quality_status="created",
+                        preview_available=False,
+                    )
+                ],
+                summary=f"栅格值提取完成，结果数据集 {saved_name}，字段 {field_name}。",
+                diagnostics={"sample_count": int(len(values)), "band": int(band), "raster": raster_name},
+                next_actions=["检查提取字段的缺失值和异常值。", "可继续用于建模或专题制图。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("extract_raster_values_to_points", inputs, exc)
         points = manager.get_vector(point_name)
         raster_path = manager.get_raster_path(raster_name)
 
@@ -1987,70 +3005,217 @@ def build_tools(manager: DataManager):
         date_regex: str = r"(20\d{2}[01]\d[0-3]\d|20\d{2}-\d{2}-\d{2})",
     ) -> str:
         """对一个站点点图层批量提取多个栅格的像元值，生成长表或宽表，适合批量站点—栅格配准、时间序列建模和验证样本构建。"""
-        points = manager.get_vector(point_name)
-        raster_list = _parse_columns(raster_names)
-        id_list = _parse_columns(id_cols) if id_cols.strip() else [col for col in points.columns if col != "geometry"]
-        _validate_columns(points.drop(columns=["geometry"], errors="ignore"), [col for col in id_list if col != "geometry"])
-
+        inputs = {
+            "point_name": point_name,
+            "raster_names": raster_names,
+            "output_name": output_name,
+            "id_cols": id_cols,
+            "output_mode": output_mode,
+            "value_field_prefix": value_field_prefix,
+            "band": band,
+            "parse_date": parse_date,
+            "date_regex": date_regex,
+        }
         mode = output_mode.strip().lower()
         if mode not in {"long", "wide"}:
-            raise ValueError("output_mode 仅支持 long 或 wide。")
+            return tool_result_error(
+                "batch_register_points_to_rasters",
+                inputs=inputs,
+                error_code="OUTPUT_MODE_UNSUPPORTED",
+                error_title="Unsupported output mode",
+                user_message="output_mode must be either long or wide.",
+                diagnostics={"allowed": ["long", "wide"], "received": output_mode},
+                next_actions=["Use output_mode='long' for modeling tables or output_mode='wide' to append one field per raster."],
+            ).to_json()
+        try:
+            band_value = int(band)
+        except Exception:
+            return tool_result_error(
+                "batch_register_points_to_rasters",
+                inputs=inputs,
+                error_code="RASTER_BAND_INVALID",
+                error_title="Invalid raster band",
+                user_message="Band must be an integer starting from 1.",
+                diagnostics={"band": band},
+                next_actions=["Use band=1 for single-band rasters."],
+            ).to_json()
+        errors: list[dict[str, Any]] = []
+        raster_list = _parse_columns(raster_names)
+        if not raster_list:
+            return tool_result_error(
+                "batch_register_points_to_rasters",
+                inputs=inputs,
+                error_code="RASTER_INPUT_REQUIRED",
+                error_title="Missing raster inputs",
+                user_message="At least one raster dataset is required.",
+                diagnostics={},
+                next_actions=["Provide one or more raster dataset names separated by commas."],
+            ).to_json()
+        errors.extend(validate_dataset_exists(manager, point_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        for raster_name in raster_list:
+            errors.extend(validate_dataset_exists(manager, raster_name))
+        if not errors:
+            errors.extend(validate_vector_readable(manager, point_name))
+            errors.extend(validate_crs(manager, point_name))
+            for raster_name in raster_list:
+                errors.extend(validate_raster_readable(manager, raster_name))
+        if errors:
+            return _tool_error_from_validation("batch_register_points_to_rasters", inputs, errors)
 
-        if mode == "wide":
-            result = points.copy()
-            added_fields: list[str] = []
+        try:
+            points = manager.get_vector(point_name)
+            id_list = _parse_columns(id_cols) if id_cols.strip() else [col for col in points.columns if col != "geometry"]
+            try:
+                _validate_columns(points.drop(columns=["geometry"], errors="ignore"), [col for col in id_list if col != "geometry"])
+            except Exception:
+                available = [str(col) for col in points.drop(columns=["geometry"], errors="ignore").columns]
+                missing_ids = [col for col in id_list if col != "geometry" and col not in available]
+                return tool_result_error(
+                    "batch_register_points_to_rasters",
+                    inputs=inputs,
+                    error_code="FIELD_NOT_FOUND",
+                    error_title="ID field not found",
+                    user_message="One or more id_cols fields do not exist in the point dataset.",
+                    diagnostics={"missing_fields": missing_ids, "available_fields": available},
+                    next_actions=["Choose id_cols from the point dataset fields, or leave id_cols empty to use all attributes."],
+                ).to_json()
+
+            if mode == "wide":
+                result = points.copy()
+                added_fields: list[str] = []
+                for raster_name in raster_list:
+                    raster_path = manager.get_raster_path(raster_name)
+                    with rasterio.open(raster_path) as src:
+                        if band_value < 1 or band_value > src.count:
+                            return tool_result_error(
+                                "batch_register_points_to_rasters",
+                                inputs=inputs,
+                                error_code="RASTER_BAND_OUT_OF_RANGE",
+                                error_title="Raster band out of range",
+                                user_message=f"Raster {raster_name} has {src.count} band(s); band {band_value} cannot be read.",
+                                diagnostics={"raster": raster_name, "band": band_value, "band_count": int(src.count)},
+                                next_actions=["Choose a band number between 1 and the raster band count."],
+                            ).to_json()
+                    field_name = f"{value_field_prefix}_{_artifact_safe_name(raster_name)}"
+                    result[field_name] = _sample_raster_to_geometries(points, raster_path, band=band_value)
+                    added_fields.append(field_name)
+                saved_name = manager.put_vector(output_name, result)
+                record = manager.get(saved_name)
+                summary_path = _save_json_artifact(
+                    manager,
+                    f"{output_name}_batch_register_summary",
+                    {
+                        "point_dataset": point_name,
+                        "rasters": raster_list,
+                        "output_mode": mode,
+                        "fields": added_fields,
+                        "band": band_value,
+                    },
+                )
+                manager.log_operation("批量站点-栅格配准", f"{point_name} x {len(raster_list)} rasters -> {saved_name}", "analysis")
+                return tool_result_ok(
+                    "batch_register_points_to_rasters",
+                    inputs=inputs,
+                    outputs={
+                        "result_dataset": saved_name,
+                        "output_mode": mode,
+                        "feature_count": int(len(result)),
+                        "raster_count": int(len(raster_list)),
+                        "fields": added_fields,
+                        "summary_path": str(summary_path),
+                        "path": str(record.path),
+                    },
+                    artifacts=[
+                        ArtifactInfo(f"dataset:{saved_name}", str(record.path), "dataset", saved_name, "Raster values appended to point layer.", "ok", True),
+                        ArtifactInfo(f"file:{Path(summary_path).name}", str(summary_path), "file", Path(summary_path).name, "Batch raster registration summary.", "ok", False),
+                    ],
+                    summary=f"Registered {len(raster_list)} raster(s) to point layer {point_name} as wide dataset {saved_name}.",
+                    diagnostics={"point_count": int(len(points)), "raster_names": raster_list, "band": band_value},
+                    next_actions=["Inspect added raster value fields, then continue modeling, mapping, or export."],
+                ).to_json()
+
+            base_attrs = points.drop(columns=["geometry"], errors="ignore").copy()
+            if not id_list:
+                base_attrs["point_index"] = np.arange(len(base_attrs))
+                id_list = ["point_index"]
+            missing_ids = [col for col in id_list if col not in base_attrs.columns]
+            if missing_ids:
+                return tool_result_error(
+                    "batch_register_points_to_rasters",
+                    inputs=inputs,
+                    error_code="FIELD_NOT_FOUND",
+                    error_title="ID field not found",
+                    user_message="One or more id_cols fields do not exist in the point dataset.",
+                    diagnostics={"missing_fields": missing_ids, "available_fields": [str(col) for col in base_attrs.columns]},
+                    next_actions=["Choose id_cols from the point dataset fields, or leave id_cols empty to create point_index."],
+                ).to_json()
+            geom_points = points.geometry.apply(_geometry_to_sample_point)
+            base_attrs["point_x"] = geom_points.apply(lambda g: float(g.x) if g is not None and not g.is_empty else np.nan)
+            base_attrs["point_y"] = geom_points.apply(lambda g: float(g.y) if g is not None and not g.is_empty else np.nan)
+
+            rows: list[pd.DataFrame] = []
             for raster_name in raster_list:
                 raster_path = manager.get_raster_path(raster_name)
-                field_name = f"{value_field_prefix}_{_artifact_safe_name(raster_name)}"
-                result[field_name] = _sample_raster_to_geometries(points, raster_path, band=band)
-                added_fields.append(field_name)
-            saved_name = manager.put_vector(output_name, result)
-            summary_path = _save_json_artifact(manager, f"{output_name}_batch_register_summary", {
-                "point_dataset": point_name,
-                "rasters": raster_list,
-                "output_mode": mode,
-                "fields": added_fields,
-                "band": int(band),
-            })
+                with rasterio.open(raster_path) as src:
+                    if band_value < 1 or band_value > src.count:
+                        return tool_result_error(
+                            "batch_register_points_to_rasters",
+                            inputs=inputs,
+                            error_code="RASTER_BAND_OUT_OF_RANGE",
+                            error_title="Raster band out of range",
+                            user_message=f"Raster {raster_name} has {src.count} band(s); band {band_value} cannot be read.",
+                            diagnostics={"raster": raster_name, "band": band_value, "band_count": int(src.count)},
+                            next_actions=["Choose a band number between 1 and the raster band count."],
+                        ).to_json()
+                sampled = _sample_raster_to_geometries(points, raster_path, band=band_value)
+                frame = base_attrs[id_list + ["point_x", "point_y"]].copy()
+                frame["raster_name"] = raster_name
+                frame["band"] = band_value
+                frame["sample_value"] = sampled.values
+                if parse_date:
+                    frame["raster_date"] = _extract_date_from_name(raster_name, date_regex)
+                rows.append(frame)
+
+            long_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=id_list + ["point_x", "point_y", "raster_name", "band", "sample_value", "raster_date"])
+            saved_name = manager.put_table(output_name, long_df)
+            record = manager.get(saved_name)
+            summary_path = _save_json_artifact(
+                manager,
+                f"{output_name}_batch_register_summary",
+                {
+                    "point_dataset": point_name,
+                    "rasters": raster_list,
+                    "output_mode": mode,
+                    "row_count": int(len(long_df)),
+                    "value_field": "sample_value",
+                    "parsed_dates": bool(parse_date),
+                    "band": band_value,
+                },
+            )
             manager.log_operation("批量站点-栅格配准", f"{point_name} x {len(raster_list)} rasters -> {saved_name}", "analysis")
-            return f"批量配准完成，结果图层: {saved_name}。新增字段: {added_fields}。摘要文件: {summary_path}"
-
-        base_attrs = points.drop(columns=["geometry"], errors="ignore").copy()
-        if not id_list:
-            base_attrs["point_index"] = np.arange(len(base_attrs))
-            id_list = ["point_index"]
-        missing_ids = [col for col in id_list if col not in base_attrs.columns]
-        if missing_ids:
-            raise ValueError(f"以下 id_cols 字段不存在: {missing_ids}")
-        geom_points = points.geometry.apply(_geometry_to_sample_point)
-        base_attrs["point_x"] = geom_points.apply(lambda g: float(g.x) if g is not None and not g.is_empty else np.nan)
-        base_attrs["point_y"] = geom_points.apply(lambda g: float(g.y) if g is not None and not g.is_empty else np.nan)
-
-        rows: list[pd.DataFrame] = []
-        for raster_name in raster_list:
-            raster_path = manager.get_raster_path(raster_name)
-            sampled = _sample_raster_to_geometries(points, raster_path, band=band)
-            frame = base_attrs[id_list + ["point_x", "point_y"]].copy()
-            frame["raster_name"] = raster_name
-            frame["band"] = int(band)
-            frame["sample_value"] = sampled.values
-            if parse_date:
-                frame["raster_date"] = _extract_date_from_name(raster_name, date_regex)
-            rows.append(frame)
-
-        long_df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=id_list + ["point_x", "point_y", "raster_name", "band", "sample_value", "raster_date"])
-        saved_name = manager.put_table(output_name, long_df)
-        summary_path = _save_json_artifact(manager, f"{output_name}_batch_register_summary", {
-            "point_dataset": point_name,
-            "rasters": raster_list,
-            "output_mode": mode,
-            "row_count": int(len(long_df)),
-            "value_field": "sample_value",
-            "parsed_dates": bool(parse_date),
-            "band": int(band),
-        })
-        manager.log_operation("批量站点-栅格配准", f"{point_name} x {len(raster_list)} rasters -> {saved_name}", "analysis")
-        return f"批量配准完成，结果表: {saved_name}，共 {len(long_df)} 行。摘要文件: {summary_path}"
+            return tool_result_ok(
+                "batch_register_points_to_rasters",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "output_mode": mode,
+                    "row_count": int(len(long_df)),
+                    "raster_count": int(len(raster_list)),
+                    "value_field": "sample_value",
+                    "summary_path": str(summary_path),
+                    "path": str(record.path),
+                },
+                artifacts=[
+                    ArtifactInfo(f"dataset:{saved_name}", str(record.path), "dataset", saved_name, "Long table of sampled raster values.", "ok", True),
+                    ArtifactInfo(f"file:{Path(summary_path).name}", str(summary_path), "file", Path(summary_path).name, "Batch raster registration summary.", "ok", False),
+                ],
+                summary=f"Registered {len(raster_list)} raster(s) to {len(points)} point(s) as long table {saved_name}.",
+                diagnostics={"point_count": int(len(points)), "raster_names": raster_list, "band": band_value, "parsed_dates": bool(parse_date)},
+                next_actions=["Use the long table for modeling, quality checks, or export."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("batch_register_points_to_rasters", inputs, exc)
 
 
     @tool
@@ -2148,7 +3313,7 @@ def build_tools(manager: DataManager):
     ) -> str:
         """对观测列与一个或多个预测列计算 R、RMSE、ubRMSE、Bias、NSE、MAE，适合土壤水分产品和融合模型比较。"""
         df = _prepare_dataframe(dataset_name, manager).copy()
-        pred_cols = _parse_columns(predicted_cols)
+        pred_cols = _parse_columns(predicted_cols) if str(predicted_cols or "").strip() else []
         _validate_columns(df, [observed_col, *pred_cols])
         if group_col and group_col not in df.columns:
             raise ValueError(f"分组字段不存在: {group_col}")
@@ -2191,14 +3356,76 @@ def build_tools(manager: DataManager):
         bin_count: int = 5,
     ) -> str:
         """对一个或多个模型预测结果执行地理共形预测（GCP），输出位置相关预测区间、覆盖率和区间宽度等不确定性指标；若缺少空间坐标则自动退化为全局 split conformal。"""
+        inputs = {
+            "calibration_dataset": calibration_dataset,
+            "observed_col": observed_col,
+            "predicted_cols": predicted_cols,
+            "output_name": output_name,
+            "target_dataset_name": target_dataset_name,
+            "lon_col": lon_col,
+            "lat_col": lat_col,
+            "date_col": date_col,
+            "alpha": alpha,
+            "calibration_ratio": calibration_ratio,
+        }
+        pred_cols = _parse_columns(predicted_cols)
+        validation_errors: list[dict[str, Any]] = []
+        validation_errors.extend(validate_dataset_exists(manager, calibration_dataset))
+        if str(target_dataset_name or "").strip():
+            validation_errors.extend(validate_dataset_exists(manager, target_dataset_name))
+        validation_errors.extend(validate_model_target(manager, calibration_dataset, observed_col))
+        validation_errors.extend(validate_required_fields(manager, calibration_dataset, pred_cols))
+        validation_errors.extend(validate_numeric_fields(manager, calibration_dataset, pred_cols))
+        target_name_for_validation = target_dataset_name.strip() or calibration_dataset
+        if target_name_for_validation != calibration_dataset:
+            validation_errors.extend(validate_required_fields(manager, target_name_for_validation, pred_cols))
+            validation_errors.extend(validate_numeric_fields(manager, target_name_for_validation, pred_cols))
+        validation_errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not pred_cols:
+            validation_errors.append({
+                "error_code": "PREDICTED_FIELDS_MISSING",
+                "error_title": "Missing predicted fields",
+                "user_message": "Please provide at least one prediction field for GCP.",
+                "next_actions": ["Choose one or more model prediction columns, for example xgb_pred or rf_pred."],
+                "diagnostics": {},
+            })
         if not 0 < float(alpha) < 1:
-            raise ValueError("alpha 需要在 0 到 1 之间，例如 0.1 表示 90% 预测区间。")
+            validation_errors.append({
+                "error_code": "ALPHA_OUT_OF_RANGE",
+                "error_title": "Invalid alpha",
+                "user_message": "alpha must be between 0 and 1.",
+                "next_actions": ["Use alpha=0.1 for a 90% prediction interval."],
+                "diagnostics": {"alpha": alpha},
+            })
         if not 0 < float(calibration_ratio) < 1:
-            raise ValueError("calibration_ratio 需要在 0 到 1 之间。")
+            validation_errors.append({
+                "error_code": "CALIBRATION_RATIO_OUT_OF_RANGE",
+                "error_title": "Invalid calibration ratio",
+                "user_message": "calibration_ratio must be between 0 and 1.",
+                "next_actions": ["Use a value such as 0.3 when no explicit calibration filter is provided."],
+                "diagnostics": {"calibration_ratio": calibration_ratio},
+            })
         calibration_selection = (calibration_selection or "latest").strip().lower()
         if calibration_selection not in {"latest", "earliest", "random"}:
-            raise ValueError("calibration_selection 仅支持 latest、earliest 或 random。")
-        pred_cols = _parse_columns(predicted_cols)
+            validation_errors.append({
+                "error_code": "CALIBRATION_SELECTION_UNSUPPORTED",
+                "error_title": "Unsupported calibration selection",
+                "user_message": "calibration_selection only supports latest, earliest, or random.",
+                "next_actions": ["Use latest, earliest, or random."],
+                "diagnostics": {"calibration_selection": calibration_selection},
+            })
+        if validation_errors:
+            first = first_error(validation_errors) or {}
+            return tool_result_error(
+                "geographical_conformal_prediction",
+                inputs=inputs,
+                error_code=str(first.get("error_code") or "GCP_PRECONDITION_FAILED"),
+                error_title=str(first.get("error_title") or "GCP precondition failed"),
+                user_message=str(first.get("user_message") or "GCP inputs are incomplete or invalid."),
+                diagnostics=validation_diagnostics(validation_errors),
+                next_actions=merge_next_actions(validation_errors),
+                technical_detail=str(first.get("technical_detail") or ""),
+            ).to_json()
 
         cal_df = _prepare_dataframe(calibration_dataset, manager).copy()
         target_name = target_dataset_name.strip() or calibration_dataset
@@ -2282,7 +3509,15 @@ def build_tools(manager: DataManager):
                 cal_valid &= cal_work[["__coord_x__", "__coord_y__"]].notna().all(axis=1)
             cal_use = cal_work.loc[cal_valid].copy()
             if len(cal_use) < 20:
-                raise ValueError(f"{pred_col} 可用于共形校准的样本不足，当前仅 {len(cal_use)} 条。")
+                return tool_result_error(
+                    "geographical_conformal_prediction",
+                    inputs=inputs,
+                    error_code="GCP_CALIBRATION_SAMPLE_TOO_SMALL",
+                    error_title="Calibration sample too small",
+                    user_message=f"{pred_col} has only {len(cal_use)} usable calibration samples; at least 20 are required.",
+                    diagnostics={"predicted_col": pred_col, "usable_calibration_samples": int(len(cal_use))},
+                    next_actions=["Use a larger calibration set.", "Relax filters or increase calibration_ratio.", "Check missing values in observed and predicted columns."],
+                ).to_json()
 
             quantile_level = _conformal_quantile_level(len(cal_use), float(alpha))
             global_qhat = _weighted_quantile(cal_use["score"].to_numpy(dtype=float), quantile_level)
@@ -2298,7 +3533,15 @@ def build_tools(manager: DataManager):
             if spatial_ready:
                 target_valid &= target_work[["__coord_x__", "__coord_y__"]].notna().all(axis=1)
             if not bool(target_valid.any()):
-                raise ValueError(f"{pred_col} 在目标数据集中没有可用于 GCP 的有效样本。")
+                return tool_result_error(
+                    "geographical_conformal_prediction",
+                    inputs=inputs,
+                    error_code="GCP_TARGET_SAMPLE_EMPTY",
+                    error_title="No usable target samples",
+                    user_message=f"{pred_col} has no usable target samples for GCP.",
+                    diagnostics={"predicted_col": pred_col, "target_dataset": target_name},
+                    next_actions=["Check missing values in prediction columns.", "Relax target_filter.", "Use a target dataset that contains model predictions."],
+                ).to_json()
 
             radius_col = f"{pred_col}_gcp_radius"
             lower_col = f"{pred_col}_gcp_lower"
@@ -2420,13 +3663,82 @@ def build_tools(manager: DataManager):
             model_lines.append(
                 f"- {row['predicted']}: 方法={row['method']}，PICP={row['PICP'] if row['PICP'] is not None else 'NA'}，MPIW={row['MPIW'] if row['MPIW'] is not None else 'NA'}"
             )
-        return (
-            f"GCP 不确定性分析完成，结果数据集: {saved_name}.\n"
-            f"指标表: {metrics_name}.\n"
-            f"摘要文件: {summary_path}.\n"
-            f"空间自适应: {'是' if spatial_ready else '否（已退化为全局 split conformal）'}.\n"
-            + "\n".join(model_lines)
+        task_id = f"geographical_conformal_prediction_{uuid4().hex[:10]}"
+        model_result_id = generate_model_result_id("GCP", output_name)
+        artifacts = [
+            ArtifactInfo(
+                artifact_id=f"dataset_{uuid4().hex[:10]}",
+                path=str(manager.get(saved_name).path),
+                type="dataset",
+                title=f"{saved_name} GCP intervals",
+                description="GCP interval prediction result dataset.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"metrics_{uuid4().hex[:10]}",
+                path=str(manager.get(metrics_name).path),
+                type="metrics",
+                title=f"{metrics_name} GCP metrics",
+                description="GCP interval reliability metrics table.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"summary_{uuid4().hex[:10]}",
+                path=str(summary_path),
+                type="summary",
+                title=f"{output_name} GCP summary",
+                description="GCP configuration and interval column summary.",
+                quality_status="created",
+                preview_available=False,
+            ),
+        ]
+        artifact_dicts = [item.to_dict() for item in artifacts]
+        metrics_payload = metrics_rows[0] if len(metrics_rows) == 1 else {"models": metrics_rows}
+        manager.register_model_result(
+            model_result_id=model_result_id,
+            task_id=task_id,
+            dataset_id=calibration_dataset,
+            model_name="GCP",
+            output_prefix=output_name,
+            result_dataset=saved_name,
+            metrics_dataset=metrics_name,
+            metrics_path=str(manager.get(metrics_name).path),
+            artifact_ids=[str(item.get("artifact_id") or "") for item in artifact_dicts],
+            artifacts=artifact_dicts,
+            metrics=metrics_payload,
+            diagnostics={
+                "calibration_dataset": calibration_dataset,
+                "target_dataset": target_name,
+                "observed_col": observed_col,
+                "predicted_cols": pred_cols,
+                "spatial_ready": bool(spatial_ready),
+                "summary": summary_rows,
+            },
         )
+        return tool_result_ok(
+            "geographical_conformal_prediction",
+            inputs=inputs,
+            task_id=task_id,
+            outputs={
+                "model_result_id": model_result_id,
+                "result_dataset": saved_name,
+                "metrics_dataset": metrics_name,
+                "summary_path": str(summary_path),
+                "interval_columns": summary_rows,
+                "methods": sorted({str(row.get("method") or "") for row in metrics_rows}),
+                "spatial_ready": bool(spatial_ready),
+            },
+            artifacts=artifacts,
+            summary=(
+                f"GCP uncertainty analysis completed. Result dataset: {saved_name}. "
+                f"Metrics dataset: {metrics_name}. "
+                f"Spatially adaptive: {'yes' if spatial_ready else 'no, used global split conformal'}."
+            ),
+            diagnostics={"metrics": metrics_rows, "summary": summary_rows},
+            next_actions=["Explain PICP, MPIW, NMPIW, QCP and IS.", "Compare interval reliability with point prediction accuracy."],
+        ).to_json()
 
     @tool
     def btch_fusion_model(
@@ -2534,7 +3846,43 @@ def build_tools(manager: DataManager):
         random_state: int = 42,
     ) -> str:
         """训练随机森林融合模型并输出预测结果、特征重要性和训练/测试精度，适合多源土壤水分回归融合。"""
-        df = _prepare_dataframe(dataset_name, manager).copy()
+        inputs = {
+            "dataset_name": dataset_name,
+            "target_col": target_col,
+            "feature_cols": feature_cols,
+            "output_name": output_name,
+            "date_col": date_col,
+            "split_date": split_date,
+        }
+        errors = validate_dataset_exists(manager, dataset_name)
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        features_for_validation: list[str] = []
+        if not errors:
+            errors.extend(validate_model_target(manager, dataset_name, target_col))
+            try:
+                features_for_validation = _parse_columns(feature_cols)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "error_code": "FEATURE_FIELDS_MISSING",
+                        "error_title": "缺少特征字段",
+                        "user_message": "请指定用于随机森林建模的特征字段。",
+                        "next_actions": ["从数值字段中选择一个或多个特征字段。", "多个字段可用逗号分隔。"],
+                        "diagnostics": {"technical_detail": str(exc)},
+                    }
+                )
+            if features_for_validation:
+                errors.extend(validate_required_fields(manager, dataset_name, features_for_validation))
+                errors.extend(validate_numeric_fields(manager, dataset_name, features_for_validation))
+            if date_col:
+                errors.extend(validate_required_fields(manager, dataset_name, [date_col]))
+        if errors:
+            return _tool_error_from_validation("train_rf_fusion_model", inputs, errors)
+
+        try:
+            df = _prepare_dataframe(dataset_name, manager).copy()
+        except Exception as exc:
+            return _tool_internal_error("train_rf_fusion_model", inputs, exc)
         features = _parse_columns(feature_cols)
         _validate_columns(df, [target_col, *features])
         df = _coerce_numeric_frame(df, [target_col, *features])
@@ -2548,7 +3896,15 @@ def build_tools(manager: DataManager):
 
         fit_mask = valid_target & train_mask
         if int(fit_mask.sum()) < 20:
-            raise ValueError(f"RF 可用于训练的样本不足，当前仅 {int(fit_mask.sum())} 条。")
+            return tool_result_error(
+                "train_rf_fusion_model",
+                inputs=inputs,
+                error_code="INSUFFICIENT_TRAINING_SAMPLES",
+                error_title="训练样本不足",
+                user_message=f"RF 可用于训练的有效样本不足，当前仅 {int(fit_mask.sum())} 条。",
+                diagnostics={"valid_training_samples": int(fit_mask.sum()), "minimum_required": 20},
+                next_actions=["补充样本或减少缺失值。", "确认目标变量和特征字段是否选择正确。"],
+            ).to_json()
 
         model = Pipeline([
             ("imputer", SimpleImputer(strategy="median")),
@@ -2573,6 +3929,91 @@ def build_tools(manager: DataManager):
         metrics_name = manager.put_table(f"{output_name}_rf_metrics", pd.DataFrame([{"scope": k, **v} for k, v in metrics.items()]))
         model_path = manager.derived_dir / f"{_artifact_safe_name(output_name)}_rf_model.joblib"
         joblib.dump(model, model_path)
+        task_id = f"train_rf_fusion_model_{uuid4().hex[:10]}"
+        model_result_id = generate_model_result_id("RF", output_name)
+        rf_artifact_ids = {
+            "dataset": f"dataset_{uuid4().hex[:10]}",
+            "metrics": f"metrics_{uuid4().hex[:10]}",
+            "importance": f"importance_{uuid4().hex[:10]}",
+            "model": f"model_{uuid4().hex[:10]}",
+        }
+        artifacts = [
+            ArtifactInfo(
+                artifact_id=rf_artifact_ids["dataset"],
+                path=str(manager.get(saved_name).path),
+                type="dataset",
+                title=f"{saved_name} RF predictions",
+                description="Random forest prediction result table.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=rf_artifact_ids["metrics"],
+                path=str(manager.get(metrics_name).path),
+                type="metrics",
+                title=f"{metrics_name} metrics",
+                description="Random forest accuracy metrics table.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=rf_artifact_ids["importance"],
+                path=str(manager.get(importance_name).path),
+                type="feature_importance",
+                title=f"{importance_name} feature importance",
+                description="Random forest feature importance table.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=rf_artifact_ids["model"],
+                path=str(model_path),
+                type="model",
+                title=f"{output_name} RF model",
+                description="Trained random forest model file.",
+                quality_status="created",
+                preview_available=False,
+            ),
+        ]
+        artifact_dicts = [item.to_dict() for item in artifacts]
+        manager.log_operation("RF 融合训练", f"{dataset_name} -> {saved_name}", "model")
+        summary = (
+            f"RF 模型训练完成，结果表: {saved_name}，预测列: {pred_col}。\n"
+            f"特征重要性表: {importance_name}。\n"
+            f"精度指标表: {metrics_name}。\n"
+            f"模型文件: {model_path}。"
+        )
+        manager.register_model_result(
+            model_result_id=model_result_id,
+            task_id=task_id,
+            dataset_id=dataset_name,
+            model_name="RF",
+            output_prefix=output_name,
+            result_dataset=saved_name,
+            metrics_dataset=metrics_name,
+            metrics_path=str(manager.get(metrics_name).path),
+            artifact_ids=list(rf_artifact_ids.values()),
+            artifacts=artifact_dicts,
+            metrics=metrics.get("overall") if isinstance(metrics.get("overall"), dict) else metrics,
+            diagnostics={"metrics": metrics, "features": features, "target_col": target_col},
+        )
+        return tool_result_ok(
+            "train_rf_fusion_model",
+            inputs=inputs,
+            task_id=task_id,
+            outputs={
+                "model_result_id": model_result_id,
+                "result_dataset": saved_name,
+                "prediction_column": pred_col,
+                "metrics_dataset": metrics_name,
+                "importance_dataset": importance_name,
+                "model_path": str(model_path),
+            },
+            artifacts=artifacts,
+            summary=summary,
+            diagnostics={"metrics": metrics, "features": features, "target_col": target_col},
+            next_actions=["解释 RF 指标和特征重要性。", "检查残差或继续与 XGBoost 结果对比。"],
+        ).to_json()
         meta_path = _save_json_artifact(manager, f"{output_name}_rf_summary", {
             "dataset": dataset_name,
             "target_col": target_col,
@@ -2617,8 +4058,55 @@ def build_tools(manager: DataManager):
         moran_permutations: int = 199,
     ) -> str:
         """训练 XGBoost 回归模型。对点图层会自动保留 geometry、添加空间坐标特征、执行空间分块交叉验证、计算残差 Moran's I，并输出残差空间分布图。"""
+        inputs = {
+            "dataset_name": dataset_name,
+            "target_col": target_col,
+            "feature_cols": feature_cols,
+            "output_name": output_name,
+            "date_col": date_col,
+            "split_date": split_date,
+            "spatial_validation": spatial_validation,
+        }
+        errors = validate_dataset_exists(manager, dataset_name)
+        features_for_validation: list[str] = []
+        if not errors:
+            errors.extend(validate_model_target(manager, dataset_name, target_col))
+            try:
+                features_for_validation = _parse_columns(feature_cols)
+            except Exception as exc:
+                errors.append(
+                    {
+                        "error_code": "FEATURE_FIELDS_MISSING",
+                        "error_title": "缺少特征字段",
+                        "user_message": "请指定用于建模的特征字段。",
+                        "next_actions": ["从数值字段中选择一个或多个特征字段。", "多个字段可用逗号分隔。"],
+                        "diagnostics": {"technical_detail": str(exc)},
+                    }
+                )
+            if features_for_validation:
+                errors.extend(validate_required_fields(manager, dataset_name, features_for_validation))
+                errors.extend(validate_numeric_fields(manager, dataset_name, features_for_validation))
+            try:
+                record_for_validation = manager.get(dataset_name)
+                if bool(spatial_validation) and record_for_validation.data_type == "vector":
+                    errors.extend(validate_crs(manager, dataset_name))
+                    errors.extend(validate_geometry_type(manager, dataset_name, ["Point"]))
+            except Exception:
+                pass
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if errors:
+            return _tool_error_from_validation("train_xgboost_fusion_model", inputs, errors)
+
         if XGBRegressor is None:
-            raise ImportError("当前环境未安装 xgboost，请先安装 xgboost 后再使用该工具。")
+            return tool_result_error(
+                "train_xgboost_fusion_model",
+                inputs=inputs,
+                error_code="XGBOOST_UNAVAILABLE",
+                error_title="XGBoost 依赖不可用",
+                user_message="当前 Python 环境未安装 xgboost，无法训练 XGBoost 模型。",
+                diagnostics={"dependency": "xgboost"},
+                next_actions=["安装 xgboost 后重试。", "或先使用随机森林建模工具。"],
+            ).to_json()
 
         df, source_gdf = _prepare_dataframe_with_geometry(dataset_name, manager)
         features = _parse_columns(feature_cols)
@@ -2804,7 +4292,116 @@ def build_tools(manager: DataManager):
             if spatial_diag.get("p_value") is not None:
                 detail += f"，置换检验 p = {spatial_diag['p_value']:.4f}"
             reply_lines.append(detail + "。")
-        return "\n".join(reply_lines)
+        artifacts = [
+            ArtifactInfo(
+                artifact_id=f"dataset_{uuid4().hex[:10]}",
+                path=str(manager.get(saved_name).path),
+                type="dataset",
+                title=f"{saved_name} XGBoost predictions",
+                description="XGBoost 预测结果数据集。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"table_{uuid4().hex[:10]}",
+                path=str(manager.get(metrics_name).path),
+                type="metrics",
+                title=f"{metrics_name} metrics",
+                description="XGBoost 精度指标表。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"table_{uuid4().hex[:10]}",
+                path=str(manager.get(importance_name).path),
+                type="feature_importance",
+                title=f"{importance_name} feature importance",
+                description="XGBoost 特征重要性表。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"model_{uuid4().hex[:10]}",
+                path=str(model_path),
+                type="model",
+                title=f"{output_name} XGBoost model",
+                description="训练后的 XGBoost 模型文件。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"summary_{uuid4().hex[:10]}",
+                path=str(meta_path),
+                type="summary",
+                title=f"{output_name} XGBoost summary",
+                description="模型参数、指标和空间诊断摘要。",
+                quality_status="created",
+                preview_available=False,
+            ),
+        ]
+        if moran_table_name is not None:
+            artifacts.append(
+                ArtifactInfo(
+                    artifact_id=f"moran_{uuid4().hex[:10]}",
+                    path=str(manager.get(moran_table_name).path),
+                    type="diagnostics",
+                    title=f"{moran_table_name} Moran's I",
+                    description="残差空间自相关诊断表。",
+                    quality_status="created",
+                    preview_available=False,
+                )
+            )
+        if residual_map_path is not None:
+            artifacts.append(
+                ArtifactInfo(
+                    artifact_id=f"map_{uuid4().hex[:10]}",
+                    path=str(residual_map_path),
+                    type="map",
+                    title=f"{output_name} residual map",
+                    description="残差空间分布图。",
+                    quality_status="created",
+                    preview_available=True,
+                )
+            )
+        task_id = f"train_xgboost_fusion_model_{uuid4().hex[:10]}"
+        model_result_id = generate_model_result_id("XGBoost", output_name)
+        artifact_dicts = [item.to_dict() for item in artifacts]
+        manager.register_model_result(
+            model_result_id=model_result_id,
+            task_id=task_id,
+            dataset_id=dataset_name,
+            model_name="XGBoost",
+            output_prefix=output_name,
+            result_dataset=saved_name,
+            metrics_dataset=metrics_name,
+            metrics_path=str(manager.get(metrics_name).path),
+            figure_path=str(residual_map_path) if residual_map_path else "",
+            artifact_ids=[str(item.get("artifact_id") or "") for item in artifact_dicts if item.get("artifact_id")],
+            artifacts=artifact_dicts,
+            metrics=metrics.get("spatial_cv") if isinstance(metrics.get("spatial_cv"), dict) else metrics.get("overall") if isinstance(metrics.get("overall"), dict) else metrics,
+            diagnostics={"metrics": metrics, "spatial_diagnostics": spatial_diag, "features": features, "target_col": target_col},
+        )
+        return tool_result_ok(
+            "train_xgboost_fusion_model",
+            inputs=inputs,
+            task_id=task_id,
+            outputs={
+                "model_result_id": model_result_id,
+                "result_dataset": saved_name,
+                "prediction_column": pred_col,
+                "residual_column": resid_col,
+                "metrics_dataset": metrics_name,
+                "importance_dataset": importance_name,
+                "moran_dataset": moran_table_name,
+                "model_path": str(model_path),
+                "summary_path": str(meta_path),
+                "residual_map_path": str(residual_map_path) if residual_map_path else "",
+            },
+            artifacts=artifacts,
+            summary="\n".join(reply_lines),
+            diagnostics={"metrics": metrics, "spatial_diagnostics": spatial_diag},
+            next_actions=["解释模型指标、特征重要性和残差空间分布。", "检查残差是否存在空间聚集，并考虑补充空间特征。"],
+        ).to_json()
 
 
     @tool
@@ -2825,11 +4422,60 @@ def build_tools(manager: DataManager):
         learning_rate: float = 0.001,
     ) -> str:
         """训练 LSTM 时序融合模型并输出预测结果与精度指标，适合刻画土壤水分时间记忆效应和动态变化。"""
-        if seq_len < 2:
-            raise ValueError("seq_len 至少应为 2。")
-        df = _prepare_dataframe(dataset_name, manager).copy()
-        dynamic_cols = _parse_columns(dynamic_feature_cols)
+        inputs = {
+            "dataset_name": dataset_name,
+            "target_col": target_col,
+            "dynamic_feature_cols": dynamic_feature_cols,
+            "output_name": output_name,
+            "date_col": date_col,
+            "group_col": group_col,
+            "static_feature_cols": static_feature_cols,
+            "seq_len": seq_len,
+            "split_date": split_date,
+            "hidden_size": hidden_size,
+            "num_layers": num_layers,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+        }
+        dynamic_cols = _parse_columns(dynamic_feature_cols) if str(dynamic_feature_cols or "").strip() else []
         static_cols = _parse_columns(static_feature_cols) if static_feature_cols.strip() else []
+        validation_errors: list[dict[str, Any]] = []
+        validation_errors.extend(validate_dataset_exists(manager, dataset_name))
+        validation_errors.extend(validate_model_target(manager, dataset_name, target_col))
+        validation_errors.extend(validate_required_fields(manager, dataset_name, [date_col] if str(date_col or "").strip() else []))
+        validation_errors.extend(validate_required_fields(manager, dataset_name, dynamic_cols + static_cols))
+        validation_errors.extend(validate_numeric_fields(manager, dataset_name, dynamic_cols + static_cols))
+        validation_errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not dynamic_cols:
+            validation_errors.append({
+                "error_code": "LSTM_DYNAMIC_FIELDS_MISSING",
+                "error_title": "Missing dynamic feature fields",
+                "user_message": "LSTM requires at least one dynamic feature field.",
+                "next_actions": ["Provide time-varying numeric fields, for example precipitation, temperature or remote sensing variables."],
+                "diagnostics": {},
+            })
+        if seq_len < 2:
+            validation_errors.append({
+                "error_code": "LSTM_SEQ_LEN_TOO_SMALL",
+                "error_title": "Invalid sequence length",
+                "user_message": "seq_len must be at least 2 for LSTM training.",
+                "next_actions": ["Use seq_len=7 or another sequence length greater than 1."],
+                "diagnostics": {"seq_len": seq_len},
+            })
+        if validation_errors:
+            first = first_error(validation_errors) or {}
+            return tool_result_error(
+                "train_lstm_fusion_model",
+                inputs=inputs,
+                error_code=str(first.get("error_code") or "LSTM_PRECONDITION_FAILED"),
+                error_title=str(first.get("error_title") or "LSTM precondition failed"),
+                user_message=str(first.get("user_message") or "LSTM inputs are incomplete or invalid."),
+                diagnostics=validation_diagnostics(validation_errors),
+                next_actions=merge_next_actions(validation_errors),
+                technical_detail=str(first.get("technical_detail") or ""),
+            ).to_json()
+        df = _prepare_dataframe(dataset_name, manager).copy()
         _validate_columns(df, [target_col, date_col, *dynamic_cols, *static_cols])
 
         seq_data = _build_lstm_sequences(
@@ -2858,7 +4504,15 @@ def build_tools(manager: DataManager):
             test_mask = pd.Series([False] * len(seq_dates))
 
         if int(train_mask.sum()) < max(20, seq_len * 2):
-            raise ValueError(f"LSTM 可用于训练的序列样本不足，当前仅 {int(train_mask.sum())} 条。")
+            return tool_result_error(
+                "train_lstm_fusion_model",
+                inputs=inputs,
+                error_code="LSTM_TRAINING_SAMPLE_TOO_SMALL",
+                error_title="Training sample too small",
+                user_message=f"LSTM has only {int(train_mask.sum())} usable sequence samples for training.",
+                diagnostics={"usable_training_sequences": int(train_mask.sum()), "required_minimum": int(max(20, seq_len * 2))},
+                next_actions=["Use a longer time series.", "Reduce seq_len if appropriate.", "Check missing values in target and dynamic feature fields."],
+            ).to_json()
 
         x_dyn_train = x_dyn[train_mask.to_numpy()]
         x_sta_train = x_sta[train_mask.to_numpy()]
@@ -2973,13 +4627,95 @@ def build_tools(manager: DataManager):
             "sequence_count": int(len(orig_index)),
         })
         manager.log_operation("LSTM 融合训练", f"{dataset_name} -> {saved_name}", "model")
-        return (
-            f"LSTM 融合模型训练完成，结果表: {saved_name}，预测列: {pred_col}。\n"
-            f"训练历史表: {history_name}。\n"
-            f"精度指标表: {metrics_name}。\n"
-            f"模型文件: {model_path}。\n"
-            f"摘要文件: {meta_path}"
+        task_id = f"train_lstm_fusion_model_{uuid4().hex[:10]}"
+        model_result_id = generate_model_result_id("LSTM", output_name)
+        artifacts = [
+            ArtifactInfo(
+                artifact_id=f"dataset_{uuid4().hex[:10]}",
+                path=str(manager.get(saved_name).path),
+                type="dataset",
+                title=f"{saved_name} LSTM predictions",
+                description="LSTM prediction result table.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"history_{uuid4().hex[:10]}",
+                path=str(manager.get(history_name).path),
+                type="training_history",
+                title=f"{history_name} training history",
+                description="LSTM training loss history.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"metrics_{uuid4().hex[:10]}",
+                path=str(manager.get(metrics_name).path),
+                type="metrics",
+                title=f"{metrics_name} metrics",
+                description="LSTM accuracy metrics table.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"model_{uuid4().hex[:10]}",
+                path=str(model_path),
+                type="model",
+                title=f"{output_name} LSTM model",
+                description="Trained LSTM model checkpoint.",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"summary_{uuid4().hex[:10]}",
+                path=str(meta_path),
+                type="summary",
+                title=f"{output_name} LSTM summary",
+                description="LSTM configuration and metrics summary.",
+                quality_status="created",
+                preview_available=False,
+            ),
+        ]
+        artifact_dicts = [item.to_dict() for item in artifacts]
+        manager.register_model_result(
+            model_result_id=model_result_id,
+            task_id=task_id,
+            dataset_id=dataset_name,
+            model_name="LSTM",
+            output_prefix=output_name,
+            result_dataset=saved_name,
+            metrics_dataset=metrics_name,
+            metrics_path=str(manager.get(metrics_name).path),
+            artifact_ids=[str(item.get("artifact_id") or "") for item in artifact_dicts],
+            artifacts=artifact_dicts,
+            metrics=metrics.get("test") if isinstance(metrics.get("test"), dict) else metrics.get("train") if isinstance(metrics.get("train"), dict) else metrics,
+            diagnostics={
+                "metrics": metrics,
+                "dynamic_cols": dynamic_cols,
+                "static_cols": static_cols,
+                "target_col": target_col,
+                "date_col": date_col,
+                "sequence_count": int(len(orig_index)),
+            },
         )
+        return tool_result_ok(
+            "train_lstm_fusion_model",
+            inputs=inputs,
+            task_id=task_id,
+            outputs={
+                "model_result_id": model_result_id,
+                "result_dataset": saved_name,
+                "prediction_column": pred_col,
+                "history_dataset": history_name,
+                "metrics_dataset": metrics_name,
+                "model_path": str(model_path),
+                "summary_path": str(meta_path),
+            },
+            artifacts=artifacts,
+            summary=f"LSTM model training completed. Result dataset: {saved_name}. Metrics dataset: {metrics_name}.",
+            diagnostics={"metrics": metrics, "sequence_count": int(len(orig_index))},
+            next_actions=["Explain LSTM train/test metrics.", "Compare LSTM with RF/XGBoost and consider GCP uncertainty analysis."],
+        ).to_json()
 
     @tool
     def generate_thesis_charts(
@@ -3744,6 +5480,19 @@ def build_tools(manager: DataManager):
             combined_metric_rows: list[dict[str, Any]] = []
             created_outputs: dict[str, Any] = {"source_dataset": source_name, "working_dataset": current_dataset, "models": {}, "reports": {}, "charts": []}
 
+            def _parsed_tool_success(raw: Any, step_name: str, input_summary: str) -> dict[str, Any] | None:
+                parsed = parse_tool_result(raw)
+                if parsed is not None and not parsed.get("ok"):
+                    detail = {
+                        "error_code": parsed.get("error_code"),
+                        "user_message": parsed.get("user_message"),
+                        "next_actions": parsed.get("next_actions"),
+                        "diagnostics": parsed.get("diagnostics"),
+                    }
+                    record(step_name, "failed", input_summary, str(parsed.get("user_message") or parsed.get("error_code") or "tool failed"), detail)
+                    return None
+                return parsed or {}
+
             if "btch" in models_requested:
                 if len(product_list) < 3:
                     record("BTCH 融合", "skipped", "产品列少于 3 个", "BTCH 至少需要 3 个产品列", {"product_cols": product_list})
@@ -3767,7 +5516,7 @@ def build_tools(manager: DataManager):
 
             if "rf" in models_requested:
                 rf_output = f"{output_prefix}_rf_result"
-                train_rf_fusion_model.invoke({
+                rf_raw = train_rf_fusion_model.invoke({
                     "dataset_name": current_dataset,
                     "target_col": target_col,
                     "feature_cols": ",".join(feature_list),
@@ -3775,16 +5524,26 @@ def build_tools(manager: DataManager):
                     "date_col": date_col,
                     "split_date": split_date,
                 })
-                rf_metrics_name = f"{rf_output}_rf_metrics"
-                rf_metrics_df = _prepare_dataframe(rf_metrics_name, manager)
-                combined_metric_rows.append(_metric_row_with_label(rf_metrics_df, f"{rf_output}_rf", "RF"))
-                created_outputs["models"]["rf"] = {"result_dataset": rf_output, "prediction_column": f"{rf_output}_rf", "metrics_dataset": rf_metrics_name, "importance_dataset": f"{rf_output}_rf_importance"}
-                record("RF 融合训练", "success", f"输入表 {current_dataset}", f"生成结果 {rf_output}", created_outputs["models"]["rf"])
+                rf_result = _parsed_tool_success(rf_raw, "RF 融合训练", f"输入表 {current_dataset}")
+                if rf_result is not None:
+                    rf_outputs = rf_result.get("outputs") if isinstance(rf_result.get("outputs"), dict) else {}
+                    rf_metrics_name = str(rf_outputs.get("metrics_dataset") or f"{rf_output}_rf_metrics")
+                    rf_pred_col = str(rf_outputs.get("prediction_column") or f"{rf_output}_rf")
+                    rf_metrics_df = _prepare_dataframe(rf_metrics_name, manager)
+                    combined_metric_rows.append(_metric_row_with_label(rf_metrics_df, rf_pred_col, "RF"))
+                    created_outputs["models"]["rf"] = {
+                        "model_result_id": rf_outputs.get("model_result_id"),
+                        "result_dataset": rf_outputs.get("result_dataset") or rf_output,
+                        "prediction_column": rf_pred_col,
+                        "metrics_dataset": rf_metrics_name,
+                        "importance_dataset": rf_outputs.get("importance_dataset") or f"{rf_output}_rf_importance",
+                    }
+                    record("RF 融合训练", "success", f"输入表 {current_dataset}", f"生成结果 {rf_output}", created_outputs["models"]["rf"])
 
             if "xgboost" in models_requested or "xgb" in models_requested:
                 try:
                     xgb_output = f"{output_prefix}_xgb_result"
-                    train_xgboost_fusion_model.invoke({
+                    xgb_raw = train_xgboost_fusion_model.invoke({
                         "dataset_name": current_dataset,
                         "target_col": target_col,
                         "feature_cols": ",".join(feature_list),
@@ -3792,11 +5551,21 @@ def build_tools(manager: DataManager):
                         "date_col": date_col,
                         "split_date": split_date,
                     })
-                    xgb_metrics_name = f"{xgb_output}_xgb_metrics"
-                    xgb_metrics_df = _prepare_dataframe(xgb_metrics_name, manager)
-                    combined_metric_rows.append(_metric_row_with_label(xgb_metrics_df, f"{xgb_output}_xgb", "XGBoost"))
-                    created_outputs["models"]["xgboost"] = {"result_dataset": xgb_output, "prediction_column": f"{xgb_output}_xgb", "metrics_dataset": xgb_metrics_name, "importance_dataset": f"{xgb_output}_xgb_importance"}
-                    record("XGBoost 融合训练", "success", f"输入表 {current_dataset}", f"生成结果 {xgb_output}", created_outputs["models"]["xgboost"])
+                    xgb_result = _parsed_tool_success(xgb_raw, "XGBoost 融合训练", f"输入表 {current_dataset}")
+                    if xgb_result is not None:
+                        xgb_outputs = xgb_result.get("outputs") if isinstance(xgb_result.get("outputs"), dict) else {}
+                        xgb_metrics_name = str(xgb_outputs.get("metrics_dataset") or f"{xgb_output}_xgb_metrics")
+                        xgb_pred_col = str(xgb_outputs.get("prediction_column") or f"{xgb_output}_xgb")
+                        xgb_metrics_df = _prepare_dataframe(xgb_metrics_name, manager)
+                        combined_metric_rows.append(_metric_row_with_label(xgb_metrics_df, xgb_pred_col, "XGBoost"))
+                        created_outputs["models"]["xgboost"] = {
+                            "model_result_id": xgb_outputs.get("model_result_id"),
+                            "result_dataset": xgb_outputs.get("result_dataset") or xgb_output,
+                            "prediction_column": xgb_pred_col,
+                            "metrics_dataset": xgb_metrics_name,
+                            "importance_dataset": xgb_outputs.get("importance_dataset") or f"{xgb_output}_xgb_importance",
+                        }
+                        record("XGBoost 融合训练", "success", f"输入表 {current_dataset}", f"生成结果 {xgb_output}", created_outputs["models"]["xgboost"])
                 except Exception as exc:
                     record("XGBoost 融合训练", "failed", f"输入表 {current_dataset}", str(exc), {})
 
@@ -3806,7 +5575,7 @@ def build_tools(manager: DataManager):
                 else:
                     try:
                         lstm_output = f"{output_prefix}_lstm_result"
-                        train_lstm_fusion_model.invoke({
+                        lstm_raw = train_lstm_fusion_model.invoke({
                             "dataset_name": current_dataset,
                             "target_col": target_col,
                             "dynamic_feature_cols": dynamic_cols_text,
@@ -3817,11 +5586,21 @@ def build_tools(manager: DataManager):
                             "seq_len": int(seq_len),
                             "split_date": split_date,
                         })
-                        lstm_metrics_name = f"{lstm_output}_lstm_metrics"
-                        lstm_metrics_df = _prepare_dataframe(lstm_metrics_name, manager)
-                        combined_metric_rows.append(_metric_row_with_label(lstm_metrics_df, f"{lstm_output}_lstm", "LSTM"))
-                        created_outputs["models"]["lstm"] = {"result_dataset": lstm_output, "prediction_column": f"{lstm_output}_lstm", "metrics_dataset": lstm_metrics_name, "history_dataset": f"{lstm_output}_lstm_history"}
-                        record("LSTM 融合训练", "success", f"输入表 {current_dataset}", f"生成结果 {lstm_output}", created_outputs["models"]["lstm"])
+                        lstm_result = _parsed_tool_success(lstm_raw, "LSTM 融合训练", f"输入表 {current_dataset}")
+                        if lstm_result is not None:
+                            lstm_outputs = lstm_result.get("outputs") if isinstance(lstm_result.get("outputs"), dict) else {}
+                            lstm_metrics_name = str(lstm_outputs.get("metrics_dataset") or f"{lstm_output}_lstm_metrics")
+                            lstm_pred_col = str(lstm_outputs.get("prediction_column") or f"{lstm_output}_lstm")
+                            lstm_metrics_df = _prepare_dataframe(lstm_metrics_name, manager)
+                            combined_metric_rows.append(_metric_row_with_label(lstm_metrics_df, lstm_pred_col, "LSTM"))
+                            created_outputs["models"]["lstm"] = {
+                                "model_result_id": lstm_outputs.get("model_result_id"),
+                                "result_dataset": lstm_outputs.get("result_dataset") or lstm_output,
+                                "prediction_column": lstm_pred_col,
+                                "metrics_dataset": lstm_metrics_name,
+                                "history_dataset": lstm_outputs.get("history_dataset") or f"{lstm_output}_lstm_history",
+                            }
+                            record("LSTM 融合训练", "success", f"输入表 {current_dataset}", f"生成结果 {lstm_output}", created_outputs["models"]["lstm"])
                     except Exception as exc:
                         record("LSTM 融合训练", "failed", f"输入表 {current_dataset}", str(exc), {})
 
@@ -3861,7 +5640,7 @@ def build_tools(manager: DataManager):
                                 calibration_dataset_name = _save_subset_dataset(result_dataset, calibration_mask, f"{result_dataset}_gcp_calibration")
                                 target_dataset_name = _save_subset_dataset(result_dataset, target_mask, f"{result_dataset}_gcp_target")
 
-                            geographical_conformal_prediction.invoke({
+                            gcp_raw = geographical_conformal_prediction.invoke({
                                 "calibration_dataset": calibration_dataset_name,
                                 "target_dataset_name": target_dataset_name,
                                 "observed_col": observed_field,
@@ -3876,19 +5655,23 @@ def build_tools(manager: DataManager):
                                 "bandwidth": float(gcp_bandwidth),
                                 "kernel": gcp_kernel,
                             })
-                            gcp_metrics_name = f"{gcp_output}_gcp_metrics"
-                            gcp_df = _prepare_dataframe(gcp_metrics_name, manager).copy()
-                            gcp_df["model"] = model_key.upper() if model_key != "xgboost" else "XGBoost"
-                            gcp_df["prediction_column"] = pred_col
-                            gcp_metric_rows.extend(gcp_df.to_dict(orient="records"))
-                            created_outputs["gcp"][model_key] = {
-                                "result_dataset": gcp_output,
-                                "metrics_dataset": gcp_metrics_name,
-                                "prediction_column": pred_col,
-                                "calibration_dataset": calibration_dataset_name,
-                                "target_dataset": target_dataset_name or calibration_dataset_name,
-                            }
-                            record("GCP 不确定性分析", "success", f"模型 {model_key} | 结果表 {result_dataset}", f"生成区间结果 {gcp_output}", created_outputs["gcp"][model_key])
+                            gcp_result = _parsed_tool_success(gcp_raw, "GCP 不确定性分析", f"模型 {model_key} | 结果表 {result_dataset}")
+                            if gcp_result is not None:
+                                gcp_outputs = gcp_result.get("outputs") if isinstance(gcp_result.get("outputs"), dict) else {}
+                                gcp_metrics_name = str(gcp_outputs.get("metrics_dataset") or f"{gcp_output}_gcp_metrics")
+                                gcp_df = _prepare_dataframe(gcp_metrics_name, manager).copy()
+                                gcp_df["model"] = model_key.upper() if model_key != "xgboost" else "XGBoost"
+                                gcp_df["prediction_column"] = pred_col
+                                gcp_metric_rows.extend(gcp_df.to_dict(orient="records"))
+                                created_outputs["gcp"][model_key] = {
+                                    "model_result_id": gcp_outputs.get("model_result_id"),
+                                    "result_dataset": gcp_outputs.get("result_dataset") or gcp_output,
+                                    "metrics_dataset": gcp_metrics_name,
+                                    "prediction_column": pred_col,
+                                    "calibration_dataset": calibration_dataset_name,
+                                    "target_dataset": target_dataset_name or calibration_dataset_name,
+                                }
+                                record("GCP 不确定性分析", "success", f"模型 {model_key} | 结果表 {result_dataset}", f"生成区间结果 {gcp_output}", created_outputs["gcp"][model_key])
                         except Exception as exc:
                             record("GCP 不确定性分析", "failed", f"模型 {model_key} | 结果表 {result_dataset}", str(exc), {})
             else:
@@ -4000,7 +5783,98 @@ def build_tools(manager: DataManager):
     @tool
     def plot_dataset(dataset_name: str, column: str = "", title: str = "", output_name: str = "") -> str:
         """为矢量或栅格数据生成地图 PNG。矢量可选 column 进行专题制图。"""
-        record = manager.get(dataset_name)
+        inputs = {"dataset_name": dataset_name, "column": column, "title": title, "output_name": output_name}
+        errors = validate_dataset_exists(manager, dataset_name)
+        errors.extend(validate_output_path(manager.plot_dir, output_name, allowed_suffixes={".png"}))
+        if errors:
+            return _tool_error_from_validation("plot_dataset", inputs, errors)
+
+        try:
+            record = manager.get(dataset_name)
+        except Exception as exc:
+            return _tool_internal_error("plot_dataset", inputs, exc)
+
+        if record.data_type == "table":
+            return tool_result_error(
+                "plot_dataset",
+                inputs=inputs,
+                error_code="UNSUPPORTED_DATASET_TYPE",
+                error_title="表格不能直接制图",
+                user_message="表格数据不能直接绘制为空间地图，需要先转换为点图层或选择已有矢量/栅格数据。",
+                diagnostics={"dataset_type": record.data_type},
+                next_actions=["先使用 table_to_points 将经纬度表转换为点图层。", "或选择一个矢量/栅格数据集制图。"],
+            ).to_json()
+        if record.data_type not in {"vector", "raster"}:
+            return tool_result_error(
+                "plot_dataset",
+                inputs=inputs,
+                error_code="UNSUPPORTED_DATASET_TYPE",
+                error_title="数据类型不支持制图",
+                user_message=f"当前数据类型 {record.data_type} 暂不支持直接制图。",
+                diagnostics={"dataset_type": record.data_type},
+                next_actions=["选择矢量或栅格数据集。"],
+            ).to_json()
+
+        errors = []
+        if record.data_type == "vector":
+            errors.extend(validate_vector_readable(manager, dataset_name))
+            errors.extend(validate_crs(manager, dataset_name))
+            if str(column or "").strip():
+                errors.extend(validate_required_fields(manager, dataset_name, [column]))
+        else:
+            errors.extend(validate_raster_readable(manager, dataset_name))
+        if errors:
+            return _tool_error_from_validation("plot_dataset", inputs, errors)
+
+        try:
+            record = manager.get(dataset_name)
+            output_stem = output_name or f"{dataset_name}_map"
+            if Path(output_stem).suffix.lower() == ".png":
+                output_stem = Path(output_stem).stem
+            output_path = manager.plot_dir / f"{output_stem}.png"
+            fig, ax = plt.subplots(figsize=(9.6, 6.8))
+            fig.patch.set_facecolor("#0f172a")
+            ax.set_facecolor("#f8fafc")
+            if record.data_type == "vector":
+                plt.close(fig)
+                gdf = manager.get_vector(dataset_name)
+                _save_vector_map_plot(gdf, output_path, column=column, title=title or dataset_name)
+            else:
+                raster_path = manager.get_raster_path(dataset_name)
+                with rasterio.open(raster_path) as src:
+                    raster_show(src, ax=ax, cmap="viridis")
+                ax.set_title(_safe_map_title(title or dataset_name), color="white", pad=12)
+                ax.grid(alpha=0.15)
+                ax.spines[["top", "right"]].set_visible(False)
+                plt.tight_layout()
+                fig.savefig(output_path, dpi=220, facecolor=fig.get_facecolor(), bbox_inches="tight")
+                plt.close(fig)
+
+            manager.last_plot_path = str(output_path)
+            manager.log_operation("鐢熸垚鍦板浘", f"{dataset_name} -> {output_path.name}", "plot")
+            font_msg = f"使用字体 {_ACTIVE_FONT}" if _ACTIVE_FONT else "未检测到可用中文字体，标题可能自动降级"
+            return tool_result_ok(
+                "plot_dataset",
+                inputs=inputs,
+                outputs={"path": str(output_path), "dataset_name": dataset_name, "column": column or ""},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"map_{uuid4().hex[:10]}",
+                        path=str(output_path),
+                        type="map",
+                        title=title or f"{dataset_name} map",
+                        description=f"数据集 {dataset_name} 的地图图件。",
+                        quality_status="created",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"地图已生成：{output_path}",
+                diagnostics={"dataset_type": record.data_type, "font": font_msg, "crs": record.meta.get("crs") if isinstance(record.meta, dict) else None},
+                next_actions=["查看图件空间分布，并结合字段含义解释异常区域。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("plot_dataset", inputs, exc)
+
         output_stem = output_name or f"{dataset_name}_map"
         output_path = manager.plot_dir / f"{output_stem}.png"
 
@@ -4040,6 +5914,80 @@ def build_tools(manager: DataManager):
     @tool
     def raster_histogram(dataset_name: str, band: int = 1, output_name: str = "") -> str:
         """为栅格波段生成直方图 PNG，便于查看数值分布。"""
+        inputs = {"dataset_name": dataset_name, "band": band, "output_name": output_name}
+        output_stem = output_name or f"{dataset_name}_hist"
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_output_path(manager.plot_dir, output_stem, allowed_suffixes={".png"}))
+        if not errors:
+            errors.extend(validate_raster_readable(manager, dataset_name))
+        if errors:
+            return _tool_error_from_validation("raster_histogram", inputs, errors)
+
+        try:
+            raster_path = manager.get_raster_path(dataset_name)
+            output_path = manager.plot_dir / f"{Path(output_stem).stem}.png"
+            with rasterio.open(raster_path) as src:
+                if band < 1 or band > src.count:
+                    return tool_result_error(
+                        "raster_histogram",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_OUT_OF_RANGE",
+                        error_title="波段编号超出范围",
+                        user_message=f"数据 {dataset_name} 只有 {src.count} 个波段，不能读取第 {band} 个波段。",
+                        diagnostics={"band": band, "band_count": int(src.count)},
+                        next_actions=["请选择 1 到波段总数之间的 band 参数后重试。"],
+                    ).to_json()
+                arr = src.read(band, masked=True)
+                valid = arr.compressed()
+                if valid.size == 0:
+                    return tool_result_error(
+                        "raster_histogram",
+                        inputs=inputs,
+                        error_code="RASTER_BAND_EMPTY",
+                        error_title="波段没有有效像元",
+                        user_message=f"{dataset_name} 的第 {band} 个波段没有有效像元，无法生成直方图。",
+                        diagnostics={"band": band, "valid_count": 0},
+                        next_actions=["检查 NoData 设置，或选择其他波段/数据集。"],
+                    ).to_json()
+
+            fig, ax = plt.subplots(figsize=(8.5, 5.5))
+            ax.hist(valid, bins=30, color="#38bdf8", edgecolor="#0f172a")
+            ax.set_title(_safe_map_title(f"{dataset_name} histogram"))
+            ax.set_xlabel("Value")
+            ax.set_ylabel("Frequency")
+            ax.grid(alpha=0.2)
+            plt.tight_layout()
+            fig.savefig(output_path, dpi=220, bbox_inches="tight")
+            plt.close(fig)
+            manager.last_plot_path = str(output_path)
+            manager.log_operation("栅格直方图", f"{dataset_name} band {band} -> {output_path.name}", "plot")
+            return tool_result_ok(
+                "raster_histogram",
+                inputs=inputs,
+                outputs={"path": str(output_path), "band": int(band), "valid_count": int(valid.size)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"plot:{output_path.name}",
+                        path=str(output_path),
+                        type="plot",
+                        title=output_path.name,
+                        description=f"Histogram for {dataset_name} band {band}",
+                        quality_status="ok",
+                        preview_available=True,
+                    )
+                ],
+                summary=f"已生成 {dataset_name} 第 {band} 波段的直方图，共统计 {valid.size} 个有效像元。",
+                diagnostics={
+                    "min": float(np.min(valid)),
+                    "max": float(np.max(valid)),
+                    "mean": float(np.mean(valid)),
+                    "valid_count": int(valid.size),
+                },
+                next_actions=["可继续查看直方图判断异常值、偏态分布或分级制图阈值。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_histogram", inputs, exc)
         raster_path = manager.get_raster_path(dataset_name)
         output_stem = output_name or f"{dataset_name}_hist"
         output_path = manager.plot_dir / f"{output_stem}.png"
@@ -4064,6 +6012,143 @@ def build_tools(manager: DataManager):
     @tool
     def export_dataset(dataset_name: str, output_path: str) -> str:
         """将已有结果导出到指定路径。矢量默认导出为 GeoJSON，表格导出为 CSV，栅格直接复制，文档导出为文本。"""
+        inputs = {"dataset_name": dataset_name, "output_path": output_path}
+        errors = validate_dataset_exists(manager, dataset_name)
+        if not str(output_path or "").strip():
+            errors.append(
+                {
+                    "error_code": "OUTPUT_PATH_REQUIRED",
+                    "error_title": "缺少导出路径",
+                    "user_message": "请指定导出文件路径。",
+                    "next_actions": ["提供 output_path，例如 results/output.csv。"],
+                    "diagnostics": {},
+                }
+            )
+        else:
+            errors.extend(validate_output_file_path(manager.workdir, output_path))
+        if errors:
+            return _tool_error_from_validation("export_dataset", inputs, errors)
+        try:
+            record = manager.get(dataset_name)
+            raw_target = Path(output_path)
+            target = raw_target.resolve() if raw_target.is_absolute() else (manager.workdir / raw_target).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            export_details: dict[str, Any] = {}
+            export_warnings: list[dict[str, Any]] = []
+
+            if record.data_type == "vector":
+                gdf = manager.get_vector(dataset_name)
+                suffix = target.suffix.lower()
+                if suffix == ".geojson":
+                    gdf.to_file(target, driver="GeoJSON")
+                elif suffix in {".shp", ".zip"}:
+                    zip_target = target if suffix == ".zip" else target.with_suffix(".zip")
+                    staging = target.parent / f".{target.stem}_shp_{uuid4().hex[:8]}"
+                    staging.mkdir(parents=True, exist_ok=True)
+                    export_warnings.append(
+                        {
+                            "code": "SHAPEFILE_ZIP_PACKAGE",
+                            "message": "Shapefile exports are delivered as a zip package containing .shp/.shx/.dbf and available sidecar files.",
+                            "next_actions": ["Use the zip file as the downloadable artifact; keep sidecar files together."],
+                        }
+                    )
+                    long_field_names = [str(col) for col in gdf.columns if str(col) != "geometry" and len(str(col)) > 10]
+                    if long_field_names:
+                        export_warnings.append(
+                            {
+                                "code": "SHAPEFILE_FIELD_NAME_TRUNCATION",
+                                "message": "ESRI Shapefile limits DBF field names to 10 characters; long names may be truncated by the writer.",
+                                "fields": long_field_names,
+                                "next_actions": ["Use GeoJSON when full field names must be preserved.", "Check exported DBF field names before downstream analysis."],
+                            }
+                        )
+                    try:
+                        shp_path = staging / f"{target.stem}.shp"
+                        writer_stderr = io.StringIO()
+                        previous_cpl_log = pyogrio.get_gdal_config_option("CPL_LOG")
+                        pyogrio.set_gdal_config_options({"CPL_LOG": os.devnull})
+                        with warnings.catch_warnings(record=True) as captured_warnings:
+                            warnings.simplefilter("always")
+                            try:
+                                with contextlib.redirect_stderr(writer_stderr):
+                                    gdf.to_file(shp_path, driver="ESRI Shapefile", encoding="UTF-8")
+                            finally:
+                                pyogrio.set_gdal_config_options({"CPL_LOG": previous_cpl_log})
+                        cpg_path = staging / f"{target.stem}.cpg"
+                        if not cpg_path.exists():
+                            cpg_path.write_text("UTF-8", encoding="ascii")
+                        members = sorted(path for path in staging.glob(f"{target.stem}.*") if path.is_file())
+                        with zipfile.ZipFile(zip_target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                            for member in members:
+                                archive.write(member, arcname=member.name)
+                        target = zip_target
+                        export_details = {
+                            "format": "shapefile_zip",
+                            "requested_format": suffix,
+                            "encoding": "UTF-8",
+                            "members": [member.name for member in members],
+                            "limitations": ["field_names_limited_to_10_characters", "multi_file_format_packaged_as_zip"],
+                            "writer_warnings": [
+                                *[str(item.message) for item in captured_warnings],
+                                *[line.strip() for line in writer_stderr.getvalue().splitlines() if line.strip()],
+                            ],
+                        }
+                    finally:
+                        shutil.rmtree(staging, ignore_errors=True)
+                else:
+                    gdf.to_file(target)
+            elif record.data_type == "table":
+                df = manager.get_table(dataset_name)
+                if target.suffix.lower() in {".xlsx", ".xls"}:
+                    df.to_excel(target, index=False)
+                else:
+                    df.to_csv(target, index=False)
+            elif record.data_type == "raster":
+                source = manager.get_raster_path(dataset_name)
+                shutil.copy2(source, target)
+            elif record.data_type == "document":
+                target.write_text(manager.get_document_text(dataset_name), encoding="utf-8")
+            else:
+                return tool_result_error(
+                    "export_dataset",
+                    inputs=inputs,
+                    error_code="UNSUPPORTED_DATASET_TYPE",
+                    error_title="数据类型不支持导出",
+                    user_message=f"当前数据类型 {record.data_type} 暂不支持导出。",
+                    diagnostics={"dataset_type": record.data_type},
+                    next_actions=["请选择表格、矢量、栅格或文档数据集。"],
+                ).to_json()
+
+            manager.log_operation("导出结果", f"{dataset_name} -> {target}", "export")
+            return tool_result_ok(
+                "export_dataset",
+                inputs=inputs,
+                outputs={"path": str(target), "dataset_name": dataset_name, "dataset_type": record.data_type, **export_details},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"file:{target.name}",
+                        path=str(target),
+                        type="file",
+                        title=target.name,
+                        description=f"Exported {record.data_type} dataset {dataset_name}",
+                        quality_status="ok",
+                        preview_available=target.suffix.lower() in {".csv", ".txt", ".json", ".geojson"},
+                    )
+                ],
+                summary=f"已导出 {dataset_name} 到 {target}。",
+                diagnostics={
+                    "dataset_type": record.data_type,
+                    "path": str(target),
+                    "bytes": int(target.stat().st_size) if target.exists() else 0,
+                    "shapefile_encoding": export_details.get("encoding"),
+                    "shapefile_limitations": export_details.get("limitations", []),
+                    "shapefile_members": export_details.get("members", []),
+                },
+                warnings=export_warnings,
+                next_actions=["可下载或在外部 GIS/表格软件中打开导出文件。"],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("export_dataset", inputs, exc)
         record = manager.get(dataset_name)
         target = Path(output_path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -4125,6 +6210,7 @@ def build_tools(manager: DataManager):
         join_attributes,
         summarize_points_within_polygons,
         raster_basic_stats,
+        raster_zonal_stats,
         clip_raster_by_vector,
         extract_raster_values_to_points,
         batch_register_points_to_rasters,

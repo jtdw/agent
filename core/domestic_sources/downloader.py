@@ -24,14 +24,29 @@ ARCHIVE_EXTS = {".zip", ".7z", ".rar"}
 MAX_DIRECT_DOWNLOAD_BYTES = int(os.getenv("GIS_AGENT_MAX_DIRECT_DOWNLOAD_MB", "1000") or 1000) * 1024 * 1024
 
 
-def safe_extract_zip(zf: zipfile.ZipFile, output_dir: Path) -> None:
+def _assert_archive_members_safe(member_names: list[str], output_dir: Path) -> None:
     root = output_dir.resolve()
-    for member in zf.infolist():
-        target = (root / member.filename).resolve()
+    for name in member_names:
+        raw = str(name or "").strip()
+        if not raw:
+            continue
+        member_path = Path(raw)
+        if member_path.is_absolute():
+            raise RuntimeError(f"压缩包包含不安全路径：{raw}")
+        target = (root / member_path).resolve()
         try:
             target.relative_to(root)
         except Exception:
-            raise RuntimeError(f"压缩包包含不安全路径：{member.filename}")
+            raise RuntimeError(f"压缩包包含不安全路径：{raw}")
+
+
+def safe_extract_zip(zf: zipfile.ZipFile, output_dir: Path) -> None:
+    root = output_dir.resolve()
+    for member in zf.infolist():
+        mode = member.external_attr >> 16
+        if mode & 0o170000 == 0o120000:
+            raise RuntimeError(f"Unsafe zip symlink: {member.filename}")
+    _assert_archive_members_safe([member.filename for member in zf.infolist()], root)
     zf.extractall(root)
 
 
@@ -209,6 +224,8 @@ def _extract_archive(path: Path, output_dir: Path) -> Path | None:
             raise RuntimeError("解压 .7z 需要安装 py7zr：pip install py7zr") from exc
         output_dir.mkdir(parents=True, exist_ok=True)
         with py7zr.SevenZipFile(path, mode="r") as z:
+            names = z.getnames() if hasattr(z, "getnames") else []
+            _assert_archive_members_safe([str(name) for name in names], output_dir)
             z.extractall(path=output_dir)
         return output_dir
     if suffix == ".rar":
@@ -219,6 +236,13 @@ def _extract_archive(path: Path, output_dir: Path) -> Path | None:
             raise RuntimeError("解压 .rar 需要安装 rarfile，并确保系统有 unrar/bsdtar。") from exc
         output_dir.mkdir(parents=True, exist_ok=True)
         with rarfile.RarFile(path) as rf:
+            infos = rf.infolist()
+            for member in infos:
+                is_link = getattr(member, "is_symlink", lambda: False)
+                mode = int(getattr(member, "mode", getattr(member, "filemode", 0)) or 0)
+                if (callable(is_link) and is_link()) or (mode & 0o170000 == 0o120000):
+                    raise RuntimeError(f"Unsafe rar symlink: {member.filename}")
+            _assert_archive_members_safe([str(member.filename) for member in infos], output_dir)
             rf.extractall(output_dir)
         return output_dir
     return None

@@ -36,6 +36,23 @@ class OperationalHardeningTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["missing"], [])
 
+    def test_production_config_rejects_workspace_secret_file_fallback(self):
+        with patch.dict(
+            os.environ,
+            {
+                "GIS_AGENT_ENV": "production",
+                "APP_SECRET_KEY": "configured",
+                "GIS_AGENT_ADMIN_TOKEN": "configured",
+                "GIS_AGENT_COOKIE_SECURE": "1",
+                "GIS_AGENT_ALLOW_WORKSPACE_SECRET_FILE": "1",
+            },
+            clear=False,
+        ):
+            result = validate_production_config()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("GIS_AGENT_ALLOW_WORKSPACE_SECRET_FILE=0", result["missing"])
+
     def test_audit_events_are_written_and_listed(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = CommercialService(Path(tmp))

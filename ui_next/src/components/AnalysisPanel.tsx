@@ -2,8 +2,9 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { Activity, AreaChart, CheckCircle2, ChevronRight, Download, FileText, RefreshCcw, X } from 'lucide-react';
 import { lazy, Suspense, useMemo, useState } from 'react';
 import { GlassCard } from './GlassCard';
-import { api, WorkspaceDashboard } from '@/lib/api';
+import { api, ResultPanel, WorkspaceDashboard } from '@/lib/api';
 import { buildAnalysisPanelView } from './analysisPanelData';
+import type { ChatContextPayload } from '@/lib/chatContext';
 
 const ModelMetricChart = lazy(() => import('./ModelMetricChart').then((m) => ({ default: m.ModelMetricChart })));
 
@@ -15,12 +16,12 @@ function ChartSkeleton() {
   return <div className="h-full overflow-hidden rounded-2xl bg-white/35 dark:bg-white/5"><div className="h-full w-1/2 animate-shimmer bg-gradient-to-r from-transparent via-white/50 to-transparent" /></div>;
 }
 
-export function AnalysisPanel({ userId = '' }: { userId?: string }) {
+export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextChange }: { userId?: string; resultPanel?: ResultPanel | null; onChatContextChange?: (patch: Partial<ChatContextPayload>) => void }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
   const [error, setError] = useState('');
-  const view = useMemo(() => buildAnalysisPanelView(dashboard || {}), [dashboard]);
+  const view = useMemo(() => buildAnalysisPanelView(dashboard || {}, resultPanel), [dashboard, resultPanel]);
 
   const refresh = async () => {
     setLoading(true);
@@ -41,7 +42,7 @@ export function AnalysisPanel({ userId = '' }: { userId?: string }) {
 
   return (
     <>
-      <button onClick={show} className="primary-button no-drag fixed bottom-5 left-[430px] z-40 gap-2"><AreaChart size={17} strokeWidth={1.5} /> 分析结果</button>
+      <button data-testid="analysis-panel-open" onClick={show} className="primary-button no-drag fixed bottom-5 left-[430px] z-40 gap-2"><AreaChart size={17} strokeWidth={1.5} /> {resultPanel?.has_results ? '处理结果' : '分析结果'}</button>
       <AnimatePresence>
         {open && (
           <motion.div className="fixed inset-0 z-[80] bg-slate-950/20 p-6 backdrop-blur-sm dark:bg-black/45" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
@@ -54,7 +55,7 @@ export function AnalysisPanel({ userId = '' }: { userId?: string }) {
                   </div>
                   <div className="flex gap-2">
                     <button onClick={refresh} disabled={loading} className="glass-button h-10 w-10 rounded-2xl p-0 disabled:opacity-50" title="刷新结果"><RefreshCcw size={17} className={loading ? 'animate-spin' : ''} /></button>
-                    <button onClick={() => setOpen(false)} className="glass-button h-10 w-10 rounded-2xl p-0" title="关闭"><X size={18} /></button>
+                    <button data-testid="analysis-panel-close" onClick={() => setOpen(false)} className="glass-button h-10 w-10 rounded-2xl p-0" title="关闭"><X size={18} /></button>
                   </div>
                 </div>
                 <div className="flex-1 overflow-y-auto p-5">
@@ -77,10 +78,19 @@ export function AnalysisPanel({ userId = '' }: { userId?: string }) {
                           </div>
                           {view.status && <span className="rounded-full border border-emerald-300/35 bg-emerald-400/10 px-2 py-1 text-[11px] font-black text-emerald-700 dark:text-emerald-200">{view.status}</span>}
                         </div>
-                        {view.bestModel && (
-                          <div className="mt-3 rounded-2xl bg-cyan-glow/10 px-3 py-2 text-xs leading-5 text-slate-600 dark:text-slate-300">
+                      {view.bestModel && (
+                          <button
+                            data-testid="analysis-model-result"
+                            type="button"
+                            disabled={!view.bestModel?.modelResultId}
+                            onClick={() => {
+                              if (!view.bestModel?.modelResultId) return;
+                              onChatContextChange?.({ selected_model_result_id: view.bestModel.modelResultId, last_visible_panel: 'analysis', user_focus_hint: 'selected model result' });
+                            }}
+                            className="mt-3 w-full rounded-2xl bg-cyan-glow/10 px-3 py-2 text-left text-xs leading-5 text-slate-600 transition hover:bg-cyan-glow/15 dark:text-slate-300"
+                          >
                             当前最优模型：<b>{view.bestModel.name}</b>，优先按 RMSE 最小判断。
-                          </div>
+                          </button>
                         )}
                       </div>
 
@@ -120,10 +130,37 @@ export function AnalysisPanel({ userId = '' }: { userId?: string }) {
                         </div>
                       )}
 
+                      {view.recommendations.length > 0 && (
+                        <div className="rounded-[22px] border border-cyan-glow/25 bg-cyan-glow/10 p-4 dark:border-cyan-glow/20 dark:bg-cyan-glow/5">
+                          <div className="mb-3 text-sm font-black">下一步建议</div>
+                          <div className="space-y-2">
+                            {view.recommendations.map((item, idx) => (
+                              <div key={`${item}-${idx}`} className="rounded-2xl bg-white/35 px-3 py-2 text-xs leading-5 text-slate-600 dark:bg-white/5 dark:text-slate-300">
+                                {item}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {view.downloads.length > 0 && (
                         <div className="space-y-2">
                           {view.downloads.map((item) => (
-                            <a key={item.url} href={item.url} target="_blank" rel="noreferrer" className="flex w-full items-center justify-between rounded-[18px] border border-white/30 bg-white/35 px-4 py-3 text-left text-sm font-bold transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10">
+                            <a
+                              data-testid="analysis-artifact-item"
+                              key={item.url}
+                              href={item.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              onClick={() => onChatContextChange?.({
+                                selected_artifact_id: item.artifactId || item.label || item.url,
+                                selected_artifact_type: item.kind,
+                                selected_artifact_path: item.url,
+                                last_visible_panel: 'analysis',
+                                user_focus_hint: `selected artifact ${item.label}`
+                              })}
+                              className="flex w-full items-center justify-between rounded-[18px] border border-white/30 bg-white/35 px-4 py-3 text-left text-sm font-bold transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+                            >
                               <span className="flex min-w-0 items-center gap-2"><Download size={16} className="shrink-0" /> <span className="truncate">{item.label}</span></span><ChevronRight size={16} className="shrink-0" />
                             </a>
                           ))}

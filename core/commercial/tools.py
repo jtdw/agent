@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 
 from langchain.tools import tool
 
+from ..api_security import require_admin_token
 from ..data_manager import DataManager
 from ..domestic_sources.downloader import download_direct_url, postprocess_download
 from ..domestic_sources.gscloud_adapter import (
@@ -35,33 +38,59 @@ def _json(data: dict | list) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
 
 
-def build_commercial_tools(manager: DataManager):
+def _confirmation_id(action: str, **params) -> str:
+    payload = json.dumps({"action": action, **params}, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _require_confirmation(action: str, provided: str = "", **params) -> dict | None:
+    expected = _confirmation_id(action, **params)
+    if str(provided or "").strip() == expected:
+        return None
+    return {
+        "ok": False,
+        "requires_confirmation": True,
+        "action": action,
+        "confirmed_action_id": expected,
+        "message": "This action starts browser automation or uses a platform account. Re-run with confirmed_action_id to proceed.",
+    }
+
+
+def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = False):
     commercial = CommercialService(manager.workdir)
 
+    def _require_admin(admin_token: str) -> None:
+        require_admin_token(os.getenv("GIS_AGENT_ADMIN_TOKEN", ""), admin_token)
+
     @tool
-    def generate_commercial_secret_key() -> str:
+    def generate_commercial_secret_key(admin_token: str = "") -> str:
         """生成一个 APP_SECRET_KEY。生产环境应把它放到系统环境变量，不要提交到代码仓库。"""
+        _require_admin(admin_token)
         return _json({"APP_SECRET_KEY": generate_fernet_key(), "usage": "将该值加入 .env 或系统环境变量 APP_SECRET_KEY。"})
 
     @tool
-    def commercial_system_status() -> str:
+    def commercial_system_status(admin_token: str = "") -> str:
         """查看商业化模块状态，包括数据库位置、密钥来源、用户数、任务数和平台账号数。"""
+        _require_admin(admin_token)
         return _json(commercial.status())
 
     @tool
-    def create_commercial_customer(email: str, plan: str = "free", user_id: str = "") -> str:
+    def create_commercial_customer(email: str, plan: str = "free", user_id: str = "", admin_token: str = "") -> str:
         """创建或更新一个商业版用户。plan 可选 free/basic/pro/team。"""
+        _require_admin(admin_token)
         return _json(commercial.create_user(email=email, plan=plan, user_id=user_id))
 
     @tool
-    def grant_commercial_plan(user_id: str, plan: str = "pro", platform_quota: int = -1, days: int = 30, amount_yuan: float = 0.0, note: str = "") -> str:
+    def grant_commercial_plan(user_id: str, plan: str = "pro", platform_quota: int = -1, days: int = 30, amount_yuan: float = 0.0, note: str = "", admin_token: str = "") -> str:
         """管理员在确认支付后，手动给用户开通套餐或额度。后续可接微信/支付宝回调自动调用同等逻辑。"""
+        _require_admin(admin_token)
         quota = None if int(platform_quota) < 0 else int(platform_quota)
         return _json(commercial.grant_plan(user_id=user_id, plan=plan, platform_quota=quota, days=days, amount_cents=int(float(amount_yuan) * 100), note=note))
 
     @tool
-    def list_commercial_customers(limit: int = 20) -> str:
+    def list_commercial_customers(limit: int = 20, admin_token: str = "") -> str:
         """列出最近商业版用户。"""
+        _require_admin(admin_token)
         return _json(commercial.list_users(limit=limit))
 
     @tool
@@ -75,18 +104,23 @@ def build_commercial_tools(manager: DataManager):
         return _json(commercial.list_user_credentials(user_id=user_id))
 
     @tool
-    def add_platform_source_account(source_key: str, username: str = "", password: str = "", label: str = "", daily_limit: int = 50, monthly_limit: int = 1000, storage_state_path: str = "") -> str:
+    def add_platform_source_account(source_key: str, username: str = "", password: str = "", label: str = "", daily_limit: int = 50, monthly_limit: int = 1000, storage_state_path: str = "", admin_token: str = "") -> str:
         """添加平台账号池账号。用于付费用户的代下载任务；账号密码会加密保存，不暴露给用户。"""
+        _require_admin(admin_token)
         return _json(commercial.add_platform_account(source_key=source_key, username=username, password=password, label=label, daily_limit=daily_limit, monthly_limit=monthly_limit, storage_state_path=storage_state_path))
 
     @tool
-    def list_platform_source_accounts(source_key: str = "", include_inactive: bool = False) -> str:
+    def list_platform_source_accounts(source_key: str = "", include_inactive: bool = False, admin_token: str = "") -> str:
         """列出平台账号池。只返回掩码，不返回明文密码。"""
+        _require_admin(admin_token)
         return _json(commercial.list_platform_accounts(source_key=source_key, include_inactive=include_inactive))
 
     @tool
-    def open_gscloud_customer_login_window(user_id: str, timeout_seconds: int = 300, headless: bool = False) -> str:
+    def open_gscloud_customer_login_window(user_id: str, timeout_seconds: int = 300, headless: bool = False, confirmed_action_id: str = "") -> str:
         """为某个用户打开地理空间数据云登录窗口，用户自己登录后保存 Cookie 到该用户凭据。不会阻塞对话。"""
+        confirmation = _require_confirmation("open_gscloud_customer_login_window", confirmed_action_id, user_id=user_id, timeout_seconds=timeout_seconds, headless=headless)
+        if confirmation:
+            return _json(confirmation)
         user = commercial.get_user(user_id)
         state_path = gscloud_user_state_path(manager.workdir, user["user_id"], "gscloud")
         login_job = start_gscloud_login_process(
@@ -105,8 +139,12 @@ def build_commercial_tools(manager: DataManager):
         })
 
     @tool
-    def open_gscloud_platform_login_window(account_id: str, timeout_seconds: int = 300, headless: bool = False) -> str:
+    def open_gscloud_platform_login_window(account_id: str, timeout_seconds: int = 300, headless: bool = False, confirmed_action_id: str = "", admin_token: str = "") -> str:
         """为平台账号打开地理空间数据云登录窗口。管理员登录后保存 Cookie 到平台账号池；普通用户不会看到账号密码。不会阻塞对话。"""
+        _require_admin(admin_token)
+        confirmation = _require_confirmation("open_gscloud_platform_login_window", confirmed_action_id, account_id=account_id, timeout_seconds=timeout_seconds, headless=headless)
+        if confirmation:
+            return _json(confirmation)
         account = commercial.get_platform_account_private(account_id)
         state_path = gscloud_platform_state_path(manager.workdir, account["account_id"], "gscloud")
         login_job = start_gscloud_login_process(
@@ -164,12 +202,27 @@ def build_commercial_tools(manager: DataManager):
         timeout_seconds: int = 1800,
         headless: bool = True,
         auto_load: bool = True,
+        confirmed_action_id: str = "",
     ) -> str:
         """在后台启动“自动计算区域分幅 + 自动批量下载地理空间数据云 ASTER GDEM”的任务。不会让用户自己选择分幅；默认 headless=True，不弹出网页。"""
         try:
             job = commercial.get_job(job_id)
             if job.get("source_key") != "gscloud":
                 raise ValueError("该工具仅支持 source_key=gscloud 的任务。")
+            confirmation = _require_confirmation(
+                "start_gscloud_dem_region_auto_tiles_job",
+                confirmed_action_id,
+                job_id=job_id,
+                region=region,
+                region_dataset=region_dataset,
+                dataset_id=dataset_id,
+                max_tiles=max_tiles,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+                auto_load=auto_load,
+            )
+            if confirmation:
+                return _json(confirmation)
             state_path = commercial.resolve_job_storage_state_path(job_id)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError("未找到可用登录态，请先完成用户或平台账号登录保存 Cookie。")
@@ -202,12 +255,25 @@ def build_commercial_tools(manager: DataManager):
         timeout_seconds: int = 1800,
         headless: bool = False,
         auto_load: bool = True,
+        confirmed_action_id: str = "",
     ) -> str:
         """非阻塞启动地理空间数据云 DEM 捕获下载窗口。浏览器在后台进程打开，不阻塞聊天。"""
         try:
             job = commercial.get_job(job_id)
             if job.get("source_key") != "gscloud":
                 raise ValueError("该工具仅支持 source_key=gscloud 的任务。")
+            confirmation = _require_confirmation(
+                "start_gscloud_dem_capture_job",
+                confirmed_action_id,
+                job_id=job_id,
+                start_url=start_url,
+                max_downloads=max_downloads,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+                auto_load=auto_load,
+            )
+            if confirmation:
+                return _json(confirmation)
             state_path = commercial.resolve_job_storage_state_path(job_id)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError("未找到可用登录态，请先完成平台账号或用户账号登录保存 Cookie。")
@@ -277,6 +343,7 @@ def build_commercial_tools(manager: DataManager):
                 path = Path(local_file_path or job.get("local_file_path") or "").expanduser()
                 if not path.exists():
                     raise FileNotFoundError(f"本地文件不存在: {path}")
+                manager._require_allowed_import_source(path)
                 commercial._update_job(job_id, status="running", progress=40, stage="importing_local_file")
                 result = postprocess_download(
                     manager=manager,
@@ -319,12 +386,25 @@ def build_commercial_tools(manager: DataManager):
         timeout_seconds: int = 1800,
         headless: bool = False,
         auto_load: bool = True,
+        confirmed_action_id: str = "",
     ) -> str:
         """运行地理空间数据云 DEM 商业任务：打开访问数据页，复用用户/平台 Cookie，等待点击下载并捕获文件。适合你截图里的下载按钮流程。"""
         job = commercial.get_job(job_id)
         try:
             if job.get("source_key") != "gscloud":
                 raise ValueError("该工具仅支持 source_key=gscloud 的任务。")
+            confirmation = _require_confirmation(
+                "run_gscloud_dem_capture_job",
+                confirmed_action_id,
+                job_id=job_id,
+                start_url=start_url,
+                max_downloads=max_downloads,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+                auto_load=auto_load,
+            )
+            if confirmation:
+                return _json(confirmation)
             commercial._update_job(job_id, status="running", progress=15, stage="opening_gscloud_page")
             state_path = commercial.resolve_job_storage_state_path(job_id)
             if not state_path or not Path(state_path).exists():
@@ -356,6 +436,7 @@ def build_commercial_tools(manager: DataManager):
         timeout_seconds: int = 1800,
         headless: bool = False,
         auto_load: bool = True,
+        confirmed_action_id: str = "",
     ) -> str:
         """尝试按地理空间数据云数据标识自动下载 DEM 分幅，例如 ASTGTM_N30E103。若页面结构变化失败，请改用 run_gscloud_dem_capture_job。"""
         job = commercial.get_job(job_id)
@@ -365,6 +446,18 @@ def build_commercial_tools(manager: DataManager):
             ids = parse_tile_ids(tile_ids)
             if not ids:
                 raise ValueError("请提供数据标识，例如 ASTGTM_N30E103, ASTGTM_N31E103。")
+            confirmation = _require_confirmation(
+                "run_gscloud_dem_auto_tiles_job",
+                confirmed_action_id,
+                job_id=job_id,
+                tile_ids=tile_ids,
+                dataset_id=dataset_id,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+                auto_load=auto_load,
+            )
+            if confirmation:
+                return _json(confirmation)
             state_path = commercial.resolve_job_storage_state_path(job_id)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError("未找到可用登录态，请先完成用户或平台账号登录保存 Cookie。")
@@ -386,9 +479,29 @@ def build_commercial_tools(manager: DataManager):
 
 
     @tool
-    def index_gscloud_aster_gdem_resources(account_mode: str = "platform", account_id: str = "", user_id: str = "", dataset_id: str = "310", max_pages: int = 0, headless: bool = True) -> str:
+    def index_gscloud_aster_gdem_resources(
+        account_mode: str = "platform",
+        account_id: str = "",
+        user_id: str = "",
+        dataset_id: str = "310",
+        max_pages: int = 0,
+        headless: bool = True,
+        confirmed_action_id: str = "",
+    ) -> str:
         """扫描地理空间数据云 ASTER/GDEM 访问数据页面的所有分页，建立本地资源索引。不会下载数据，只建立 tile_id -> 页面记录索引。"""
         try:
+            confirmation = _require_confirmation(
+                "index_gscloud_aster_gdem_resources",
+                confirmed_action_id,
+                account_mode=account_mode,
+                account_id=account_id,
+                user_id=user_id,
+                dataset_id=dataset_id,
+                max_pages=max_pages,
+                headless=headless,
+            )
+            if confirmation:
+                return _json(confirmation)
             state_path = ""
             mode = str(account_mode or "platform").lower()
             if mode in {"platform", "platform_account"}:
@@ -465,12 +578,27 @@ def build_commercial_tools(manager: DataManager):
         timeout_seconds: int = 1800,
         headless: bool = True,
         auto_load: bool = True,
+        confirmed_action_id: str = "",
     ) -> str:
         """先自动计算区域所需 ASTER GDEM 分幅，再按数据标识批量自动下载。max_tiles>0 可限制前 N 个分幅用于测试；默认 headless=True，不弹出网页。"""
         job = commercial.get_job(job_id)
         try:
             if job.get("source_key") != "gscloud":
                 raise ValueError("该工具仅支持 source_key=gscloud 的任务。")
+            confirmation = _require_confirmation(
+                "run_gscloud_dem_region_auto_tiles_job",
+                confirmed_action_id,
+                job_id=job_id,
+                region=region,
+                region_dataset=region_dataset,
+                dataset_id=dataset_id,
+                max_tiles=max_tiles,
+                timeout_seconds=timeout_seconds,
+                headless=headless,
+                auto_load=auto_load,
+            )
+            if confirmation:
+                return _json(confirmation)
             state_path = commercial.resolve_job_storage_state_path(job_id)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError("未找到可用登录态，请先完成用户或平台账号登录保存 Cookie。")
@@ -577,9 +705,7 @@ def build_commercial_tools(manager: DataManager):
         """列出已完成支付记录。可按用户过滤。"""
         return _json(commercial.list_payment_records(user_id=user_id, limit=limit))
 
-    return [
-        generate_commercial_secret_key,
-        commercial_system_status,
+    user_tools = [
         register_commercial_login_user,
         authenticate_commercial_login_user,
         commercial_permission_summary,
@@ -588,15 +714,9 @@ def build_commercial_tools(manager: DataManager):
         simulate_commercial_payment,
         list_mock_payment_orders,
         list_payment_records,
-        create_commercial_customer,
-        grant_commercial_plan,
-        list_commercial_customers,
         save_customer_source_credential,
         list_customer_source_credentials,
-        add_platform_source_account,
-        list_platform_source_accounts,
         open_gscloud_customer_login_window,
-        open_gscloud_platform_login_window,
         list_gscloud_login_window_jobs,
         get_gscloud_login_window_job,
         list_gscloud_capture_window_jobs,
@@ -617,3 +737,16 @@ def build_commercial_tools(manager: DataManager):
         get_commercial_download_job,
         list_commercial_download_jobs,
     ]
+
+    admin_tools = [
+        generate_commercial_secret_key,
+        commercial_system_status,
+        create_commercial_customer,
+        grant_commercial_plan,
+        list_commercial_customers,
+        add_platform_source_account,
+        list_platform_source_accounts,
+        open_gscloud_platform_login_window,
+    ]
+
+    return user_tools + (admin_tools if include_admin_tools else [])

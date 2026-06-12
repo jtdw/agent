@@ -16,9 +16,23 @@ async function loadTs(path) {
 
 const geometry = await loadTs('src/components/mapGeometry.ts');
 const commands = await loadTs('src/components/mapTextCommands.ts');
+const mapStageSource = await readFile('src/components/MapStage.tsx', 'utf8');
+const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(Math.round(geometry.distanceMeters([0, 0], [0, 1])), 111195);
 assert.equal(geometry.drawGeoJson([[0, 0], [0, 1], [1, 1]], 'polygon').features.length, 5);
+assert.equal(mapStageSource.includes('demo_aoi'), false);
+assert.equal(mapStageSource.includes('raiseStationLayers'), true);
+assert.equal(mapStageSource.includes('setStationMarkers'), true);
+assert.equal(mapStageSource.includes("id: 'station_points_core'"), false);
+assert.equal(mapStageSource.includes('SvgDataFallback'), false);
+assert.match(mapStageSource, /function normalizeMapBounds/);
+assert.match(mapStageSource, /function safeFitBounds/);
+assert.match(mapStageSource, /clientWidth|offsetWidth/);
+assert.match(mapStageSource, /Number\.isFinite/);
+assert.equal(mapStageSource.includes('right: 430'), false);
+assert.equal(layerPanelSource.includes('图层透明度'), false);
+assert.equal(layerPanelSource.includes('图例'), false);
 assert.match(geometry.measurementLabel([[0, 0], [0, 1]], 'line'), /^长度/);
 assert.match(geometry.measurementLabel([[0, 0], [0, 1], [1, 1]], 'polygon'), /^面积/);
 

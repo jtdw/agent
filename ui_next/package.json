@@ -5,32 +5,42 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5173",
+    "test": "node --test \"tests/*.test.mjs\"",
+    "test:analysis-model-results": "node tests/analysisModelResults.test.mjs",
     "test:layer-policy": "node tests/mapLayerPolicy.test.mjs",
     "test:local-library": "node tests/localLibraryFilters.test.mjs",
     "test:map-upgrades": "node tests/mapUpgrades.test.mjs",
     "test:research-workflow": "node tests/researchWorkflow.test.mjs",
     "test:analysis-panel": "node tests/analysisPanelData.test.mjs",
+    "test:chat-message-content": "node tests/chatMessageContent.test.mjs",
+    "test:chat-panel-experience": "node tests/chatPanelExperience.test.mjs",
+    "test:chat-persistence": "node tests/chatPersistence.test.mjs",
+    "test:product-console": "node tests/productConsoleData.test.mjs",
+    "test:task-outcome-experience": "node tests/taskOutcomeExperience.test.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:real": "playwright test -c playwright.real-backend.config.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
-    "react": "latest",
-    "react-dom": "latest",
+    "clsx": "latest",
     "framer-motion": "latest",
     "lucide-react": "latest",
-    "clsx": "latest",
-    "tailwind-merge": "latest",
     "maplibre-gl": "latest",
-    "recharts": "latest"
+    "react": "latest",
+    "react-dom": "latest",
+    "recharts": "latest",
+    "tailwind-merge": "latest",
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
-    "tailwindcss": "^4.1.17",
+    "@playwright/test": "^1.60.0",
     "@tailwindcss/vite": "^4.1.17",
     "@types/react": "latest",
-    "@types/react-dom": "latest"
+    "@types/react-dom": "latest",
+    "tailwindcss": "^4.1.17"
   },
   "description": "Web-only React UI for GIS Agent. Electron and desktop entrypoints removed."
 }

@@ -20,6 +20,8 @@ def validate_production_config() -> dict[str, Any]:
             missing.append("GIS_AGENT_ADMIN_TOKEN")
         if not _truthy_env("GIS_AGENT_COOKIE_SECURE"):
             missing.append("GIS_AGENT_COOKIE_SECURE=1")
+        if _truthy_env("GIS_AGENT_ALLOW_WORKSPACE_SECRET_FILE"):
+            missing.append("GIS_AGENT_ALLOW_WORKSPACE_SECRET_FILE=0")
         if _truthy_env("GIS_AGENT_ENABLE_MOCK_PAYMENT"):
             warnings.append("GIS_AGENT_ENABLE_MOCK_PAYMENT should stay disabled in production")
     return {

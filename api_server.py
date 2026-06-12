@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlencode
+from zipfile import ZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,7 +18,22 @@ from pydantic import BaseModel, EmailStr, Field
 from core.config import Settings, load_settings
 from core.service import GISWorkspaceService
 from core.commercial.service import CommercialService, PLAN_PRESETS
-from core.api_security import require_admin_token, require_authenticated_user, require_resource_owner
+from core.api_security import optional_authenticated_session, require_admin_token, require_authenticated_user, require_resource_owner
+from core.api_helpers import (
+    SESSION_COOKIE_ID,
+    SESSION_COOKIE_TOKEN,
+    build_result_panel as _api_build_result_panel,
+    cors_origins as _cors_origins,
+    download_requires_login_result as _api_download_requires_login_result,
+    relative_artifact_url,
+    relative_shared_download_url,
+    request_admin_token as _request_admin_token,
+    request_session as _request_session,
+    safe_key as _safe_key,
+)
+from core.archive_utils import safe_extract_zip
+from core.chat_response import attach_chat_state, build_chat_response
+from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 from core.api_utils import api_guard, resolve_child_path
 from core.local_library import LocalFileLibrary
 from core.station_data import find_station_archives, parse_ismn_station_zip
@@ -23,6 +42,7 @@ from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
 from core.ops_config import require_valid_production_config, validate_production_config
+from core.llm_config import check_llm_provider_health, validate_llm_config
 
 try:
     from core.commercial.tile_jobs import list_gscloud_tile_jobs, start_gscloud_tile_process
@@ -41,25 +61,12 @@ except Exception:  # pragma: no cover
     start_gscloud_modnd1d_process = None
     start_gscloud_sentinel2_process = None
 
-app = FastAPI(title="GIS Agent Web API", version="1.4.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:4173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 base_settings = load_settings()
 commercial_service = CommercialService(base_settings.workdir)
 local_library_root = Path(os.getenv("GIS_AGENT_LOCAL_LIBRARY_DIR", str(base_settings.workdir / "local_library"))).expanduser()
 local_library = LocalFileLibrary(local_library_root)
 _workspace_services: dict[str, GISWorkspaceService] = {}
+_LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE: dict | None = None
 MAX_UPLOAD_FILES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_FILES", "30") or 30)
 MAX_UPLOAD_BYTES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_MB", "300") or 300) * 1024 * 1024
 SESSION_COOKIE_ID = "gis_agent_session_id"
@@ -90,15 +97,25 @@ except Exception:
     pass
 
 
-@app.on_event("startup")
 def _startup_operational_checks() -> None:
     require_valid_production_config()
     commercial_service.recover_interrupted_jobs()
 
 
-def _safe_key(value: str | None) -> str:
-    raw = (value or "anonymous").strip() or "anonymous"
-    return re.sub(r"[^A-Za-z0-9_.@-]+", "_", raw)[:96]
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _startup_operational_checks()
+    yield
+
+
+app = FastAPI(title="GIS Agent Web API", version="1.4.0", lifespan=_lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _user_workdir(user_id: str | None) -> Path:
@@ -123,23 +140,6 @@ def workspace_for(user_id: str | None = None) -> GISWorkspaceService:
         settings.ensure_dirs()
         _workspace_services[key] = GISWorkspaceService(settings=settings)
     return _workspace_services[key]
-
-
-def _request_session(request: Request) -> tuple[str, str]:
-    return (
-        str(request.headers.get("x-session-id") or request.cookies.get(SESSION_COOKIE_ID) or request.query_params.get("session_id") or "").strip(),
-        str(request.headers.get("x-session-token") or request.cookies.get(SESSION_COOKIE_TOKEN) or request.query_params.get("session_token") or "").strip(),
-    )
-
-
-def _request_admin_token(request: Request) -> str:
-    value = str(request.headers.get("x-admin-token") or "").strip()
-    if value:
-        return value
-    auth = str(request.headers.get("authorization") or "").strip()
-    if auth.lower().startswith("bearer "):
-        return auth.split(" ", 1)[1].strip()
-    return str(request.query_params.get("admin_token") or "").strip()
 
 
 def _set_session_cookies(response: Response, session: dict) -> None:
@@ -235,6 +235,7 @@ class AskIn(BaseModel):
     user_id: str = ""
     session_id: str = ""
     session_token: str = ""
+    frontend_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChatSessionIn(BaseModel):
@@ -350,24 +351,21 @@ def _safe_layer_id(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]+", "_", value or "layer").strip("_")[:80] or "layer"
 
 
-def _relative_artifact_url(service: GISWorkspaceService, file_path: str) -> str:
-    path = Path(file_path).resolve()
-    workdir = service.manager.workdir.resolve()
-    try:
-        rel = path.relative_to(workdir)
-    except Exception:
-        return ""
-    user_key = _safe_key(str(workdir.name))
-    # The path itself remains checked server-side by /api/files/artifact.
-    rel_url_path = str(rel).replace("\\", "/")
-    return f"/api/files/artifact?{urlencode({'user_id': user_key, 'path': rel_url_path})}"
+def _relative_artifact_url(service: GISWorkspaceService, file_path: str, user_id: str = "") -> str:
+    return relative_artifact_url(service.manager.workdir, file_path, user_id=user_id)
 
 
-def _decorate_dashboard(service: GISWorkspaceService) -> dict:
+def _decorate_dashboard(service: GISWorkspaceService, user_id: str = "") -> dict:
     data = service.dashboard()
     for item in data.get("artifacts", []):
         if isinstance(item, dict) and item.get("path"):
-            item["download_url"] = _relative_artifact_url(service, item["path"])
+            item["download_url"] = _relative_artifact_url(service, item["path"], user_id=user_id)
+    for result in data.get("model_results", []):
+        if not isinstance(result, dict):
+            continue
+        for artifact in result.get("artifacts", []):
+            if isinstance(artifact, dict) and artifact.get("path"):
+                artifact["download_url"] = _relative_artifact_url(service, artifact["path"], user_id=user_id)
     latest = data.get("latest_pipeline") if isinstance(data.get("latest_pipeline"), dict) else {}
     summary = latest.get("summary") if isinstance(latest, dict) and isinstance(latest.get("summary"), dict) else {}
     reports = summary.get("reports") if isinstance(summary.get("reports"), dict) else {}
@@ -389,21 +387,62 @@ def _decorate_dashboard(service: GISWorkspaceService) -> dict:
             analysis["gcp_metric_rows"] = service.manager.preview_table_rows(gcp_metrics_dataset, rows=12)
         except Exception:
             analysis["gcp_metric_rows"] = []
+    if not analysis["metric_rows"]:
+        model_rows = []
+        for result in data.get("model_results", []):
+            if not isinstance(result, dict):
+                continue
+            metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+            if metrics:
+                model_rows.append({"model": result.get("model") or result.get("output_prefix") or "model", **metrics})
+        analysis["metric_rows"] = model_rows[:12]
+        if model_rows and not analysis["metrics_dataset"]:
+            analysis["metrics_dataset"] = str(data.get("model_results", [{}])[0].get("metrics_dataset") or "")
     data["analysis"] = analysis
     return data
 
 
+def _build_result_panel(response: dict, dashboard: dict) -> dict:
+    return _api_build_result_panel(response, dashboard)
+    outcome = response.get("task_outcome") if isinstance(response.get("task_outcome"), dict) else {}
+    files: list[dict] = []
+    seen: set[str] = set()
+    sources: list[dict] = []
+    for result in dashboard.get("model_results", []) if isinstance(dashboard.get("model_results"), list) else []:
+        if isinstance(result, dict):
+            sources.extend([item for item in result.get("artifacts", []) if isinstance(item, dict)])
+    sources.extend([item for item in dashboard.get("artifacts", []) if isinstance(item, dict)] if isinstance(dashboard.get("artifacts"), list) else [])
+    for item in sources:
+        path = str(item.get("path") or item.get("display_path") or "")
+        url = str(item.get("download_url") or "")
+        key = url or path
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        files.append(
+            {
+                "label": str(item.get("label") or item.get("name") or Path(path).name or "result file"),
+                "path": path,
+                "download_url": url,
+                "kind": str(item.get("type") or item.get("category") or "artifact"),
+            }
+        )
+    return {
+        "has_results": bool(outcome.get("has_results") or files),
+        "title": str(outcome.get("summary") or "Processing results"),
+        "files": files[:12],
+        "result_paths": outcome.get("result_paths") if isinstance(outcome.get("result_paths"), list) else [],
+        "recommendations": outcome.get("recommendations") if isinstance(outcome.get("recommendations"), list) else [],
+    }
+
+
+def _attach_result_panel(service: GISWorkspaceService, user_id: str, response: dict) -> dict:
+    dashboard = _decorate_dashboard(service, user_id=user_id)
+    return {**response, "result_panel": _build_result_panel(response, dashboard)}
+
+
 def _relative_shared_download_url(file_path: str, user_id: str = "", job_id: str = "") -> str:
-    path = Path(file_path or "").resolve()
-    if not path.exists() or not path.is_file():
-        return ""
-    workdir = base_settings.workdir.resolve()
-    try:
-        rel = path.relative_to(workdir)
-    except Exception:
-        return ""
-    rel_url_path = str(rel).replace("\\", "/")
-    return f"/api/downloads/artifact?{urlencode({'user_id': _safe_key(user_id), 'job_id': job_id, 'path': rel_url_path})}"
+    return relative_shared_download_url(base_settings.workdir, file_path, user_id=user_id, job_id=job_id)
 
 
 def _gscloud_product_key_from_resource(value: str) -> str:
@@ -442,7 +481,7 @@ def _raster_preview_path(service: GISWorkspaceService, dataset_name: str) -> Pat
     return service.manager.temp_dir / "map_previews" / f"{safe_name}.png"
 
 
-def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str) -> dict:
+def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str, user_id: str = "") -> dict:
     import numpy as np
     import rasterio
     from PIL import Image
@@ -477,38 +516,107 @@ def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str) -> d
         bounds = tuple(src.bounds)
         if src.crs:
             bounds = transform_bounds(src.crs, "EPSG:4326", *bounds, densify_pts=21)
+    params = {"dataset_name": dataset_name}
+    if str(user_id or "").strip():
+        params["user_id"] = _safe_key(user_id)
     return {
         "preview_path": str(preview_path),
-        "preview_url": f"/api/map/raster-preview?user_id={_safe_key(service.manager.workdir.name)}&dataset_name={dataset_name}",
+        "preview_url": f"/api/map/raster-preview?{urlencode(params)}",
         "bounds": [float(v) for v in bounds],
     }
 
 
-def _workspace_map_layers(service: GISWorkspaceService) -> dict:
+def _read_vector_for_map(path: Path):
+    import geopandas as gpd
+
+    if path.suffix.lower() == ".zip":
+        with ZipFile(path) as archive:
+            shp_names = [name for name in archive.namelist() if name.lower().endswith(".shp")]
+            if not shp_names:
+                raise FileNotFoundError(f"zip archive has no shapefile: {path}")
+            shp_name = sorted(shp_names, key=lambda item: ("/" in item, item))[0]
+            with tempfile.TemporaryDirectory(prefix="gis-agent-map-vector-") as temp_dir:
+                safe_extract_zip(archive, Path(temp_dir))
+                return gpd.read_file(Path(temp_dir) / shp_name)
+    return gpd.read_file(path)
+
+
+def _vector_map_layer(name: str, gdf, *, layer_id: str = "", kind: str = "", meta: dict | None = None) -> dict | None:
+    if gdf.empty:
+        return None
+    if gdf.crs:
+        gdf = gdf.to_crs("EPSG:4326")
+    if len(gdf) > 2000:
+        gdf = gdf.head(2000)
+    return {
+        "id": layer_id or _safe_layer_id(name),
+        "name": name,
+        "type": "vector",
+        "kind": kind or _dataset_map_kind(name, "vector"),
+        "bounds": [float(v) for v in gdf.total_bounds.tolist()],
+        "feature_count": int(len(gdf)),
+        "geojson": json.loads(gdf.to_json()),
+        "meta": meta or {},
+    }
+
+
+def _local_library_boundary_layer() -> dict | None:
+    global _LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE
+    if _LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE is not None:
+        return json.loads(json.dumps(_LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE))
+    try:
+        item = local_library.get_item("lib_shandianhe_basin_boundary_full")
+        path = Path(str(item.get("absolute_path") or ""))
+        gdf = _read_vector_for_map(path)
+        layer = _vector_map_layer(
+            "闪电河流域边界",
+            gdf,
+            layer_id="local_library_shandianhe_basin_boundary",
+            kind="boundary",
+            meta={"source": "local_library", "item_id": item.get("item_id")},
+        )
+        if layer:
+            _LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE = json.loads(json.dumps(layer))
+        return layer
+    except Exception:
+        return None
+
+
+def _dedupe_boundary_layers(layers: list[dict]) -> list[dict]:
+    seen: set[tuple[float, float, float, float]] = set()
+    result: list[dict] = []
+    for layer in layers:
+        if layer.get("kind") != "boundary":
+            result.append(layer)
+            continue
+        bounds = layer.get("bounds")
+        if not isinstance(bounds, list) or len(bounds) != 4:
+            result.append(layer)
+            continue
+        key = tuple(round(float(value), 6) for value in bounds)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(layer)
+    return result
+
+
+def _workspace_map_layers(service: GISWorkspaceService, user_id: str = "") -> dict:
     layers: list[dict] = []
+    has_boundary = False
     for item in service.manager.list_datasets():
         name = str(item.get("name") or "")
         data_type = str(item.get("type") or "")
         meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
         if data_type == "vector":
             gdf = service.manager.get_vector(name)
-            if gdf.empty:
+            layer = _vector_map_layer(name, gdf, kind=_dataset_map_kind(name, data_type), meta=meta)
+            if not layer:
                 continue
-            if gdf.crs:
-                gdf = gdf.to_crs("EPSG:4326")
-            if len(gdf) > 2000:
-                gdf = gdf.head(2000)
-            layers.append({
-                "id": _safe_layer_id(name),
-                "name": name,
-                "type": "vector",
-                "kind": _dataset_map_kind(name, data_type),
-                "bounds": [float(v) for v in gdf.total_bounds.tolist()],
-                "feature_count": int(len(gdf)),
-                "geojson": gdf.__geo_interface__,
-            })
+            layers.append(layer)
+            has_boundary = has_boundary or layer.get("kind") == "boundary"
         elif data_type == "raster":
-            preview = _ensure_raster_preview(service, name)
+            preview = _ensure_raster_preview(service, name, user_id=user_id)
             layers.append({
                 "id": _safe_layer_id(name),
                 "name": name,
@@ -518,11 +626,17 @@ def _workspace_map_layers(service: GISWorkspaceService) -> dict:
                 "preview_url": preview["preview_url"],
                 "meta": meta,
             })
+    if not has_boundary:
+        fallback = _local_library_boundary_layer()
+        if fallback:
+            layers.insert(0, fallback)
+    layers = _dedupe_boundary_layers(layers)
     return {"layers": layers}
 
 
 @app.get("/api/status")
 def status():
+    llm_validation = validate_llm_config()
     return {
         "ok": True,
         "service": "GIS Agent Web API",
@@ -531,7 +645,20 @@ def status():
         "desktop_removed": True,
         "local_library": {"enabled": True, "root": str(local_library.root)},
         "tianditu": {"enabled": bool(os.getenv("TIANDITU_TOKEN", "").strip())},
+        "llm_status": {
+            "status": llm_validation.get("status"),
+            "provider": llm_validation.get("provider"),
+            "model": llm_validation.get("model"),
+            "api_key_present": llm_validation.get("api_key_present"),
+            "intent_classifier": llm_validation.get("enable_llm_intent_classifier"),
+            "fallback_to_rule_classifier": llm_validation.get("fallback_to_rule_classifier"),
+        },
     }
+
+
+@app.get("/api/llm/health")
+def llm_health(network: bool = Query(default=False)):
+    return check_llm_provider_health(skip_network=not network)
 
 
 @app.get("/api/ops/config")
@@ -589,16 +716,21 @@ def map_stations(request: Request, user_id: str = Query(default="")):
 
 @app.get("/api/map/layers")
 def map_layers(request: Request, user_id: str = Query(default="")):
-    return guard(lambda: _workspace_map_layers(workspace_for(_require_request_user_if_present(request, user_id))))
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        return _workspace_map_layers(workspace_for(authorized_user_id), user_id=authorized_user_id)
+
+    return guard(run)
 
 
 @app.get("/api/map/raster-preview")
 def map_raster_preview(request: Request, user_id: str = Query(default=""), dataset_name: str = Query(...)):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, user_id))
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        service = workspace_for(authorized_user_id)
         target = _raster_preview_path(service, dataset_name)
         if not target.exists():
-            _ensure_raster_preview(service, dataset_name)
+            _ensure_raster_preview(service, dataset_name, user_id=authorized_user_id)
         if not target.exists():
             raise FileNotFoundError(f"raster preview not found: {dataset_name}")
         return FileResponse(str(target), media_type="image/png", filename=target.name)
@@ -637,7 +769,7 @@ def validate(body: ValidateIn):
 def me(request: Request):
     def run():
         session_id, session_token = _request_session(request)
-        return commercial_service.validate_session(session_id, session_token)
+        return optional_authenticated_session(commercial_service, session_id=session_id, session_token=session_token)
 
     return guard(run)
 
@@ -720,12 +852,28 @@ def delete_chat_session(body: ChatSessionIn, request: Request):
     return guard(run)
 
 
+@app.post("/api/chat/sessions/clear")
+def clear_chat_session(body: ChatSessionIn, request: Request):
+    def run():
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
+        if body.session_id:
+            service.use_session_or_current(body.session_id)
+        service.clear_current_chat()
+        return {
+            "current_session_id": service.current_session_id,
+            "sessions": service.list_sessions(),
+            "messages": service.current_messages(),
+        }
+
+    return guard(run)
+
+
 @app.post("/api/chat/retry")
 def retry_chat_message(body: ChatRetryIn, request: Request):
     def run():
         service = workspace_for(_require_request_user_if_present(request, body.user_id))
         if body.session_id:
-            service.switch_session(body.session_id)
+            service.use_session_or_current(body.session_id)
         result = service.edit_user_message_and_retry(body.message_id, body.content)
         return {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id}
 
@@ -1775,199 +1923,92 @@ def _format_download_job_log_text(job: dict, scene_jobs: list[dict], tile_jobs: 
     return "\n".join(lines) + "\n"
 
 
+def _download_requires_login_result(prompt: str) -> dict:
+    return _api_download_requires_login_result(prompt)
+    request = str(prompt or "").strip()
+    return {
+        "reply": (
+            "这个请求涉及平台数据下载或下载任务状态，需先登录账号后才能继续。"
+            "我可以先保留你的下载意图；登录后请重新发送这句话，或在右侧“数据下载”区域选择产品、区域并提交。"
+            f"\n\n当前识别到的请求：{request or '下载数据'}"
+        ),
+        "model": "direct-router",
+        "reason": "download_requires_login",
+    }
+
+
 @app.post("/api/chat/ask")
 def ask(body: AskIn, request: Request):
     def run():
         user_id = _require_request_user_if_present(request, body.user_id)
         service = workspace_for(user_id)
+        def finalize(response: dict) -> dict:
+            return _attach_result_panel(service, user_id, response)
         if body.session_id:
-            service.switch_session(body.session_id)
+            service.use_session_or_current(body.session_id)
+        service.apply_frontend_context(body.frontend_context)
         if _is_commercial_download_status_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _format_commercial_download_status(body.prompt, user_id)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "tile_job": result.get("tile_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "tile_job")))
         intent_route = route_gscloud_download_intent(body.prompt)
         if intent_route.kind == "clarify":
             result = {
                 "reply": intent_route.clarification,
                 "model": "direct-router",
                 "reason": "gscloud_intent_clarification",
+                "intent_route": intent_route.__dict__,
             }
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={
-                        "model": result.get("model"),
-                        "reason": result.get("reason"),
-                        "intent_route": intent_route.__dict__,
-                    },
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "intent_route")))
         if intent_route.kind == "matched":
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_gscloud_intent_route_from_chat(user_id, body.prompt, intent_route)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={
-                        "model": result.get("model"),
-                        "reason": result.get("reason"),
-                        "job": result.get("job"),
-                        "scene_job": result.get("scene_job"),
-                        "tile_job": result.get("tile_job"),
-                        "intent_route": intent_route.__dict__,
-                    },
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            result["intent_route"] = intent_route.__dict__
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job", "tile_job", "intent_route")))
         if _is_gscloud_modl1d_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_modl1d_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "scene_job": result.get("scene_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job")))
         if _is_gscloud_modnd1d_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_modnd1d_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "scene_job": result.get("scene_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job")))
         if _is_gscloud_modev1f_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_modev1f_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "scene_job": result.get("scene_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job")))
         if _is_gscloud_mod021km_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_mod021km_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "scene_job": result.get("scene_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job")))
         if _is_gscloud_sentinel2_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_sentinel2_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "scene_job": result.get("scene_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job")))
         if _is_gscloud_landsat_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_landsat8_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                if not service.current_messages():
-                    service.manager.database.rename_conversation(service.current_session_id, service._default_title(body.prompt))
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(
-                    service.current_session_id,
-                    "assistant",
-                    result["reply"],
-                    meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job"), "scene_job": result.get("scene_job")},
-                )
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job", "scene_job")))
         if _is_gscloud_dem_download_prompt(body.prompt):
+            if not user_id:
+                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
             result = _submit_direct_gscloud_dem_from_chat(user_id, body.prompt)
-            try:
-                if not service.current_session_id:
-                    service.current_session_id = service._ensure_session()
-                service.manager.database.add_message(service.current_session_id, "user", body.prompt)
-                service.manager.database.add_message(service.current_session_id, "assistant", result["reply"], meta={"model": result.get("model"), "reason": result.get("reason"), "job": result.get("job")})
-            except Exception:
-                pass
-            return {"reply": result["reply"], "model": result.get("model"), "reason": result.get("reason")}
+            return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "job")))
         imported = _maybe_import_library_items_for_prompt(service, body.prompt)
         library_hint = local_library.summary_text(max_items=16)
         prompt = body.prompt
         if imported:
             prompt += "\n\n系统已根据你的指令从本地文件库预加载以下数据：\n" + "\n".join(f"- {m}" for m in imported)
         prompt += "\n\n【本地文件库上下文】\n" + library_hint + "\n如用户需要内置基础数据，请优先建议或调用本地文件库中已有条目；不要虚构不存在的数据。"
-        return service.ask(prompt, visible_prompt=body.prompt)
+        return finalize(attach_chat_state(service, service.ask(prompt, visible_prompt=body.prompt, frontend_context=body.frontend_context)))
 
     return guard(run)
 
@@ -1989,15 +2030,17 @@ async def upload_files(request: Request, user_id: str = Form(default=""), files:
             payload.append((file.filename or "uploaded.bin", data))
         return payload
 
+    authorized_user_id = _require_request_user_if_present(request, user_id)
     payload = await read_all()
     if not payload:
         raise HTTPException(status_code=400, detail="没有读取到有效上传文件。")
-    authorized_user_id = _require_request_user(request, user_id)
-
     def run():
         service = workspace_for(authorized_user_id)
         messages = service.upload_bytes_batch(payload)
-        return {"ok": True, "count": len(payload), "messages": messages, "dashboard": _decorate_dashboard(service)}
+        result = {"ok": True, "count": len(payload), "messages": messages}
+        dashboard_data = _decorate_dashboard(service, user_id=authorized_user_id)
+        outcome = build_task_outcome("upload", result, dashboard=dashboard_data)
+        return {**result, "dashboard": dashboard_data, "task_outcome": outcome, "outcome_markdown": format_task_outcome_markdown(outcome)}
 
     return guard(run)
 
@@ -2021,14 +2064,17 @@ def rescan_local_library():
 @app.post("/api/local-library/import")
 def import_local_library(body: LocalLibraryImportIn, request: Request):
     def run():
-        user_id = _require_request_user(request, body.user_id)
+        user_id = _require_request_user_if_present(request, body.user_id)
         if not body.item_ids:
             raise ValueError("请选择至少一个本地文件库条目。")
         service = workspace_for(user_id)
         messages: list[str] = []
         for item in local_library.resolve_paths(body.item_ids):
             messages.append(service.import_local_library_item(item))
-        return {"ok": True, "count": len(messages), "messages": messages, "dashboard": _decorate_dashboard(service)}
+        result = {"ok": True, "count": len(messages), "messages": messages}
+        dashboard_data = _decorate_dashboard(service, user_id=user_id)
+        outcome = build_task_outcome("upload", result, dashboard=dashboard_data)
+        return {**result, "dashboard": dashboard_data, "task_outcome": outcome, "outcome_markdown": format_task_outcome_markdown(outcome)}
 
     return guard(run)
 
@@ -2037,7 +2083,7 @@ def import_local_library(body: LocalLibraryImportIn, request: Request):
 def dashboard(request: Request, user_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        data = _decorate_dashboard(workspace_for(authorized_user_id))
+        data = _decorate_dashboard(workspace_for(authorized_user_id), user_id=authorized_user_id)
         data["local_library"] = local_library.list_items()
         return data
 
@@ -2047,10 +2093,10 @@ def dashboard(request: Request, user_id: str = Query(default="")):
 @app.post("/api/workspace/export")
 def export_workspace(body: ExportIn, request: Request):
     def run():
-        user_id = _require_request_user(request, body.user_id)
+        user_id = _require_request_user_if_present(request, body.user_id)
         service = workspace_for(user_id)
         result = service.export_results(mode=body.mode)
-        result["download_url"] = _relative_artifact_url(service, result["zip_path"])
+        result["download_url"] = _relative_artifact_url(service, result["zip_path"], user_id=user_id)
         _audit(request, user_id=user_id, action="workspace.export", resource_type="artifact", resource_id=str(result.get("zip_path") or ""), detail={"mode": body.mode, "file_count": result.get("file_count")})
         return result
 
@@ -2060,7 +2106,7 @@ def export_workspace(body: ExportIn, request: Request):
 @app.get("/api/files/artifact")
 def artifact(request: Request, user_id: str = Query(default=""), path: str = Query(...)):
     def run():
-        authorized_user_id = _require_request_user(request, user_id)
+        authorized_user_id = _require_request_user_if_present(request, user_id)
         service = workspace_for(authorized_user_id)
         target = resolve_child_path(service.manager.workdir, path)
         _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="workspace_file", resource_id=path)

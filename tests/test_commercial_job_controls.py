@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from core.commercial.service import CommercialService
@@ -33,7 +34,11 @@ class CommercialJobControlTests(unittest.TestCase):
         self.assertEqual(reserved_account["used_today"], 1)
         self.assertEqual(job["quota_reserved"], 1)
 
-        done = self.service.run_job_with_result(job["job_id"], {"path": "result.zip"})
+        result_path = self.workdir / "downloads" / "result.zip"
+        result_path.parent.mkdir()
+        with zipfile.ZipFile(result_path, "w") as archive:
+            archive.writestr("result.txt", "ok")
+        done = self.service.run_job_with_result(job["job_id"], {"path": str(result_path)})
         charged_user = self.service.get_user(self.user["user_id"])
         charged_account = self.service.list_platform_accounts("gscloud")[0]
 

@@ -1,0 +1,27 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "county": "A",
+        "pop_density": 10.0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [100.0, 30.0]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "county": "B",
+        "pop_density": 25.0
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [101.0, 31.0]
+      }
+    }
+  ]
+}
