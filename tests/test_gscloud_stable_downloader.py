@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from core.domestic_sources.gscloud_stable_downloader import (
+    _tile_search_terms,
     existing_gscloud_tile_downloads,
     per_tile_download_timeout_ms,
 )
@@ -25,6 +26,12 @@ class GSCloudStableDownloaderTests(unittest.TestCase):
     def test_single_tile_wait_is_bounded(self) -> None:
         self.assertEqual(per_tile_download_timeout_ms(1800), 120_000)
         self.assertEqual(per_tile_download_timeout_ms(30), 30_000)
+
+    def test_tile_search_tries_full_identifier_then_coordinate_code(self) -> None:
+        self.assertEqual(
+            _tile_search_terms("astgtm_n30e104"),
+            ["ASTGTM_N30E104", "N30E104"],
+        )
 
 
 if __name__ == "__main__":
