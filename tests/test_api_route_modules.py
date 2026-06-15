@@ -22,6 +22,11 @@ class ApiRouteModuleTests(unittest.TestCase):
         self.assertEqual(set(modules), expected)
         self.assertEqual(set(modules.values()), {"api.routes.data_sources"})
 
+    def test_download_resume_route_is_owned_by_downloads_router(self) -> None:
+        route = next(route for route in api_server.app.routes if getattr(route, "path", "") == "/api/download-jobs/{job_id}/resume")
+
+        self.assertEqual(route.endpoint.__module__, "api.routes.downloads")
+
 
 if __name__ == "__main__":
     unittest.main()

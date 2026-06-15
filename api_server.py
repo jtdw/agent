@@ -48,6 +48,8 @@ from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OL
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
 from services.data_sources.gscloud_accounts import GSCloudAccountService
 from api.routes.data_sources import create_data_sources_router
+from api.routes.downloads import create_downloads_router
+from services.downloads.resume import DownloadResumeService
 from core.ops_config import require_valid_production_config, validate_production_config
 from core.llm_config import check_llm_provider_health, validate_llm_config
 
@@ -859,6 +861,18 @@ def _workspace_map_layers(service: GISWorkspaceService, user_id: str = "") -> di
 app.include_router(
     create_data_sources_router(
         account_service=lambda: GSCloudAccountService(commercial_service),
+        authenticated_user=_authenticated_request_user,
+        audit=_audit,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_downloads_router(
+        resume_service=lambda: DownloadResumeService(
+            commercial_service,
+            GSCloudAccountService(commercial_service),
+            _maybe_start_gscloud_auto_download,
+        ),
         authenticated_user=_authenticated_request_user,
         audit=_audit,
         guard=guard,
@@ -2541,43 +2555,6 @@ def simulate_payment(body: PaymentIn, request: Request):
 
 def _gscloud_public_status(user_id: str) -> dict:
     return GSCloudAccountService(commercial_service).status(user_id)
-
-
-@app.post("/api/download-jobs/{job_id}/resume")
-def resume_download_job(job_id: str, request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        job = require_resource_owner(commercial_service.get_job(job_id), user_id=user_id, resource_name="download job")
-        if job.get("status") not in {"waiting_login", "waiting_manual", "waiting_parameters", "ready_to_start", "queued"}:
-            raise ValueError(f"当前状态不能恢复: {job.get('status')}")
-        if not str(job.get("region") or "").strip():
-            commercial_service._update_job(job_id, status="waiting_parameters", stage="needs_region")
-            return {
-                "job": commercial_service.get_job(job_id),
-                "auto_supported": True,
-                "auto_started": False,
-                "reason": "clarification_required",
-                "action_required": {
-                    "type": "clarification_required",
-                    "missing_parameters": ["region"],
-                    "recommended_defaults": {"resolution": "30m", "format": "GeoTIFF", "clip_to_region": True},
-                },
-            }
-        status = _gscloud_public_status(user_id)
-        if not status["logged_in"]:
-            commercial_service._update_job(job_id, status="waiting_login", stage="needs_gscloud_login_state")
-            return {
-                "job": commercial_service.get_job(job_id),
-                "auto_supported": True,
-                "auto_started": False,
-                "reason": "login_required",
-                "action_required": {"type": "login_required", "provider": "gscloud", "job_id": job_id},
-            }
-        auto = _maybe_start_gscloud_auto_download(job, region=str(job.get("region") or ""))
-        _audit(request, user_id=user_id, action="download.resume", resource_type="download_job", resource_id=job_id, detail={"auto_started": auto.get("auto_started")})
-        return {"job": commercial_service.get_job(job_id), **auto}
-
-    return guard(run)
 
 
 @app.post("/api/downloads/submit")
