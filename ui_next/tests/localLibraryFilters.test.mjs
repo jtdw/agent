@@ -16,7 +16,7 @@ const filters = await import(`data:text/javascript;base64,${Buffer.from(result.o
 const items = [
   { item_id: '1', name: 'LICENSE_from_source', path: 'data/administrative/china/LICENSE_from_source.txt', data_type: 'document' },
   { item_id: '2', name: 'README_from_source', path: 'data/administrative/china/README_from_source.md', data_type: 'document' },
-  { item_id: '3', name: 'china_admin_boundary', path: 'data/administrative/china_admin.zip', data_type: 'archive' },
+  { item_id: '3', name: 'china_admin_county_2023', path: 'data/administrative/china_admin_county_2023.zip', data_type: 'archive' },
   { item_id: '4', name: 'field_notes', path: 'data/docs/field_notes.md', data_type: 'document' }
 ];
 

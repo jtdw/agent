@@ -20,7 +20,7 @@ class LocalLibraryFilteringTest(unittest.TestCase):
             data_dir = root / "data" / "administrative"
             data_dir.mkdir(parents=True)
             (data_dir / "README_from_source.md").write_text("source", encoding="utf-8")
-            (data_dir / "china_admin_boundary.zip").write_bytes(b"zip")
+            (data_dir / "china_admin_county_2023.zip").write_bytes(b"zip")
 
             library = LocalFileLibrary(root)
             library.rescan()
@@ -28,8 +28,8 @@ class LocalLibraryFilteringTest(unittest.TestCase):
             public_items = library.list_items()["items"]
             admin_items = library.list_items(include_source_docs=True)["items"]
 
-            self.assertEqual([item["name"] for item in public_items], ["china_admin_boundary"])
-            self.assertEqual({item["name"] for item in admin_items}, {"README_from_source", "china_admin_boundary"})
+            self.assertEqual([item["name"] for item in public_items], ["china_admin_county_2023"])
+            self.assertEqual({item["name"] for item in admin_items}, {"README_from_source", "china_admin_county_2023"})
 
 
 if __name__ == "__main__":

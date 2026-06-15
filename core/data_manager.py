@@ -249,7 +249,7 @@ class DataManager:
     def _resolve_local_library_reference(self, file_path: str) -> Path | None:
         """Resolve accidental local-library item ids passed as file paths.
 
-        The agent sees manifest ids such as lib_china_admin_province_city_county_shp
+        The agent sees manifest ids such as lib_china_admin_county_2023
         in context and may pass them to load_dataset instead of the real zip path.
         """
         raw = str(file_path or "").strip()

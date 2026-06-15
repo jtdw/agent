@@ -12,8 +12,6 @@ from .data_manager import DataManager
 
 
 ADMIN_ZIP_NAMES = {
-    "china_admin_province_city_county_shp.zip",
-    "china_admin_boundary.zip",
     "china_admin_county_2023.zip",
 }
 
