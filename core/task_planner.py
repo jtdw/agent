@@ -59,7 +59,7 @@ def _prompt_has_explicit_field_hint(prompt: str) -> bool:
             "经度",
             "纬度",
             "瀛楁",
-            "鐩爣鍙橀噺",
+            "目标变量",
         )
     )
 
@@ -77,7 +77,7 @@ def _prompt_has_target_hint(prompt: str) -> bool:
             "label",
             "预测字段",
             "预测列",
-            "鐩爣鍙橀噺",
+            "目标变量",
             "棰勬祴瀛楁",
         )
     )
@@ -240,6 +240,13 @@ def _manager_precondition_errors(manager: Any | None, tool_name: str, args: dict
         features = [field.strip() for field in str(args.get("feature_cols") or "").split(",") if field.strip()]
         errors.extend(validate_model_target(manager, dataset_name, target))
         errors.extend(validate_required_fields(manager, dataset_name, features))
+    elif tool_name == "geographical_conformal_prediction":
+        calibration_dataset = str(args.get("calibration_dataset") or "")
+        observed_col = str(args.get("observed_col") or "")
+        predicted = [field.strip() for field in str(args.get("predicted_cols") or "").split(",") if field.strip()]
+        errors.extend(validate_dataset_exists(manager, calibration_dataset))
+        errors.extend(validate_model_target(manager, calibration_dataset, observed_col))
+        errors.extend(validate_required_fields(manager, calibration_dataset, predicted))
     elif tool_name == "vector_clip_by_vector":
         errors.extend(validate_dataset_exists(manager, str(args.get("clip_name") or "")))
     elif tool_name == "export_dataset":
@@ -305,15 +312,21 @@ def _build_validated_tool_args(plan: dict[str, Any], slots: dict[str, Any], cont
             if not features:
                 _add_missing_inputs(plan, ["feature columns"])
             return
-        if not _validate_slot_field_membership(plan, context, [target, *features]) or plan.get("should_ask_clarification"):
+        date_field = str(slots.get("date_field") or "")
+        fields_to_validate = [target, *features, *([date_field] if date_field else [])]
+        if not _validate_slot_field_membership(plan, context, fields_to_validate) or plan.get("should_ask_clarification"):
             return
         model_tool = "train_rf_fusion_model" if slots.get("model_type") == "random_forest" else "train_xgboost_fusion_model"
         args = {
             "dataset_name": dataset,
             "target_col": target,
             "feature_cols": ",".join(features),
-            "output_name": _safe_output_prefix(dataset, "model"),
+            "output_name": str(slots.get("output_name") or _safe_output_prefix(dataset, "model")),
         }
+        if date_field:
+            args["date_col"] = date_field
+        if slots.get("spatial_validation") is not None and model_tool == "train_xgboost_fusion_model":
+            args["spatial_validation"] = bool(slots["spatial_validation"])
         _accept_tool_args(plan, manager, model_tool, args)
     elif task_type == "data_processing" and slots.get("spatial_operation") == "clip":
         ref = slots.get("referenced_artifact") if isinstance(slots.get("referenced_artifact"), dict) else {}
@@ -371,7 +384,99 @@ def _prompt_requests_interpretation(prompt: str, secondary_intents: list[str]) -
 
 def _prompt_requests_export(prompt: str) -> bool:
     text = str(prompt or "").lower()
-    return any(token in text for token in ("export", "save", "download", "导出", "保存", "瀵煎嚭"))
+    return any(token in text for token in ("export", "save", "download", "导出", "保存"))
+
+
+def _prompt_requests_gcp(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return "gcp" in text or "不确定性" in text or "共形预测" in text or "预测区间" in text
+
+
+def _recent_model_for_gcp(context: dict[str, Any], resolved_objects: dict[str, Any]) -> dict[str, Any]:
+    resolved = _as_dict(_as_dict(resolved_objects.get("model_result")).get("data"))
+    if resolved:
+        return resolved
+    return _as_dict(context.get("recent_model_result"))
+
+
+def _model_value(model: dict[str, Any], key: str) -> str:
+    summary = _as_dict(model.get("summary"))
+    diagnostics = _as_dict(model.get("diagnostics"))
+    outputs = _as_dict(model.get("outputs"))
+    return str(model.get(key) or summary.get(key) or diagnostics.get(key) or outputs.get(key) or "")
+
+
+def _build_gcp_args_from_recent_model(model: dict[str, Any]) -> dict[str, Any]:
+    output_prefix = str(model.get("output_prefix") or _model_value(model, "output_name") or "model")
+    result_dataset = _model_value(model, "result_dataset") or output_prefix
+    observed_col = _model_value(model, "target_col")
+    predicted_col = (
+        _model_value(model, "prediction_column")
+        or _model_value(model, "cv_prediction_column")
+        or (f"{output_prefix}_xgb" if output_prefix else "")
+    )
+    date_col = _model_value(model, "date_col")
+    args = {
+        "calibration_dataset": result_dataset,
+        "observed_col": observed_col,
+        "predicted_cols": predicted_col,
+        "output_name": _safe_output_prefix(output_prefix, "gcp"),
+        "calibration_ratio": 0.3,
+        "alpha": 0.1,
+    }
+    if date_col:
+        args["date_col"] = date_col
+    return args
+
+
+def _infer_date_field(context: dict[str, Any]) -> str:
+    fields = [str(field) for field in context.get("available_fields", []) if str(field or "").strip()]
+    for candidate in ("date", "time", "datetime", "日期", "时间"):
+        for field in fields:
+            if field.lower() == candidate.lower():
+                return field
+    for field in fields:
+        lowered = field.lower()
+        if "date" in lowered or "time" in lowered:
+            return field
+    return ""
+
+
+def _build_gcp_workflow(plan: dict[str, Any], gcp_args: dict[str, Any]) -> bool:
+    required = ["calibration_dataset", "observed_col", "predicted_cols", "output_name"]
+    if any(not str(gcp_args.get(key) or "").strip() for key in required):
+        missing = [key for key in required if not str(gcp_args.get(key) or "").strip()]
+        _add_missing_inputs(plan, missing, "请先完成一次模型预测，或明确提供 GCP 所需的结果数据集、观测列和预测列。")
+        return False
+    plan["recommended_tools"] = ["geographical_conformal_prediction"]
+    plan["required_inputs"] = ["model prediction result", "observed column", "prediction column"]
+    plan["execution_steps"] = [
+        "读取最近模型预测结果。",
+        "使用观测列与预测列执行 GCP 不确定性分析。",
+        "输出预测区间、覆盖率、区间宽度和 GCP 指标表。",
+    ]
+    plan["expected_outputs"] = ["GCP 区间结果数据集", "GCP 指标表", "GCP 摘要文件"]
+    plan["validated_tool_args"]["geographical_conformal_prediction"] = gcp_args
+    plan["tool_plan"].append({"tool_name": "geographical_conformal_prediction", "args": gcp_args})
+    plan["workflow_plan"] = [
+        {
+            "step_id": "run_gcp",
+            "tool_name": "geographical_conformal_prediction",
+            "step_type": "uncertainty_analysis",
+            "validated_tool_args": gcp_args,
+            "expected_outputs": ["model_result_id", "result_dataset", "metrics_dataset"],
+            "stop_on_failure": True,
+        },
+        {
+            "step_id": "interpret_gcp_result",
+            "tool_name": "interpret_result",
+            "validated_tool_args": {"referenced_step": "run_gcp"},
+            "depends_on": ["run_gcp"],
+            "expected_outputs": ["GCP result explanation"],
+            "stop_on_failure": False,
+        },
+    ]
+    return True
 
 
 def _export_suffix(prompt: str, *, default: str = "") -> str:
@@ -880,6 +985,13 @@ def _attach_tool_preconditions(plan: dict[str, Any]) -> None:
             required_fields=["target_col", "feature_cols"],
             optional_inputs=["date_col", "split_date", "model hyperparameters"],
         ),
+        "geographical_conformal_prediction": ToolPrecondition(
+            name="geographical_conformal_prediction",
+            required_inputs=["calibration_dataset", "observed_col", "predicted_cols", "output_name"],
+            required_dataset_type="table|vector",
+            required_fields=["observed_col", "predicted_cols"],
+            optional_inputs=["target_dataset_name", "lon_col", "lat_col", "date_col", "alpha", "calibration_ratio"],
+        ),
     }
     plan["tool_preconditions"] = {
         tool_name: specs[tool_name].to_dict()
@@ -952,6 +1064,17 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             ["clear task"],
             "你的需求还不够明确。请说明要检查数据、处理分析、制图、建模、下载数据，还是解释已有结果。",
         )
+        return plan
+
+    if task_type == "modeling" and _prompt_requests_gcp(text):
+        model = _recent_model_for_gcp(context, resolved_objects)
+        gcp_args = _build_gcp_args_from_recent_model(model)
+        if not gcp_args.get("date_col"):
+            inferred_date = _infer_date_field(context)
+            if inferred_date:
+                gcp_args["date_col"] = inferred_date
+        if _build_gcp_workflow(plan, gcp_args):
+            _attach_tool_preconditions(plan)
         return plan
 
     intent_missing = [str(item) for item in intent.get("missing_inputs", []) if item]

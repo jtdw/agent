@@ -102,7 +102,7 @@ body {
     box-shadow: 0 24px 90px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.09);
   }
   .glass-button {
-    @apply inline-flex items-center justify-center rounded-button border px-3 py-2 text-sm font-semibold transition duration-200 active:scale-[0.97];
+    @apply inline-flex items-center justify-center rounded-button border px-3 py-2 text-sm font-semibold transition-colors duration-150 active:scale-[0.97];
     background: rgba(255,255,255,.58);
     border-color: rgba(255,255,255,.55);
     box-shadow: 0 10px 30px rgba(15,23,42,.08);
@@ -113,17 +113,17 @@ body {
     border-color: rgba(255,255,255,.12);
   }
   .glass-button:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 16px 40px rgba(11,95,244,.16);
+    background: rgba(255,255,255,.72);
+    border-color: rgba(34,211,238,.42);
   }
   .primary-button {
-    @apply inline-flex items-center justify-center rounded-button px-4 py-2 text-sm font-bold text-white transition duration-200 active:scale-[0.97];
+    @apply inline-flex items-center justify-center rounded-button px-4 py-2 text-sm font-bold text-white transition-colors duration-150 active:scale-[0.97];
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
     box-shadow: 0 16px 38px rgba(11,95,244,.28), 0 0 22px rgba(0,212,255,.18);
   }
-  .primary-button:hover { filter: brightness(1.05); transform: translateY(-1px); }
+  .primary-button:hover { background: linear-gradient(135deg, #0a55db, #00c2ea); }
   .floating-dock-button {
-    @apply grid h-11 w-11 place-items-center rounded-[18px] border text-slate-500 transition duration-200 active:scale-[0.96];
+    @apply grid h-11 w-11 place-items-center rounded-[18px] border text-slate-500 transition-colors duration-150 active:scale-[0.96];
     background: rgba(255,255,255,.62);
     border-color: rgba(255,255,255,.62);
     box-shadow: 0 12px 34px rgba(15,23,42,.1);
@@ -132,8 +132,6 @@ body {
   .floating-dock-button.is-active {
     color: white;
     background: linear-gradient(135deg, var(--accent), var(--accent-2));
-    box-shadow: 0 18px 42px rgba(11,95,244,.24), 0 0 22px rgba(0,212,255,.16);
-    transform: translateY(-1px);
   }
   .dark .floating-dock-button {
     background: rgba(15,23,42,.7);
@@ -158,17 +156,116 @@ body {
     box-shadow: 0 0 0 5px rgba(34,211,238,.16), 0 0 24px rgba(34,211,238,.18);
   }
   .console-primary-button {
-    @apply inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55 dark:focus:ring-offset-slate-950;
+    @apply inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55 dark:focus:ring-offset-slate-950;
   }
   .console-secondary-button {
-    @apply inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-blue-800 dark:hover:bg-blue-950/35 dark:focus:ring-offset-slate-950;
+    @apply inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-blue-800 dark:hover:bg-blue-950/35 dark:focus:ring-offset-slate-950;
   }
   .console-icon-button {
-    @apply inline-grid h-9 w-9 place-items-center rounded-lg border border-slate-200 bg-white text-slate-600 transition hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-800 dark:hover:bg-blue-950/35 dark:focus:ring-offset-slate-950;
+    @apply inline-grid h-9 w-9 place-items-center rounded-lg border border-slate-200 bg-white text-slate-600 transition-colors hover:border-blue-300 hover:bg-blue-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-800 dark:hover:bg-blue-950/35 dark:focus:ring-offset-slate-950;
   }
   .console-link-button {
-    @apply inline-flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-semibold text-blue-700 transition hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-950/35;
+    @apply inline-flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-semibold text-blue-700 transition-colors hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-950/35;
   }
+  .stable-hover {
+    transition-property: color, background-color, border-color;
+    transition-duration: 150ms;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .chat-primary-action {
+    @apply inline-flex h-10 items-center justify-center gap-2 rounded-[10px] px-4 text-sm font-bold text-white transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45 dark:focus:ring-offset-slate-900;
+    background: linear-gradient(135deg, #1768e8, #3184f5);
+    box-shadow: 0 8px 18px rgba(23, 104, 232, .22);
+  }
+  .chat-primary-action:hover:not(:disabled) { background: linear-gradient(135deg, #125dce, #2477e8); }
+  .chat-secondary-action {
+    @apply h-9 items-center justify-center gap-2 rounded-[9px] border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-600 transition-colors duration-150 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-700 dark:hover:bg-blue-950/40 dark:hover:text-blue-200 dark:focus:ring-offset-slate-900;
+  }
+  .chat-icon-action {
+    @apply inline-grid h-9 w-9 shrink-0 place-items-center rounded-[9px] border border-slate-200 bg-white p-0 text-slate-500 transition-colors duration-150 hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-700 dark:hover:bg-blue-950/40 dark:hover:text-blue-200 dark:focus:ring-offset-slate-900;
+  }
+  .chat-icon-action.is-active { @apply border-blue-600 bg-blue-600 text-white hover:bg-blue-700 hover:text-white; }
+  .chat-danger-action {
+    @apply inline-flex h-10 items-center justify-center gap-2 rounded-[10px] border border-rose-200 bg-rose-50 px-3 text-xs font-semibold text-rose-600 transition-colors duration-150 hover:border-rose-300 hover:bg-rose-100 focus:outline-none focus:ring-2 focus:ring-rose-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-40 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-300 dark:hover:bg-rose-950/55 dark:focus:ring-offset-slate-950;
+  }
+  .chat-session-rail {
+    @apply hidden min-h-0 flex-col border-r border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950 lg:flex;
+  }
+  .chat-session-row {
+    @apply flex w-full items-start gap-2 rounded-[10px] border border-transparent px-3 py-2.5 text-slate-600 transition-colors duration-150 hover:bg-white hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-slate-100;
+  }
+  .chat-session-row.is-active {
+    @apply border-blue-100 bg-blue-50 text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/45 dark:text-blue-200;
+  }
+  .chat-prompt-card {
+    @apply flex min-h-20 items-start gap-3 rounded-xl border border-slate-200 bg-white p-4 text-left text-slate-600 shadow-[0_4px_14px_rgba(51,65,85,.04)] transition-colors duration-150 hover:border-blue-300 hover:bg-blue-50/60 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-800 dark:hover:bg-blue-950/35 dark:hover:text-blue-200;
+  }
+  .chat-prompt-card strong { @apply block text-sm font-bold text-slate-800 dark:text-slate-100; }
+  .chat-prompt-card small { @apply mt-1 block text-xs leading-5 text-slate-500 dark:text-slate-400; }
+  .chat-quick-prompt {
+    @apply rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] font-semibold text-slate-500 transition-colors duration-150 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-400 dark:hover:border-blue-800 dark:hover:bg-blue-950/35 dark:hover:text-blue-200;
+  }
+  .chat-composer {
+      @apply flex items-end gap-2 rounded-[14px] border border-slate-200 bg-white p-2 shadow-[0_10px_28px_rgba(51,65,85,.08)] transition-colors duration-150 focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-50 dark:border-slate-700 dark:bg-slate-950 dark:focus-within:border-blue-600 dark:focus-within:ring-blue-950/50;
+    }
+  .chat-composer-shell {
+      @apply flex min-h-14 items-center gap-2 rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_12px_34px_rgba(15,23,42,.10)] transition-colors duration-150 focus-within:border-blue-400 focus-within:ring-4 focus-within:ring-blue-50 dark:border-slate-700 dark:bg-slate-950 dark:focus-within:border-blue-600 dark:focus-within:ring-blue-950/50;
+    }
+  .chat-composer-shell.is-dragging {
+      @apply border-blue-400 bg-blue-50/70 dark:border-blue-500 dark:bg-blue-950/40;
+    }
+  .chat-composer-tool {
+      @apply grid h-10 w-10 shrink-0 place-items-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-45 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-blue-200;
+    }
+  .chat-composer-tool.is-active {
+      @apply bg-blue-50 text-blue-700 dark:bg-blue-950/50 dark:text-blue-200;
+    }
+  .chat-mention-menu {
+      @apply absolute bottom-[calc(100%+10px)] left-0 z-50 w-full min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_18px_48px_rgba(15,23,42,.18)] dark:border-slate-700 dark:bg-slate-900;
+    }
+  .chat-mention-header {
+      @apply flex items-center justify-between border-b border-slate-100 px-3 py-2 text-[11px] font-bold text-slate-500 dark:border-slate-800 dark:text-slate-400;
+    }
+  .chat-mention-list {
+      @apply max-h-64 overflow-y-auto p-1.5;
+    }
+  .chat-mention-item {
+      @apply flex w-full min-w-0 items-center gap-3 rounded-lg px-3 py-2 text-left text-slate-600 transition-colors hover:bg-slate-50 focus:outline-none dark:text-slate-300 dark:hover:bg-slate-800;
+    }
+  .chat-mention-item.is-active {
+      @apply bg-blue-50 text-blue-700 dark:bg-blue-950/45 dark:text-blue-200;
+    }
+  .chat-mention-item strong {
+      @apply block truncate text-sm font-semibold;
+    }
+  .chat-mention-item small {
+      @apply mt-0.5 block truncate text-[11px] text-slate-400;
+    }
+  .chat-mention-empty {
+      @apply px-4 py-6 text-center text-xs text-slate-400;
+    }
+  .chat-composer-language {
+      @apply h-9 shrink-0 rounded-xl border border-slate-200 bg-slate-50 px-2 text-[11px] font-bold text-slate-600 outline-none transition-colors hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-700 dark:hover:bg-blue-950/40 dark:hover:text-blue-200 dark:focus:ring-blue-950;
+    }
+  .chat-composer-textarea {
+      @apply min-h-14 min-w-0 flex-1 resize-none bg-transparent px-2 py-4 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400 disabled:cursor-not-allowed disabled:opacity-60 dark:text-slate-100;
+    }
+  .chat-composer-submit {
+      @apply grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-blue-600 text-white shadow-[0_8px_18px_rgba(37,99,235,.26)] transition-colors hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45 dark:focus:ring-offset-slate-950;
+    }
+  .chat-composer-submit.is-stopping {
+      @apply bg-slate-900 hover:bg-slate-700 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-white;
+    }
+  .chat-compact-select {
+    @apply h-9 rounded-[9px] border border-slate-200 bg-white px-2 text-xs font-semibold text-slate-600 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-300 dark:focus:ring-blue-950;
+  }
+  .chat-model-select {
+    @apply h-9 max-w-44 truncate rounded-[9px] border border-slate-200 bg-white pl-3 pr-8 text-xs font-semibold text-slate-600 outline-none transition-colors hover:border-blue-300 hover:bg-blue-50 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-45 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:border-blue-700 dark:hover:bg-blue-950/40 dark:focus:ring-blue-950 sm:max-w-52;
+  }
+  .chat-model-notice {
+    @apply pointer-events-none absolute right-0 top-full z-20 mt-1 whitespace-nowrap rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700 shadow-sm dark:bg-emerald-950 dark:text-emerald-300;
+  }
+  .chat-model-notice.is-error { @apply bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300; }
   .console-field {
     @apply grid gap-1.5 text-sm font-semibold text-slate-700 dark:text-slate-200;
   }
@@ -194,10 +291,181 @@ body {
 }
 
 .chat-markdown {
-  display: grid;
-  gap: 0.2rem;
-  white-space: normal;
-}
+    display: grid;
+    gap: 0.2rem;
+    white-space: normal;
+  }
+  .chat-message-renderer {
+    position: relative;
+    min-width: 0;
+  }
+  .chat-message-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.35rem;
+    margin-top: .65rem;
+    min-height: 0;
+    opacity: .88;
+    transition: opacity 150ms ease;
+  }
+  .group:hover .chat-message-actions,
+  .chat-message-renderer:focus-within .chat-message-actions {
+    opacity: 1;
+  }
+  .chat-copy-button {
+    display: inline-flex;
+    height: 1.55rem;
+    align-items: center;
+    gap: 0.25rem;
+    border-radius: 999px;
+    padding: 0 0.5rem;
+    font-size: 10px;
+    font-weight: 800;
+    color: rgb(100 116 139);
+    background: rgba(255,255,255,.62);
+    border: 1px solid rgba(148,163,184,.22);
+  }
+  .chat-copy-button.is-copied {
+    color: rgb(5 150 105);
+  }
+  .chat-inline-code {
+    border-radius: .4rem;
+    background: rgba(15,23,42,.08);
+    padding: .05rem .3rem;
+    font-size: .86em;
+  }
+  .chat-code-block {
+    overflow: hidden;
+    border-radius: 1rem;
+    border: 1px solid rgba(148,163,184,.25);
+    background: #0f172a;
+    color: #e2e8f0;
+  }
+  .chat-code-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+    border-bottom: 1px solid rgba(255,255,255,.08);
+    padding: .45rem .65rem;
+    font-size: 11px;
+    font-weight: 800;
+    color: #94a3b8;
+  }
+  .chat-code-block pre {
+    overflow-x: auto;
+    padding: .8rem;
+    font-size: 12px;
+    line-height: 1.65;
+    white-space: pre;
+  }
+  .chat-table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+  .chat-table-wrap table {
+    width: max-content;
+    min-width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .chat-table-wrap th,
+  .chat-table-wrap td {
+    border: 1px solid rgba(148,163,184,.28);
+    padding: .4rem .55rem;
+    text-align: left;
+  }
+  .chat-markdown ul,
+  .chat-markdown ol {
+    margin: .2rem 0 .2rem 1.15rem;
+  }
+  .chat-markdown li {
+    margin: .15rem 0;
+  }
+  .chat-markdown h1,
+  .chat-markdown h2,
+  .chat-markdown h3 {
+    margin-top: .4rem;
+    font-weight: 900;
+  }
+  .artifact-download-list {
+    margin-top: .75rem;
+    display: grid;
+    gap: .55rem;
+  }
+  .artifact-download-card {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    min-width: 0;
+    max-width: 100%;
+    border-radius: 1rem;
+    border: 1px solid rgba(148,163,184,.25);
+    background: rgba(255,255,255,.64);
+    padding: .75rem;
+    overflow: hidden;
+  }
+  .artifact-file-name {
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+  .artifact-meta-line {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .artifact-file-icon {
+    display: grid;
+    height: 2.35rem;
+    width: 2.35rem;
+    flex-shrink: 0;
+    place-items: center;
+    border-radius: .85rem;
+    background: rgba(37,99,235,.10);
+    color: rgb(37 99 235);
+  }
+  .artifact-card-action {
+    display: grid;
+    height: 2rem;
+    width: 2rem;
+    place-items: center;
+    border-radius: .75rem;
+    color: rgb(71 85 105);
+    background: rgba(255,255,255,.75);
+    border: 1px solid rgba(148,163,184,.22);
+  }
+  .artifact-card-action.is-primary {
+    color: white;
+    background: rgb(37 99 235);
+    border-color: rgb(37 99 235);
+  }
+  .upload-result-card {
+    margin-bottom: .75rem;
+    border-radius: 1rem;
+    border: 1px solid rgba(148,163,184,.24);
+    background: rgba(255,255,255,.72);
+    padding: .85rem;
+  }
+  .upload-result-row {
+    display: flex;
+    align-items: center;
+    gap: .65rem;
+    border-radius: .85rem;
+    background: rgba(248,250,252,.86);
+    padding: .6rem;
+  }
+  .upload-result-icon {
+    display: grid;
+    height: 2rem;
+    width: 2rem;
+    flex-shrink: 0;
+    place-items: center;
+    border-radius: .7rem;
+    background: rgba(37,99,235,.10);
+    color: rgb(37 99 235);
+  }
 .chat-md-heading {
   margin-top: 0.15rem;
   font-size: 0.98rem;

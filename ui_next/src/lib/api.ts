@@ -70,7 +70,56 @@ export type ChatMessage = {
   role: 'user' | 'assistant' | 'system';
   content: string;
   created_at?: string;
-  meta?: Record<string, unknown>;
+  meta?: Record<string, unknown> & { artifacts?: ChatArtifact[]; upload_summaries?: UploadSummary[]; action_required?: ChatActionRequired };
+};
+
+export type ChatActionRequired = {
+  type: 'login_required' | 'clarification_required' | 'resume_ready' | string;
+  provider?: string;
+  job_id?: string;
+  user_message?: string;
+  actions?: string[];
+  missing_parameters?: string[];
+  recommended_defaults?: Record<string, unknown>;
+  options?: Array<{ value: string; label: string }>;
+};
+
+export type DataSourceAccountStatus = {
+  provider: 'gscloud';
+  logged_in: boolean;
+  account_mode: 'own';
+  last_checked_at: string;
+  expires_at?: string | null;
+  masked_account?: string | null;
+  storage_state_exists: boolean;
+  health_status: string;
+  user_message: string;
+  pending?: boolean;
+  login_state?: string;
+  waiting_jobs?: DownloadJob[];
+};
+
+export type ChatArtifact = {
+  artifact_id: string;
+  filename: string;
+  name?: string;
+  title?: string;
+  type?: string;
+  kind?: string;
+  display_path?: string;
+  size_bytes?: number;
+  size_kb?: number;
+  mime_type?: string;
+  created_at?: string;
+  updated_at?: string;
+  source?: {
+    tool_name?: string;
+    workflow_id?: string;
+    message_id?: string;
+  };
+  preview_available?: boolean;
+  download_url: string;
+  metadata_url?: string;
 };
 
 export type ChatSession = {
@@ -78,6 +127,14 @@ export type ChatSession = {
   title: string;
   created_at?: string;
   updated_at?: string;
+};
+
+export type ChatModelState = {
+  session_id: string;
+  route_mode: 'auto' | 'manual';
+  selected_model: string;
+  active_model?: string;
+  models: Array<{ id: string; capability: 'text' | 'vision' }>;
 };
 
 export type AuthSession = {
@@ -102,6 +159,17 @@ export type WorkspaceArtifact = {
   size?: number;
   updated_at?: string;
   download_url?: string;
+};
+
+export type WorkspaceMention = {
+  id: string;
+  name: string;
+  mention: string;
+  type: string;
+  filename?: string;
+  row_count?: number | null;
+  column_count?: number | null;
+  crs?: string;
 };
 
 export type ResultPanelFile = {
@@ -155,6 +223,7 @@ export type DownloadJob = {
   charged?: number;
   quota_reserved?: number;
   retried_from_job_id?: string;
+  artifacts?: ChatArtifact[];
   canceled_at?: string;
   pages_scanned?: number;
   candidate_count?: number;
@@ -248,13 +317,27 @@ export type LocalLibraryResponse = {
   hint?: string;
 };
 
+export type UploadSummary = {
+  filename: string;
+  type: string;
+  size_bytes?: number;
+  row_count?: number | null;
+  dataset_name?: string;
+  status?: string;
+  message?: string;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 function authHeaders(): Record<string, string> {
   return {};
 }
 
 export function formatApiError(status: number, statusText: string, detail: unknown): Error {
-  const detailText = typeof detail === 'string' ? detail.trim() : '';
+  const detailText = typeof detail === 'string'
+    ? detail.trim()
+    : detail && typeof detail === 'object' && 'message' in detail
+      ? String((detail as { message?: unknown }).message || '').trim()
+      : '';
   if (status === 401) {
     return new Error(`登录已过期，请重新登录后再试。${detailText ? ` ${detailText}` : ''}`.trim());
   }
@@ -322,6 +405,16 @@ async function downloadWithAuth(url: string, fallbackName = 'download') {
   URL.revokeObjectURL(href);
 }
 
+function downloadNativeFile(url: string, fallbackName = 'download') {
+  const anchor = document.createElement('a');
+  anchor.href = `${API_BASE}${url}`;
+  anchor.download = fallbackName;
+  anchor.rel = 'noopener';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 export const api = {
   async status() {
     return request<{ ok: boolean; service: string; version: string; profile: string }>('/api/status');
@@ -372,6 +465,16 @@ export const api = {
     const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
     return request<{ sessions: ChatSession[]; current_session_id: string; messages: ChatMessage[] }>(`/api/chat/sessions${q}`);
   },
+  async chatModels(user_id: string, session_id: string) {
+    const q = `?user_id=${encodeURIComponent(user_id || '')}&session_id=${encodeURIComponent(session_id || '')}`;
+    return request<ChatModelState>(`/api/chat/models${q}`);
+  },
+  async selectChatModel(model: string, user_id: string, session_id: string) {
+    return request<ChatModelState>('/api/chat/models/select', {
+      method: 'POST',
+      body: JSON.stringify({ model, user_id: user_id || '', session_id })
+    });
+  },
   async createChatSession(user_id?: string, title?: string) {
     return request<{ session_id: string; sessions: ChatSession[]; current_session_id: string; messages: ChatMessage[] }>('/api/chat/sessions', {
       method: 'POST',
@@ -402,11 +505,36 @@ export const api = {
       body: JSON.stringify({ user_id: user_id || '', session_id, title })
     });
   },
-  async ask(prompt: string, user_id?: string, session_id?: string, frontend_context?: ChatContextPayload) {
+  async ask(prompt: string, user_id?: string, session_id?: string, frontend_context?: ChatContextPayload, signal?: AbortSignal, task_id?: string) {
     return request<{ reply: string; model?: string; reason?: string; messages?: ChatMessage[]; sessions?: ChatSession[]; current_session_id?: string; task_outcome?: Record<string, unknown>; result_panel?: ResultPanel }>('/api/chat/ask', {
       method: 'POST',
-      body: JSON.stringify({ prompt, user_id: user_id || '', session_id: session_id || '', frontend_context: frontend_context || {} })
+      signal,
+      body: JSON.stringify({ prompt, user_id: user_id || '', session_id: session_id || '', task_id: task_id || '', frontend_context: frontend_context || {} })
     });
+  },
+  async cancelChatTask(task_id: string, user_id?: string, reason?: string) {
+    return request<{ ok: boolean; status: string; task_id?: string; message?: string }>('/api/chat/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: user_id || '', task_id, reason: reason || '用户取消任务。' })
+    });
+  },
+  async deleteArtifact(artifact_id: string, user_id?: string, delete_file = true) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    q.set('delete_file', delete_file ? 'true' : 'false');
+    return request<{ ok: boolean; artifact_id: string; filename?: string; status: string; file_deleted: boolean }>(
+      `/api/artifacts/${encodeURIComponent(artifact_id)}?${q.toString()}`,
+      { method: 'DELETE' }
+    );
+  },
+  async deleteArtifactsBatch(artifact_ids: string[], user_id?: string, delete_file = true) {
+    return request<{ ok: boolean; deleted_count: number; failed_count: number; results: Array<{ ok: boolean; artifact_id: string; filename?: string; status: string; file_deleted: boolean; error?: string }> }>(
+      '/api/artifacts/delete-batch',
+      {
+        method: 'POST',
+        body: JSON.stringify({ user_id: user_id || '', artifact_ids, delete_file })
+      }
+    );
   },
   async retryMessage(message_id: number, content: string, user_id?: string, session_id?: string) {
     return request<{ reply: string; model?: string; reason?: string; messages: ChatMessage[]; sessions: ChatSession[]; current_session_id: string }>('/api/chat/retry', {
@@ -418,11 +546,15 @@ export const api = {
     const fd = new FormData();
     fd.append('user_id', user_id || '');
     Array.from(files).forEach((file) => fd.append('files', file));
-    return multipart<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/files/upload', fd);
+    return multipart<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; upload_summaries?: UploadSummary[]; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/files/upload', fd);
   },
   async dashboard(user_id?: string) {
     const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
     return request<WorkspaceDashboard>(`/api/workspace/dashboard${q}`);
+  },
+  async workspaceMentions(user_id?: string) {
+    const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
+    return request<{ items: WorkspaceMention[]; count: number }>(`/api/workspace/mentions${q}`);
   },
   async exportWorkspace(user_id?: string, mode: 'latest' | 'all' = 'all') {
     return request<{ zip_path: string; download_url?: string; file_count: number }>('/api/workspace/export', {
@@ -514,6 +646,30 @@ export const api = {
     const q = `?user_id=${encodeURIComponent(user_id)}&source_key=${encodeURIComponent(source_key)}&account_mode=${encodeURIComponent(account_mode)}`;
     return request<LoginHealthResponse>(`/api/downloads/login-health${q}`);
   },
+  async gscloudStatus() {
+    return request<DataSourceAccountStatus>('/api/data-sources/gscloud/status');
+  },
+  async startGSCloudLogin(timeout_seconds = 300) {
+    return request<{ provider: string; login_session_id: string; state: string; user_message: string; poll_interval_ms: number }>('/api/data-sources/gscloud/login/start', {
+      method: 'POST',
+      body: JSON.stringify({ timeout_seconds })
+    });
+  },
+  async completeGSCloudLogin(login_session_id: string) {
+    return request<DataSourceAccountStatus & { login_session_id: string }>('/api/data-sources/gscloud/login/complete', {
+      method: 'POST',
+      body: JSON.stringify({ login_session_id })
+    });
+  },
+  async logoutGSCloud() {
+    return request<DataSourceAccountStatus>('/api/data-sources/gscloud/logout', { method: 'DELETE' });
+  },
+  async resumeDownloadJob(job_id: string) {
+    return request<{ job: DownloadJob; auto_supported?: boolean; auto_started?: boolean; reason?: string; action_required?: ChatActionRequired }>(`/api/download-jobs/${encodeURIComponent(job_id)}/resume`, {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+  },
   async downloadJobLog(user_id: string, job_id: string) {
     const q = `?user_id=${encodeURIComponent(user_id)}&job_id=${encodeURIComponent(job_id)}`;
     return request<{ job: DownloadJob; scene_jobs: Array<Record<string, unknown>>; tile_jobs: Array<Record<string, unknown>>; audit_events: Array<Record<string, unknown>> }>(`/api/downloads/jobs/log${q}`);
@@ -542,5 +698,8 @@ export const api = {
   },
   async downloadAuthenticated(url: string, fallbackName?: string) {
     return downloadWithAuth(url, fallbackName);
+  },
+  downloadNative(url: string, fallbackName?: string) {
+    return downloadNativeFile(url, fallbackName);
   }
 };

@@ -29,9 +29,13 @@ import {
   XCircle
 } from 'lucide-react';
 import { AuthPanel } from './AuthPanel';
+import { ChatWorkspace, type ExternalPromptCommand } from './ChatPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
+import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { api, CommercialUser, DownloadJob, ResultPanel, WorkspaceDashboard } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import type { ChatContextPayload } from '@/lib/chatContext';
+import type { ParsedMapTextCommand } from './mapTextCommands';
 import {
   ConsoleArtifact,
   ProductTaskTone,
@@ -41,7 +45,7 @@ import {
   summarizeJobs
 } from './productConsoleData';
 
-type ConsoleTab = 'overview' | 'create' | 'tasks' | 'logs' | 'results' | 'data' | 'settings';
+type ConsoleTab = 'overview' | 'chat' | 'create' | 'tasks' | 'logs' | 'results' | 'data' | 'settings';
 type ConsoleNavItem = {
   id: ConsoleTab | 'map-workbench';
   label: string;
@@ -53,8 +57,11 @@ type ProductConsoleProps = {
   user: CommercialUser | null;
   setUser: (user: CommercialUser | null) => void;
   resultPanel?: ResultPanel | null;
-  onOpenChat?: () => void;
   onOpenMap?: () => void;
+  externalPrompt?: ExternalPromptCommand | null;
+  onMapTextCommand?: (command: ParsedMapTextCommand) => string;
+  onResultPanel?: (panel: ResultPanel) => void;
+  chatContext?: ChatContextPayload;
 };
 
 type DownloadProduct = {
@@ -74,6 +81,7 @@ type JobLogData = {
 const navItems: ConsoleNavItem[] = [
   { id: 'overview', label: '总览', icon: Home },
   { id: 'map-workbench', label: '地图工作台', icon: Map, action: 'openMap' },
+  { id: 'chat', label: '聊天', icon: MessageSquare },
   { id: 'create', label: '新建任务', icon: Play },
   { id: 'tasks', label: '任务中心', icon: ClipboardList },
   { id: 'logs', label: '运行日志', icon: TerminalSquare },
@@ -125,6 +133,28 @@ const toneStyles: Record<ProductTaskTone, string> = {
   canceled: 'border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400'
 };
 
+function artifactIdOf(value: unknown) {
+  if (!value || typeof value !== 'object') return '';
+  const item = value as { artifact_id?: unknown; id?: unknown };
+  return String(item.artifact_id || item.id || '').trim();
+}
+function pruneDashboardArtifactIds(dashboard: WorkspaceDashboard | null, artifactIds: Set<string>): WorkspaceDashboard | null {
+  if (!dashboard || artifactIds.size === 0) return dashboard;
+  return {
+    ...dashboard,
+    artifacts: (dashboard.artifacts || []).filter((artifact) => !artifactIds.has(String(artifact.artifact_id || ''))),
+    model_results: (dashboard.model_results || []).map((result) => {
+      const artifacts = Array.isArray(result.artifacts)
+        ? result.artifacts.filter((artifact) => !artifactIds.has(artifactIdOf(artifact)))
+        : [];
+      const artifact_ids = Array.isArray(result.artifact_ids)
+        ? result.artifact_ids.filter((artifactId) => !artifactIds.has(String(artifactId || '')))
+        : [];
+      return { ...result, artifacts, artifact_ids };
+    })
+  };
+}
+
 function StatusBadge({ status }: { status?: string }) {
   const item = normalizeTaskStatus(status);
   return (
@@ -139,7 +169,7 @@ function ProgressBar({ value = 0, tone = 'running' }: { value?: number; tone?: P
   const color = tone === 'failed' ? 'bg-rose-500' : tone === 'succeeded' ? 'bg-emerald-500' : tone === 'blocked' ? 'bg-orange-500' : 'bg-blue-600';
   return (
     <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-      <div className={cn('h-full rounded-full transition-all', color)} style={{ width: `${pct}%` }} />
+      <div className={cn('h-full rounded-full transition-[width]', color)} style={{ width: `${pct}%` }} />
     </div>
   );
 }
@@ -221,7 +251,16 @@ function artifactIcon(kind: ConsoleArtifact['kind']) {
   return FileArchive;
 }
 
-export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenMap }: ProductConsoleProps) {
+export function ProductConsole({
+  user,
+  setUser,
+  resultPanel,
+  onOpenMap,
+  externalPrompt,
+  onMapTextCommand,
+  onResultPanel,
+  chatContext = {}
+}: ProductConsoleProps) {
   const [activeTab, setActiveTab] = useState<ConsoleTab>('overview');
   const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -245,7 +284,11 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
   const [preflightMessage, setPreflightMessage] = useState('');
   const [preflightOk, setPreflightOk] = useState<boolean | null>(null);
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [deletingArtifactId, setDeletingArtifactId] = useState('');
+  const [selectedArtifactIds, setSelectedArtifactIds] = useState<Set<string>>(() => new Set());
+  const [deletedArtifactIds, setDeletedArtifactIds] = useState<Set<string>>(() => new Set());
   const userId = user?.user_id || '';
+  const openChatPage = () => setActiveTab('chat');
 
   const refresh = useCallback(async () => {
     setError('');
@@ -256,13 +299,13 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
       ]);
       setDashboard(dashboardData);
       setJobs(jobsData.jobs || []);
-      if (!selectedJobId && jobsData.jobs?.[0]?.job_id) setSelectedJobId(jobsData.jobs[0].job_id);
+      setSelectedJobId((current) => current || jobsData.jobs?.[0]?.job_id || '');
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取控制台数据失败');
     } finally {
       setLoading(false);
     }
-  }, [selectedJobId, userId]);
+  }, [userId]);
 
   useEffect(() => {
     setLoading(true);
@@ -273,7 +316,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
 
   const summary = useMemo(() => summarizeJobs(jobs), [jobs]);
   const counts = dashboard?.dataset_type_counts || {};
-  const artifacts = useMemo(() => groupArtifacts(dashboard?.artifacts || []), [dashboard]);
+  const artifacts = useMemo(() => groupArtifacts(dashboard?.artifacts || []).filter((artifact) => !deletedArtifactIds.has(artifact.artifact_id || '')), [dashboard, deletedArtifactIds]);
   const selectedJob = useMemo(() => jobs.find((job) => job.job_id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
   const filteredJobs = useMemo(() => {
     const keyword = query.trim().toLowerCase();
@@ -464,6 +507,72 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
     }
   };
 
+
+  const pruneDeletedArtifacts = useCallback((artifactIds: string[]) => {
+    const cleanIds = new Set(artifactIds.map((id) => String(id || '').trim()).filter(Boolean));
+    if (cleanIds.size === 0) return;
+    setDeletedArtifactIds((current) => new Set([...current, ...cleanIds]));
+    setSelectedArtifactIds((current) => {
+      const next = new Set(current);
+      cleanIds.forEach((id) => next.delete(id));
+      return next;
+    });
+    setDashboard((current) => pruneDashboardArtifactIds(current, cleanIds));
+  }, []);
+
+  const toggleArtifactSelection = (artifactId?: string) => {
+    const clean = String(artifactId || '').trim();
+    if (!clean) return;
+    setSelectedArtifactIds((current) => {
+      const next = new Set(current);
+      if (next.has(clean)) next.delete(clean);
+      else next.add(clean);
+      return next;
+    });
+  };
+
+  const deleteSelectedArtifacts = async () => {
+    const artifactIds = Array.from(selectedArtifactIds).filter((id) => !deletedArtifactIds.has(id));
+    if (!artifactIds.length) {
+      setNotice('Please select result files to delete.');
+      return;
+    }
+    if (!window.confirm(`Delete ${artifactIds.length} result file(s) from the server?`)) return;
+    setDeletingArtifactId('__batch__');
+    setNotice('');
+    try {
+      const result = await api.deleteArtifactsBatch(artifactIds, userId, true);
+      const deletedIds = (result.results || []).filter((item) => item.ok).map((item) => item.artifact_id);
+      pruneDeletedArtifacts(deletedIds);
+      setNotice(result.failed_count ? `Deleted ${deletedIds.length} result file(s); ${result.failed_count} failed.` : `Deleted ${deletedIds.length} result file(s).`);
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : 'Batch delete failed.');
+    } finally {
+      setDeletingArtifactId('');
+    }
+  };
+
+  const deleteArtifact = async (artifact: ConsoleArtifact | { artifact_id?: string; label: string }) => {
+    if (!artifact.artifact_id) {
+      setNotice('该结果文件缺少 artifact_id，无法删除。');
+      return;
+    }
+    if (!window.confirm(`删除结果文件 ${artifact.label}？此操作会删除服务器中的结果文件。`)) return;
+    setDeletingArtifactId(artifact.artifact_id);
+    setNotice('');
+    try {
+      const result = await api.deleteArtifact(artifact.artifact_id, userId, true);
+      if (!result.ok) throw new Error(result.status || 'Delete failed.');
+      pruneDeletedArtifacts([artifact.artifact_id]);
+      setNotice(`已删除结果文件：${artifact.label}`);
+      await refresh();
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '删除结果文件失败');
+    } finally {
+      setDeletingArtifactId('');
+    }
+  };
   const renderJobActions = (job: DownloadJob) => {
     const tone = normalizeTaskStatus(job.status).tone;
     const active = tone === 'running' || tone === 'waiting' || tone === 'blocked';
@@ -511,7 +620,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
               <button className="console-primary-button" onClick={() => setActiveTab('create')}>
                 <Play size={16} /> 新建任务
               </button>
-              <button className="console-secondary-button" onClick={onOpenChat}>
+              <button className="console-secondary-button" onClick={openChatPage}>
                 <MessageSquare size={16} /> 打开智能助手
               </button>
               <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}>
@@ -571,7 +680,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
           {artifacts.length === 0 ? (
             <EmptyState icon={FileText} title="暂无结果文件" description="任务完成后，报告、图表、数据和打包文件会出现在这里。" />
           ) : (
-            <ArtifactList artifacts={artifacts.slice(0, 5)} onDownload={downloadArtifact} />
+                <ArtifactList artifacts={artifacts.slice(0, 5)} onDownload={downloadArtifact} onDelete={deleteArtifact} deletingArtifactId={deletingArtifactId} selectedArtifactIds={selectedArtifactIds} onToggleSelect={toggleArtifactSelection} />
           )}
         </Panel>
       </div>
@@ -735,7 +844,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
               <button
                 key={job.job_id}
                 onClick={() => fetchJobLog(job)}
-                className={cn('w-full rounded-lg border p-3 text-left transition hover:border-blue-300 hover:bg-blue-50/60 dark:hover:border-blue-800 dark:hover:bg-blue-950/25', selectedJob?.job_id === job.job_id ? 'border-blue-300 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/35' : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900')}
+                className={cn('w-full rounded-lg border p-3 text-left transition-colors hover:border-blue-300 hover:bg-blue-50/60 dark:hover:border-blue-800 dark:hover:bg-blue-950/25', selectedJob?.job_id === job.job_id ? 'border-blue-300 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/35' : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900')}
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="truncate text-sm font-semibold">{getJobName(job)}</span>
@@ -786,14 +895,22 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
   );
 
   const renderResults = () => {
-    const panelFiles = resultPanel?.files?.filter((file) => file.download_url) || [];
+    const panelFiles = resultPanel?.files?.filter((file) => file.download_url && !deletedArtifactIds.has(file.artifact_id || '')) || [];
+    const selectedVisibleCount = Array.from(selectedArtifactIds).filter((id) => !deletedArtifactIds.has(id)).length;
     return (
       <div className="space-y-6">
         <Panel className="p-5">
           <SectionHeader
             title="结果文件"
             description="集中查看任务产出的报告、图表、数据文件和打包成果。"
-            action={<button className="console-primary-button" onClick={exportResults} disabled={exporting}>{exporting ? <Loader2 className="animate-spin" size={15} /> : <FileArchive size={15} />} 打包导出</button>}
+            action={
+              <div className="flex flex-wrap items-center gap-2">
+                <button data-testid="result-artifact-delete-selected" className="console-secondary-button" onClick={deleteSelectedArtifacts} disabled={!selectedVisibleCount || deletingArtifactId === '__batch__'}>
+                  {deletingArtifactId === '__batch__' ? <Loader2 className="animate-spin" size={15} /> : <Trash2 size={15} />} 批量删除{selectedVisibleCount ? ` (${selectedVisibleCount})` : ''}
+                </button>
+                <button className="console-primary-button" onClick={exportResults} disabled={exporting}>{exporting ? <Loader2 className="animate-spin" size={15} /> : <FileArchive size={15} />} 打包导出</button>
+              </div>
+            }
           />
           {notice && <div className="mb-4"><StateMessage tone="success">{notice}</StateMessage></div>}
           <div className="grid gap-4 md:grid-cols-3">
@@ -822,14 +939,41 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
             <EmptyState icon={FileText} title="暂无结果文件" description="任务成功后，文件会自动出现在这里；也可以从任务中心打开成功任务查看下载入口。" />
           ) : (
             <div className="grid gap-4 lg:grid-cols-2">
-              <ArtifactList artifacts={artifacts} onDownload={downloadArtifact} />
+              <ArtifactList artifacts={artifacts} onDownload={downloadArtifact} onDelete={deleteArtifact} deletingArtifactId={deletingArtifactId} selectedArtifactIds={selectedArtifactIds} onToggleSelect={toggleArtifactSelection} />
               {panelFiles.length > 0 && (
                 <div className="space-y-2">
                   {panelFiles.map((file) => (
-                    <button key={file.download_url} onClick={() => downloadArtifact(file.download_url || '', file.label || 'result')} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
-                      <span className="min-w-0 truncate font-semibold">{file.label || file.path || '结果文件'}</span>
-                      <Download className="shrink-0 text-slate-400" size={16} />
-                    </button>
+                    <div key={file.download_url} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm transition-colors hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+                      {file.artifact_id && (
+                        <input
+                          data-testid="result-artifact-select"
+                          type="checkbox"
+                          checked={selectedArtifactIds.has(file.artifact_id)}
+                          onChange={() => toggleArtifactSelection(file.artifact_id)}
+                          className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                          aria-label="选择结果文件"
+                        />
+                      )}
+                      <button type="button" onClick={() => downloadArtifact(file.download_url || '', file.label || 'result')} className="min-w-0 flex-1 truncate text-left font-semibold">{file.label || file.path || '结果文件'}</button>
+                      <div className="flex shrink-0 items-center gap-1">
+                        {file.artifact_id && (
+                          <button
+                            data-testid="result-artifact-delete"
+                            type="button"
+                            onClick={() => deleteArtifact({ artifact_id: file.artifact_id, label: file.label || file.path || '结果文件' })}
+                            disabled={deletingArtifactId === file.artifact_id}
+                            className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-60 dark:hover:bg-rose-950/35"
+                            title="删除结果文件"
+                            aria-label="删除结果文件"
+                          >
+                            {deletingArtifactId === file.artifact_id ? <Loader2 className="animate-spin" size={15} /> : <Trash2 size={15} />}
+                          </button>
+                        )}
+                        <button type="button" onClick={() => downloadArtifact(file.download_url || '', file.label || 'result')} className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950/35" title="下载" aria-label="下载">
+                          <Download size={16} />
+                        </button>
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}
@@ -855,23 +999,43 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
     </div>
   );
 
+  const renderChat = () => (
+    <ChatWorkspace
+      mode="page"
+      user={user}
+      setUser={setUser}
+      onMapTextCommand={onMapTextCommand}
+      externalPrompt={externalPrompt}
+      onResultPanel={onResultPanel}
+      chatContext={chatContext}
+      mentionDatasets={dashboard?.datasets || []}
+    />
+  );
+
   const renderSettings = () => (
-    <Panel className="p-5">
-      <SectionHeader title="设置与运行环境" description="当前保留原有设置能力，这里补充后台化的信息入口。" />
-      <div className="grid gap-4 md:grid-cols-2">
-        <InfoItem label="账号状态" value={user ? user.email : '未登录'} />
-        <InfoItem label="当前套餐" value={user?.plan || '--'} />
-        <InfoItem label="平台额度" value={user ? `${Number(user.platform_monthly_used || 0)} / ${Number(user.platform_monthly_quota || 0)}` : '--'} />
-        <InfoItem label="工作区" value={dashboard?.workdir || '默认工作区'} />
-      </div>
-      <div className="mt-5 flex flex-wrap gap-3">
-        <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}><Map size={15} /> 打开原地图工作台</button>
-        <button className="console-secondary-button" onClick={onOpenChat}><Bot size={15} /> 打开智能助手</button>
-      </div>
-    </Panel>
+    <div className="space-y-6">
+      <Panel className="p-5">
+        <SectionHeader title="设置与运行环境" description="当前保留原有设置能力，这里补充后台化的信息入口。" />
+        <div className="grid gap-4 md:grid-cols-2">
+          <InfoItem label="账号状态" value={user ? user.email : '未登录'} />
+          <InfoItem label="当前套餐" value={user?.plan || '--'} />
+          <InfoItem label="平台额度" value={user ? `${Number(user.platform_monthly_used || 0)} / ${Number(user.platform_monthly_quota || 0)}` : '--'} />
+          <InfoItem label="工作区" value={dashboard?.workdir || '默认工作区'} />
+        </div>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}><Map size={15} /> 打开原地图工作台</button>
+          <button className="console-secondary-button" onClick={openChatPage}><Bot size={15} /> 打开智能助手</button>
+        </div>
+      </Panel>
+      <Panel className="p-5">
+        <SectionHeader title="我的数据源账号" description="管理需要网页登录授权的数据源登录态。" />
+        <GSCloudAccountPanel enabled={Boolean(user)} />
+      </Panel>
+    </div>
   );
 
   const renderContent = () => {
+    if (activeTab === 'chat') return renderChat();
     if (loading) return <LoadingState label="正在加载控制台数据" />;
     if (error) return <StateMessage tone="error">{error}</StateMessage>;
     if (activeTab === 'overview') return renderOverview();
@@ -910,7 +1074,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
             <button
               key={id}
               onClick={() => activateNavItem(item)}
-              className={cn('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition', activeTab === id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white')}
+              className={cn('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition-colors', activeTab === id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white')}
             >
               <Icon size={17} strokeWidth={1.7} />
               {label}
@@ -933,7 +1097,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
               <button className="console-secondary-button" onClick={refresh} disabled={loading}>
                 <RefreshCcw size={15} className={loading ? 'animate-spin' : ''} /> 刷新
               </button>
-              <button className="console-secondary-button" onClick={onOpenChat}>
+              <button className="console-secondary-button" onClick={openChatPage}>
                 <MessageSquare size={15} /> 智能助手
               </button>
               <div className="min-w-0 sm:w-[360px]">
@@ -957,7 +1121,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
           </div>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <main className={cn('min-h-0 flex-1 p-4 sm:p-6', activeTab === 'chat' ? 'overflow-hidden' : 'overflow-y-auto')}>
           {renderContent()}
         </main>
       </div>
@@ -968,7 +1132,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
 function JobCompactRow({ job, onSelect }: { job: DownloadJob; onSelect: () => void }) {
   const status = normalizeTaskStatus(job.status);
   return (
-    <button onClick={onSelect} className="w-full rounded-lg border border-slate-200 bg-white p-3 text-left transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+    <button onClick={onSelect} className="w-full rounded-lg border border-slate-200 bg-white p-3 text-left transition-colors hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{getJobName(job)}</div>
@@ -986,7 +1150,7 @@ function JobCompactRow({ job, onSelect }: { job: DownloadJob; onSelect: () => vo
 function JobDetailRow({ job, selected, onSelect, actions }: { job: DownloadJob; selected: boolean; onSelect: () => void; actions: ReactNode }) {
   const status = normalizeTaskStatus(job.status);
   return (
-    <div className={cn('rounded-lg border bg-white p-4 transition dark:bg-slate-900', selected ? 'border-blue-300 ring-2 ring-blue-100 dark:border-blue-800 dark:ring-blue-950' : 'border-slate-200 dark:border-slate-800')}>
+    <div className={cn('rounded-lg border bg-white p-4 transition-colors dark:bg-slate-900', selected ? 'border-blue-300 ring-2 ring-blue-100 dark:border-blue-800 dark:ring-blue-950' : 'border-slate-200 dark:border-slate-800')}>
       <div className="grid gap-4 xl:grid-cols-[1fr_220px_auto] xl:items-center">
         <button onClick={onSelect} className="min-w-0 text-left">
           <div className="flex flex-wrap items-center gap-2">
@@ -1020,19 +1184,61 @@ function InfoItem({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function ArtifactList({ artifacts, onDownload }: { artifacts: ConsoleArtifact[]; onDownload: (url: string, name: string) => void }) {
+function ArtifactList({
+  artifacts,
+  onDownload,
+  onDelete,
+  deletingArtifactId = '',
+  selectedArtifactIds,
+  onToggleSelect
+}: {
+  artifacts: ConsoleArtifact[];
+  onDownload: (url: string, name: string) => void;
+  onDelete?: (artifact: ConsoleArtifact) => void;
+  deletingArtifactId?: string;
+  selectedArtifactIds?: Set<string>;
+  onToggleSelect?: (artifactId?: string) => void;
+}) {
   return (
     <div className="space-y-2">
       {artifacts.map((artifact) => {
         const Icon = artifactIcon(artifact.kind);
+        const deleting = Boolean(artifact.artifact_id && deletingArtifactId === artifact.artifact_id);
         return (
-          <button key={artifact.url} onClick={() => onDownload(artifact.url, artifact.label)} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
-            <span className="flex min-w-0 items-center gap-3">
+          <div key={artifact.url} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm transition-colors hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+            {artifact.artifact_id && (
+              <input
+                data-testid="result-artifact-select"
+                type="checkbox"
+                checked={selectedArtifactIds?.has(artifact.artifact_id) || false}
+                onChange={() => onToggleSelect?.(artifact.artifact_id)}
+                className="h-4 w-4 shrink-0 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                aria-label="选择结果文件"
+              />
+            )}
+            <button type="button" onClick={() => onDownload(artifact.url, artifact.label)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
               <Icon className="shrink-0 text-slate-400" size={17} />
               <span className="min-w-0 truncate font-semibold">{artifact.label}</span>
-            </span>
-            <Download className="shrink-0 text-slate-400" size={16} />
-          </button>
+            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              {artifact.artifact_id && (
+                <button
+                  data-testid="result-artifact-delete"
+                  type="button"
+                  onClick={() => onDelete?.(artifact)}
+                  disabled={deleting}
+                  className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-60 dark:hover:bg-rose-950/35"
+                  title="删除结果文件"
+                  aria-label="删除结果文件"
+                >
+                  {deleting ? <Loader2 className="animate-spin" size={15} /> : <Trash2 size={15} />}
+                </button>
+              )}
+              <button type="button" onClick={() => onDownload(artifact.url, artifact.label)} className="grid h-8 w-8 place-items-center rounded-lg text-slate-400 transition-colors hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-950/35" title="下载" aria-label="下载">
+                <Download size={16} />
+              </button>
+            </div>
+          </div>
         );
       })}
     </div>

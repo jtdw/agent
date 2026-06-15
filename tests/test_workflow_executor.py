@@ -65,6 +65,31 @@ class WorkflowExecutorTests(unittest.TestCase):
             ),
         )
 
+    def seed_gcp_prediction_table(self, service: GISWorkspaceService, rows: int = 36) -> dict:
+        dataset_name = service.manager.put_table(
+            "xgb_sm_demo",
+            pd.DataFrame(
+                {
+                    "soil_moisture": [float(i) / 100.0 for i in range(rows)],
+                    "xgb_sm_demo_xgb": [float(i) / 100.0 + (0.002 if i % 2 else -0.001) for i in range(rows)],
+                    "date": pd.date_range("2024-01-01", periods=rows, freq="D").astype(str),
+                    "lon": [115.0 + i * 0.01 for i in range(rows)],
+                    "lat": [41.0 + i * 0.01 for i in range(rows)],
+                }
+            ),
+        )
+        return {
+            "model": "XGBoost",
+            "output_prefix": "xgb_sm_demo",
+            "result_dataset": dataset_name,
+            "summary": {
+                "dataset": "demo_xgboost_soil_moisture",
+                "target_col": "soil_moisture",
+                "prediction_column": "xgb_sm_demo_xgb",
+                "date_col": "date",
+            },
+        }
+
     def write_test_raster(self, path: Path) -> Path:
         transform = from_origin(-0.5, 2.5, 1, 1)
         data = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype="float32")
@@ -159,6 +184,34 @@ class WorkflowExecutorTests(unittest.TestCase):
             self.assertEqual(result["failed_step"], "clip_vector")
             self.assertEqual(result["steps"][0]["status"], "failed")
             self.assertEqual(result["steps"][1]["status"], "skipped")
+
+    def test_workflow_cooperative_cancel_stops_before_next_step(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            self.seed_clip_map_data(service)
+            checks = {"count": 0}
+
+            def cancel_after_first_boundary() -> bool:
+                checks["count"] += 1
+                return checks["count"] >= 2
+
+            plan = {
+                "workflow_plan": [
+                    {"step_id": "check_dataset", "tool_name": "describe_dataset", "validated_tool_args": {"dataset_name": "points"}},
+                    {"step_id": "generate_map", "tool_name": "plot_dataset", "depends_on": ["check_dataset"], "validated_tool_args": {"dataset_name": "points", "column": "pop_density"}},
+                ]
+            }
+
+            execution = execute_workflow_plan(service.manager, plan, cancel_checker=cancel_after_first_boundary)
+            result = parse_workflow_result(execution["raw_reply"])
+
+            self.assertTrue(execution["executed"])
+            self.assertTrue(execution["canceled"])
+            self.assertFalse(execution["ok"])
+            self.assertEqual(result["failed_step"], "generate_map")
+            self.assertEqual(result["steps"][0]["status"], "success")
+            self.assertEqual(result["steps"][1]["status"], "canceled")
+            self.assertEqual(result["steps"][1]["tool_result"]["error_code"], "TASK_CANCELED")
 
     def test_workflow_validates_objects_before_invoking_tool(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -415,6 +468,38 @@ class WorkflowExecutorTests(unittest.TestCase):
             reply = interpret_result("explain model", intent, plan, execution["raw_reply"], self.modeling_context(), {})
             self.assertIn(model_result_id, reply)
             self.assertIn("metrics", reply.lower())
+
+    def test_gcp_prompt_builds_and_executes_uncertainty_workflow_from_recent_model(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            recent_model = self.seed_gcp_prediction_table(service)
+            context = {
+                "workspace": {"dataset_count": 2},
+                "active_dataset": {"name": "xgb_sm_demo", "type": "table"},
+                "available_fields": ["soil_moisture", "xgb_sm_demo_xgb", "date", "lon", "lat"],
+                "numeric_fields": ["soil_moisture", "xgb_sm_demo_xgb", "lon", "lat"],
+                "recent_model_result": recent_model,
+            }
+            intent = {"intent": "modeling", "confidence": 0.86, "secondary_intents": []}
+
+            plan = build_task_plan("做 GCP 不确定性分析。", intent, context, manager=service.manager)
+
+            self.assertFalse(plan["should_ask_clarification"])
+            self.assertIn("geographical_conformal_prediction", plan["validated_tool_args"])
+            args = plan["validated_tool_args"]["geographical_conformal_prediction"]
+            self.assertEqual(args["calibration_dataset"], "xgb_sm_demo")
+            self.assertEqual(args["observed_col"], "soil_moisture")
+            self.assertEqual(args["predicted_cols"], "xgb_sm_demo_xgb")
+            self.assertEqual(args["date_col"], "date")
+
+            execution = execute_workflow_plan(service.manager, plan)
+            result = parse_workflow_result(execution["raw_reply"])
+
+            self.assertTrue(execution["ok"])
+            self.assertIn("run_gcp", [step["step_id"] for step in result["steps"]])
+            gcp_step = next(step for step in result["steps"] if step["step_id"] == "run_gcp")
+            self.assertEqual(gcp_step["tool_result"]["tool_name"], "geographical_conformal_prediction")
+            self.assertEqual(gcp_step["tool_result"]["outputs"]["metrics_dataset"], "xgb_sm_demo_gcp_gcp_metrics")
 
     def test_missing_target_variable_does_not_create_modeling_workflow(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

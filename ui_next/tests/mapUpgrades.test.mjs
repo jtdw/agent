@@ -30,6 +30,12 @@ assert.match(mapStageSource, /function normalizeMapBounds/);
 assert.match(mapStageSource, /function safeFitBounds/);
 assert.match(mapStageSource, /clientWidth|offsetWidth/);
 assert.match(mapStageSource, /Number\.isFinite/);
+assert.match(mapStageSource, /function mapLayerSignature/, 'MapStage must compute stable layer signatures before updating polled layers');
+assert.match(
+  mapStageSource,
+  /resultLayerSignatureRef\.current[\s\S]*?setResultLayers\(layers\);/,
+  'MapStage must compare the polled layer signature before replacing result layers'
+);
 assert.equal(mapStageSource.includes('right: 430'), false);
 assert.equal(layerPanelSource.includes('图层透明度'), false);
 assert.equal(layerPanelSource.includes('图例'), false);
@@ -37,7 +43,17 @@ assert.match(geometry.measurementLabel([[0, 0], [0, 1]], 'line'), /^长度/);
 assert.match(geometry.measurementLabel([[0, 0], [0, 1], [1, 1]], 'polygon'), /^面积/);
 
 assert.deepEqual(commands.parseMapTextCommand('隐藏 DEM'), { kind: 'layer', layer: 'dem', visible: false, reply: '已隐藏 DEM 图层。' });
+assert.deepEqual(commands.parseMapTextCommand('请显示 DEM 图层'), { kind: 'layer', layer: 'dem', visible: true, reply: '已显示 DEM 图层。' });
 assert.deepEqual(commands.parseMapTextCommand('放大地图'), { kind: 'map', command: 'zoomIn', reply: '已放大地图。' });
 assert.deepEqual(commands.parseMapTextCommand('清空绘制'), { kind: 'draw', action: 'clear', reply: '已清空绘制内容。' });
+assert.equal(commands.parseMapTextCommand(`使用当前上传的数据训练 XGBoost 土壤水分模型。
+目标列是 soil_moisture。
+特征列使用 elevation,slope,precip_7d,ndvi,lst,lon,lat。
+时间列是 date。
+输出名称为 xgb_sm_demo。
+开启空间分块验证，生成预测结果、残差、特征重要性、精度指标和模型文件。`), null);
+assert.equal(commands.parseMapTextCommand('请缩小模型预测误差并重新训练'), null);
+assert.equal(commands.parseMapTextCommand('定位数据处理失败原因'), null);
+assert.equal(commands.parseMapTextCommand('打开土壤水分模型训练结果并分析精度'), null);
 
 console.log('map upgrade tests passed');

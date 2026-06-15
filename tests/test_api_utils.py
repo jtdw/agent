@@ -61,6 +61,45 @@ class ApiUtilsTest(unittest.TestCase):
         self.assertIsInstance(caught.exception.detail, dict)
         self.assertIn("error_id", caught.exception.detail)
 
+    @unittest.skipIf(find_spec("rasterio") is None, "rasterio is not installed in this Python environment")
+    def test_raster_preview_handles_integer_masked_nodata(self) -> None:
+        import numpy as np
+        import rasterio
+        from rasterio.transform import from_origin
+
+        from api_server import _ensure_raster_preview
+        from core.config import Settings
+        from core.service import GISWorkspaceService
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            raster_path = root / "int16_dem.tif"
+            data = np.array([[1, -9999], [3, 4]], dtype=np.int16)
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=2,
+                width=2,
+                count=1,
+                dtype="int16",
+                crs="EPSG:4326",
+                transform=from_origin(115.0, 41.0, 0.01, 0.01),
+                nodata=-9999,
+            ) as dst:
+                dst.write(data, 1)
+
+            settings = Settings(api_key="", workdir=root / "workspace")
+            settings.ensure_dirs()
+            service = GISWorkspaceService(settings)
+            dataset_name = service.manager.put_raster_path("int16_dem", raster_path, meta={"crs": "EPSG:4326"})
+
+            preview = _ensure_raster_preview(service, dataset_name, user_id="u_test")
+
+            self.assertTrue(Path(preview["preview_path"]).exists())
+            self.assertIn("dataset_name=", preview["preview_url"])
+            self.assertEqual(len(preview["bounds"]), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,23 @@ class BuiltinWorkspacePromptTests(unittest.TestCase):
             self.assertIn("数据检查", result["reply"])
             self.assertIn("制图", result["reply"])
 
+    def test_builtin_capability_prompt_does_not_inspect_active_dataset(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            self.seed_table(service)
+
+            result = service.ask("你能做什么？")
+
+            self.assertEqual(result["model"], "builtin-workspace")
+            self.assertEqual(result["mode"], "builtin_capability")
+            self.assertIn("数据检查", result["reply"])
+            self.assertIn("制图", result["reply"])
+            self.assertNotIn("已完成操作", result["reply"])
+            self.assertNotIn("使用的数据", result["reply"])
+            self.assertNotIn("soil_station", result["reply"])
+            self.assertNotIn("station_id", result["reply"])
+            self.assertNotIn("soil_moisture", result["reply"])
+
 
 if __name__ == "__main__":
     unittest.main()

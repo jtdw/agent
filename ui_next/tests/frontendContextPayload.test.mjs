@@ -23,6 +23,9 @@ const analysisPanelSource = await readFile('src/components/AnalysisPanel.tsx', '
 
 const payload = chatContext.sanitizeChatContextPayload({
   session_id: 'session_1',
+  selected_artifact_path: '../outside/secret.png',
+  active_task_id: 'token=secret-task',
+  user_focus_hint: 'cookie=secret-session',
   selected_feature_properties: {
     name: 'A'.repeat(300),
     token: 'secret',
@@ -36,6 +39,9 @@ const payload = chatContext.sanitizeChatContextPayload({
 
 assert.equal(payload.session_id, 'session_1');
 assert.deepEqual(payload.selected_map_bounds, [100, 20, 101, 21]);
+assert.equal('selected_artifact_path' in payload, false);
+assert.equal('active_task_id' in payload, false);
+assert.equal('user_focus_hint' in payload, false);
 assert.equal(payload.selected_feature_properties.safe, 1);
 assert.equal(payload.selected_feature_properties.name.length, 200);
 assert.equal('token' in payload.selected_feature_properties, false);

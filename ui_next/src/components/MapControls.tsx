@@ -29,17 +29,15 @@ export function MapControls({
         <motion.button
           key={label}
           onClick={onClick}
-          whileHover={{ scale: 1.08, y: -1 }}
           whileTap={{ scale: 0.97 }}
           title={label}
-          className={active ? 'grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow' : 'glass-panel grid h-12 w-12 place-items-center rounded-full text-slate-700 transition dark:text-slate-200'}
+          className={active ? 'grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow' : 'glass-panel stable-hover grid h-12 w-12 place-items-center rounded-full text-slate-700 dark:text-slate-200'}
         >
           <Icon size={20} strokeWidth={1.5} />
         </motion.button>
       ))}
       <motion.button
         onClick={toggleTheme}
-        whileHover={{ scale: 1.08, y: -1 }}
         whileTap={{ scale: 0.97 }}
         title="主题切换"
         className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow"

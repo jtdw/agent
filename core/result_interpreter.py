@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .tool_contracts import parse_tool_result
@@ -52,6 +53,106 @@ def _frontend_reference_note(context: dict[str, Any]) -> str:
     if ref_type == "model_result":
         return f"我正在解释你当前选中的模型结果：{label}。"
     return ""
+
+
+_GENERAL_TASK_LABELS_DROP = {
+    "已完成操作",
+    "使用的数据",
+    "输出文件",
+    "可能问题",
+    "下一步建议",
+}
+_GENERAL_TASK_LABELS_KEEP = {
+    "关键结果",
+    "结果含义",
+}
+
+
+def _strip_general_task_label(line: str) -> tuple[str, str]:
+    cleaned = str(line or "").strip()
+    label = ""
+    for _ in range(4):
+        match = re.match(r"^(?:[-*]\s*)?(?:\*\*)?([^：:]{2,12})(?:\*\*)?\s*[：:]\s*(.*)$", cleaned)
+        if not match:
+            return label, cleaned
+        candidate = match.group(1).strip()
+        rest = match.group(2).strip()
+        if candidate not in _GENERAL_TASK_LABELS_DROP and candidate not in _GENERAL_TASK_LABELS_KEEP:
+            return label, cleaned
+        label = candidate
+        if candidate in _GENERAL_TASK_LABELS_DROP:
+            return label, ""
+        cleaned = rest
+    return label, cleaned
+
+
+def _is_workspace_grounding_line(line: str) -> bool:
+    text = str(line or "")
+    return any(
+        marker in text
+        for marker in (
+            "当前工作区",
+            "工作区已有",
+            "工作区中",
+            "现有工作区",
+            "已有的矢量",
+            "已有的栅格",
+            "已有的表格",
+        )
+    )
+
+
+def _default_general_gis_reply(prompt: str) -> str:
+    text = str(prompt or "").lower()
+    if "未来" in text or "趋势" in text or "发展方向" in text:
+        return (
+            "GIS 的未来发展方向主要包括云原生与在线协同、AI 与遥感智能解译、三维 GIS 与数字孪生、"
+            "时空大数据实时分析、开放标准与跨平台互操作，以及面向智慧城市、生态环境、应急管理等行业的深度融合。"
+        )
+    return (
+        "GIS 是地理信息系统，用于采集、管理、分析和可视化带有空间位置的信息。"
+        "它把地图、属性表、遥感影像、地形等数据组织在一起，支持空间查询、叠加分析、路径规划、制图和决策支持。"
+    )
+
+
+def _clean_general_gis_reply(raw_reply: str, prompt: str) -> str:
+    raw = str(raw_reply or "").strip()
+    if not raw:
+        return _default_general_gis_reply(prompt)
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for raw_line in re.split(r"\r?\n+", raw):
+        line = raw_line.strip()
+        if not line:
+            continue
+        _, cleaned = _strip_general_task_label(line)
+        if not cleaned or _is_workspace_grounding_line(cleaned):
+            continue
+        normalized = re.sub(r"\s+", " ", cleaned)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(cleaned)
+
+    return "\n".join(lines).strip() or _default_general_gis_reply(prompt)
+
+
+def _looks_like_structured_task_reply(raw_reply: str) -> bool:
+    text = str(raw_reply or "")
+    labels = (
+        "已完成操作",
+        "使用数据",
+        "关键结果",
+        "输出文件",
+        "处理后的数据位置",
+        "最新模型结果",
+        "结果含义",
+        "含义与风险",
+        "可能问题",
+        "下一步建议",
+    )
+    return sum(1 for label in labels if label in text) >= 2
 
 
 def _format_tool_result_reply(tool_result: dict[str, Any], context: dict[str, Any]) -> str:
@@ -160,6 +261,65 @@ def _format_workflow_result_reply(workflow_result: dict[str, Any], context: dict
     )
 
 
+def _format_gcp_workflow_reply(workflow_result: dict[str, Any], context: dict[str, Any]) -> str:
+    dataset = _dataset_label(context)
+    steps = _as_list(workflow_result.get("steps"))
+    gcp_step = next((step for step in steps if _as_dict(step).get("tool_name") == "geographical_conformal_prediction"), {})
+    tool_result = _as_dict(_as_dict(gcp_step).get("tool_result"))
+    outputs = _as_dict(tool_result.get("outputs"))
+    diagnostics = _as_dict(tool_result.get("diagnostics"))
+    metrics_rows = _as_list(diagnostics.get("metrics"))
+    metric_lines: list[str] = []
+    assessment_lines: list[str] = []
+    for row in metrics_rows[:4]:
+        if not isinstance(row, dict):
+            continue
+        picp = row.get("PICP")
+        nominal = row.get("nominal_coverage")
+        n_calibration = row.get("n_calibration")
+        n_target = row.get("n_target")
+        metric_lines.append(
+            "- "
+            + str(row.get("predicted") or "prediction")
+            + f": method={row.get('method') or 'GCP'}, PICP={row.get('PICP') if row.get('PICP') is not None else 'NA'}, "
+            + f"MPIW={row.get('MPIW') if row.get('MPIW') is not None else 'NA'}, n_target={row.get('n_target')}"
+        )
+        assessment_lines.append(f"- 校准样本：{n_calibration}；评估/目标样本：{n_target}。")
+        if isinstance(picp, (int, float)) and isinstance(nominal, (int, float)):
+            if picp + 0.02 < nominal:
+                assessment_lines.append(f"- PICP={picp:.3f}，低于名义覆盖率 {nominal:.3f}，说明当前区间偏窄，覆盖不足。")
+            elif picp - 0.02 > nominal:
+                assessment_lines.append(f"- PICP={picp:.3f}，高于名义覆盖率 {nominal:.3f}，说明区间偏保守，可能过宽。")
+            else:
+                assessment_lines.append(f"- PICP={picp:.3f}，接近名义覆盖率 {nominal:.3f}，覆盖可靠性基本达标。")
+    artifact_lines = _artifact_lines(_as_list(workflow_result.get("final_artifacts")), limit=8)
+    if not tool_result.get("ok"):
+        return "\n".join(
+            [
+                "已完成操作：尝试执行 GCP 不确定性分析。",
+                f"使用的数据：{dataset}。",
+                f"关键结果：GCP 执行失败，{tool_result.get('user_message') or tool_result.get('error_title') or '请检查输入数据和字段'}",
+                "输出文件：本次失败，没有生成新的 GCP 输出文件。",
+                "结果含义：GCP 需要已有模型预测列和对应观测列，用它们计算预测区间、覆盖率和区间宽度。",
+                "可能问题：预测列缺失、观测列缺失、可用校准样本少于 20、或结果数据集没有注册到工作区。",
+                "下一步建议：" + "；".join(str(item) for item in _as_list(tool_result.get("next_actions"))) or "补齐输入后重试。",
+            ]
+        )
+    return "\n".join(
+        [
+            "已完成操作：已执行 GCP 不确定性分析。",
+            f"使用的数据：{dataset}。",
+            "关键结果：",
+            *(metric_lines or ["- 已生成 GCP 区间结果和指标表。"]),
+            "输出文件：" + ("\n" + "\n".join(artifact_lines) if artifact_lines else " 已生成结果，但未登记 artifact。"),
+            "结果含义：GCP 结果用于评估预测区间是否可靠。PICP 表示覆盖率，MPIW 表示平均区间宽度；理想情况是覆盖率接近名义水平，同时区间尽量窄。",
+            "结果解读：" + ("\n" + "\n".join(assessment_lines) if assessment_lines else " 已生成指标，请打开 GCP metrics 表进一步查看覆盖率和区间宽度。"),
+            "可能问题：如果 PICP 明显偏低，说明区间过窄且不可靠；如果 MPIW 很大，说明不确定性高或模型误差较大。",
+            "下一步建议：查看 GCP 指标表；对比点预测 RMSE/MAE 与 GCP 的 PICP/MPIW；必要时检查残差空间分布并补充空间特征。",
+        ]
+    )
+
+
 def _model_result(context: dict[str, Any], dashboard: dict[str, Any]) -> dict[str, Any]:
     ref = _as_dict(context.get("referenced_object"))
     if ref.get("type") == "model_result" and not ref.get("missing"):
@@ -218,8 +378,16 @@ def interpret_result(
     context: dict[str, Any],
     dashboard: Any,
 ) -> str:
+    task_type = str(plan.get("task_type") or intent.get("intent") or "general")
+    if task_type == "general_gis_question":
+        return _clean_general_gis_reply(raw_reply, prompt)
+
     parsed_workflow_result = parse_workflow_result(raw_reply)
     if parsed_workflow_result is not None:
+        if any(_as_dict(step).get("tool_name") == "geographical_conformal_prediction" for step in _as_list(parsed_workflow_result.get("steps"))):
+            reply = _format_gcp_workflow_reply(parsed_workflow_result, context)
+            note = _frontend_reference_note(context)
+            return f"{note}\n{reply}" if note else reply
         reply = interpret_workflow_result(parsed_workflow_result, prompt=prompt, context=context, plan=plan).get("markdown_reply", "")
         note = _frontend_reference_note(context)
         return f"{note}\n{reply}" if note else reply
@@ -231,7 +399,6 @@ def interpret_result(
         return f"{note}\n{reply}" if note else reply
 
     dashboard_dict = _as_dict(dashboard)
-    task_type = str(plan.get("task_type") or intent.get("intent") or "general")
     dataset = _dataset_label(context)
     raw = str(raw_reply or "").strip()
     if not raw and plan.get("should_ask_clarification") and plan.get("clarification_question"):
@@ -255,6 +422,9 @@ def interpret_result(
     frontend_note = _frontend_reference_note(context)
     if frontend_note:
         raw = f"{frontend_note}\n{raw}" if raw else frontend_note
+
+    if task_type in {"modeling", "result_analysis"} and raw and _looks_like_structured_task_reply(raw):
+        return raw
 
     if task_type == "troubleshooting":
         error = _as_dict(context.get("recent_error"))
@@ -299,8 +469,8 @@ def interpret_result(
                 "输出文件：" + ("\n" + "\n".join(output_lines) if output_lines else " 暂未识别到输出文件。"),
                 "结果含义：",
                 metric_block,
-                "特征重要性/鐗瑰緛閲嶈鎬?：用于判断哪些输入变量对预测贡献更大；需要结合领域知识排除伪相关。",
-                "残差空间分布/娈嬪樊绌洪棿鍒嗗竷：用于检查误差是否在空间上聚集；若残差聚集，说明模型可能遗漏了空间因素或区域差异。",
+                "特征重要性：用于判断哪些输入变量对预测贡献更大；需要结合领域知识排除伪相关。",
+                "残差空间分布：用于检查误差是否在空间上聚集；若残差聚集，说明模型可能遗漏了空间因素或区域差异。",
                 "可能问题：样本量不足、目标变量缺失、特征共线、空间泄漏或训练/验证划分不合理都会导致指标偏乐观或偏差。",
                 "下一步建议：" + "；".join(_recommendations(plan, model, context)),
             ]

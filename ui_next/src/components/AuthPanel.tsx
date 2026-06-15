@@ -82,8 +82,8 @@ function PlanBadge({ plan, onClick }: { plan: string | undefined; onClick?: () =
       type="button"
       onClick={onClick}
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-black tracking-wide shadow-sm transition',
-        onClick && 'cursor-pointer hover:-translate-y-0.5 hover:shadow-glow focus:outline-none focus:ring-2 focus:ring-cyan-glow/45',
+        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-black tracking-wide shadow-sm transition-colors',
+        onClick && 'cursor-pointer hover:border-cyan-glow/45 hover:bg-cyan-glow/10 focus:outline-none focus:ring-2 focus:ring-cyan-glow/45',
         styles
       )}
       title="查看或调整套餐"
@@ -150,9 +150,8 @@ function UpgradeModal({ user, open, onClose, onUpgraded }: { user: CommercialUse
                   return (
                     <motion.div
                       key={plan}
-                      whileHover={{ y: -3, scale: 1.01 }}
                       className={cn(
-                        'relative overflow-hidden rounded-[22px] border p-5 transition',
+                        'relative overflow-hidden rounded-[22px] border p-5 transition-colors',
                         item.popular ? 'border-cyan-glow/45 bg-cyan-glow/10 shadow-glow' : 'border-white/40 bg-white/35 dark:border-white/10 dark:bg-white/5'
                       )}
                     >
@@ -316,7 +315,7 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
               <button data-testid="auth-submit" onClick={submit} disabled={busy || !email || !password} className="primary-button mt-5 w-full gap-2 disabled:opacity-50">
                 {mode === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />} {busy ? '处理中...' : mode === 'login' ? '登录' : '注册 BASIC 账号'}
               </button>
-              <button data-testid="auth-mode-toggle" onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="mt-4 w-full text-sm font-semibold text-slate-500 transition hover:text-ocean dark:text-slate-400">
+              <button data-testid="auth-mode-toggle" onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="mt-4 w-full text-sm font-semibold text-slate-500 transition-colors hover:text-ocean dark:text-slate-400">
                 {mode === 'login' ? '没有账号？立即注册' : '已有账号？返回登录'}
               </button>
               <button onClick={() => setOpen(false)} className="mt-2 w-full text-xs text-slate-400 hover:text-slate-600">关闭</button>

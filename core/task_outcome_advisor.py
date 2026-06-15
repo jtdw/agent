@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -41,6 +42,48 @@ def _metric_summary(metrics: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def _compact_upload_message(message: str) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    loaded = None
+    for pattern in (
+        r"(?:已加载数据集|已加载数据)\s*[:：]\s*([^\s\[（(。\n;；]+)",
+        r"Loaded dataset\s+([^\s(]+)",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            loaded = match.group(1).strip()
+            break
+    if loaded:
+        return f"已加载数据：{loaded}。"
+
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    first_line = first_line.split("[", 1)[0].strip()
+    first_line = first_line.split("{", 1)[0].strip()
+    if len(first_line) > 100:
+        first_line = first_line[:97].rstrip() + "..."
+    return first_line
+
+
+def _dataset_upload_detail(item: dict[str, Any]) -> str:
+    name = str(item.get("name") or "").strip()
+    if not name:
+        return ""
+    data_type = str(item.get("type") or item.get("data_type") or "").strip()
+    meta = _as_dict(item.get("meta"))
+    details: list[str] = []
+    rows = meta.get("rows") or item.get("row_count")
+    columns = _as_list(meta.get("columns"))
+    if rows is not None:
+        details.append(f"{rows} 行")
+    if columns:
+        details.append(f"{len(columns)} 个字段")
+    if data_type:
+        details.insert(0, data_type)
+    return f"{name}（{'，'.join(details)}）" if details else name
+
+
 def _download_paths(result: dict[str, Any]) -> list[str]:
     paths: list[str] = []
     for key in ("job", "scene_job", "tile_job"):
@@ -54,16 +97,27 @@ def _download_paths(result: dict[str, Any]) -> list[str]:
 
 def _upload_summary(result: dict[str, Any], dashboard: dict[str, Any]) -> str:
     count = result.get("count")
-    messages = [str(item) for item in _as_list(result.get("messages")) if str(item).strip()]
-    datasets = [str(item.get("name") or "") for item in _as_list(dashboard.get("datasets")) if isinstance(item, dict)]
+    messages = list(
+        dict.fromkeys(
+            item
+            for item in (_compact_upload_message(str(value)) for value in _as_list(result.get("messages")))
+            if item
+        )
+    )
+    datasets = [
+        item
+        for item in (_dataset_upload_detail(value) for value in _as_list(dashboard.get("datasets")) if isinstance(value, dict))
+        if item
+    ]
     lines = []
     if count:
         lines.append(f"已处理 {count} 个上传文件。")
     if messages:
-        lines.append("；".join(messages[:4]))
+        lines.append(" ".join(messages[:4]))
     if datasets:
-        dataset_text = ", ".join([name for name in datasets if name][:8])
-        lines.append(f"当前工作区数据集：{dataset_text}。")
+        dataset_text = "；".join(datasets[:6])
+        suffix = f" 等 {len(datasets)} 个数据集" if len(datasets) > 6 else ""
+        lines.append(f"当前工作区数据集：{dataset_text}{suffix}。")
     return "\n".join(lines) or "上传任务已完成。"
 
 

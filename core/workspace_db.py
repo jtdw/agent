@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from .response_postprocess import dedupe_assistant_reply, repair_mojibake_text
 
 
 class WorkspaceDatabase:
@@ -322,6 +325,49 @@ class WorkspaceDatabase:
             ).fetchall()
         return [self._decode_artifact(row) for row in rows]
 
+    def delete_artifact(self, artifact_id: str) -> bool:
+        clean = str(artifact_id or "").strip()
+        if not clean:
+            return False
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM artifacts WHERE artifact_id = ?", (clean,))
+            return cur.rowcount > 0
+
+    def remove_artifact_references(self, artifact_id: str) -> int:
+        clean = str(artifact_id or "").strip()
+        if not clean:
+            return 0
+        changed = 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            rows = conn.execute("SELECT * FROM model_results").fetchall()
+            for row in rows:
+                artifact_ids = json.loads(row["artifact_ids_json"] or "[]")
+                artifacts = json.loads(row["artifacts_json"] or "[]")
+                next_ids = [item for item in artifact_ids if str(item or "") != clean]
+                next_artifacts = [
+                    item
+                    for item in artifacts
+                    if not (isinstance(item, dict) and str(item.get("artifact_id") or item.get("id") or "") == clean)
+                ]
+                if next_ids == artifact_ids and next_artifacts == artifacts:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE model_results
+                    SET artifact_ids_json = ?, artifacts_json = ?, updated_at = ?
+                    WHERE model_result_id = ?
+                    """,
+                    (
+                        json.dumps(next_ids, ensure_ascii=False),
+                        json.dumps(next_artifacts, ensure_ascii=False, default=str),
+                        now,
+                        row["model_result_id"],
+                    ),
+                )
+                changed += 1
+        return changed
+
     def _set_state(self, key: str, value: str) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
@@ -399,6 +445,21 @@ class WorkspaceDatabase:
                 conn.execute(f'DROP TABLE IF EXISTS "{info["sql_table"]}"')
             conn.execute("DELETE FROM dataset_catalog WHERE dataset_name = ?", (dataset_name,))
             conn.execute("DELETE FROM document_store WHERE dataset_name = ?", (dataset_name,))
+
+    def drop_datasets_by_path(self, path: str | Path) -> list[str]:
+        target = str(Path(path).resolve())
+        removed: list[str] = []
+        for item in self.list_catalog():
+            try:
+                if str(Path(str(item.get("path") or "")).resolve()) != target:
+                    continue
+            except Exception:
+                continue
+            dataset_name = str(item.get("dataset_name") or "")
+            if dataset_name:
+                self.drop_dataset(dataset_name)
+                removed.append(dataset_name)
+        return removed
 
     def sync_table(
         self,
@@ -567,14 +628,19 @@ class WorkspaceDatabase:
         self._set_state("current_conversation_id", session_id)
         self.touch_conversation(session_id)
 
-    def add_message(self, session_id: str, role: str, content: str, meta: dict[str, Any] | None = None) -> None:
+    def add_message(self, session_id: str, role: str, content: str, meta: dict[str, Any] | None = None) -> int:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        clean_content = repair_mojibake_text(str(content or ""))
+        if role == "assistant":
+            clean_content = dedupe_assistant_reply(clean_content)
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO conversation_messages (session_id, role, content, meta_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, content, json.dumps(meta or {}, ensure_ascii=False), now),
+                (session_id, role, clean_content, json.dumps(meta or {}, ensure_ascii=False), now),
             )
+            message_id = int(cursor.lastrowid)
         self.touch_conversation(session_id)
+        return message_id
 
     def get_conversation_state(self, session_id: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -614,9 +680,12 @@ class WorkspaceDatabase:
             ).fetchone()
             if not row:
                 raise ValueError(f"未找到消息：{message_id}")
+            clean_content = repair_mojibake_text(str(content or ""))
+            if row["role"] == "assistant":
+                clean_content = dedupe_assistant_reply(clean_content)
             conn.execute(
                 "UPDATE conversation_messages SET content = ?, meta_json = ?, created_at = ? WHERE message_id = ?",
-                (content, json.dumps(meta or {}, ensure_ascii=False), now, int(message_id)),
+                (clean_content, json.dumps(meta or {}, ensure_ascii=False), now, int(message_id)),
             )
         self.touch_conversation(row["session_id"])
         return {"message_id": row["message_id"], "session_id": row["session_id"], "role": row["role"]}
@@ -642,6 +711,49 @@ class WorkspaceDatabase:
             payload["meta"] = json.loads(payload.pop("meta_json") or "{}")
             out.append(payload)
         return out
+
+    def migrate_mojibake_history(self) -> dict[str, Any]:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = self.db_path.with_name(f"{self.db_path.name}.{timestamp}.bak")
+        if self.db_path.exists():
+            shutil.copy2(self.db_path, backup_path)
+        updated_messages = 0
+        updated_states = 0
+        with self._connect() as conn:
+            message_rows = conn.execute("SELECT message_id, content, meta_json FROM conversation_messages").fetchall()
+            for row in message_rows:
+                content = str(row["content"] or "")
+                meta_json = str(row["meta_json"] or "")
+                new_content = repair_mojibake_text(content)
+                new_meta_json = repair_mojibake_text(meta_json)
+                if new_content != content or new_meta_json != meta_json:
+                    conn.execute(
+                        "UPDATE conversation_messages SET content = ?, meta_json = ? WHERE message_id = ?",
+                        (new_content, new_meta_json, int(row["message_id"])),
+                    )
+                    updated_messages += 1
+            state_rows = conn.execute("SELECT session_id, state_json FROM conversation_state").fetchall()
+            for row in state_rows:
+                state_json = str(row["state_json"] or "")
+                new_state_json = repair_mojibake_text(state_json)
+                if new_state_json != state_json:
+                    conn.execute(
+                        "UPDATE conversation_state SET state_json = ?, updated_at = ? WHERE session_id = ?",
+                        (new_state_json, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), row["session_id"]),
+                    )
+                    updated_states += 1
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO app_state (state_key, state_value, updated_at)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    "mojibake_history_migration",
+                    json.dumps({"backup_path": str(backup_path), "updated_messages": updated_messages, "updated_states": updated_states}, ensure_ascii=False),
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+        return {"backup_path": str(backup_path), "updated_messages": updated_messages, "updated_states": updated_states}
 
     def clear_conversation_messages(self, session_id: str) -> None:
         with self._connect() as conn:

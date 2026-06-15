@@ -61,18 +61,14 @@ def _secondary_intents(prompt: str, primary: str) -> list[str]:
             "叠加",
             "提取",
             "转换",
-            "瑁佸壀",
-            "鍙犲姞",
-            "鎻愬彇",
-            "娓呮礂",
         ),
     )
     map_hits = _contains_any(
         text,
-        ("制图", "画图", "画", "图", "地图", "分布图", "专题图", "可视化", "出一张图", "鍒跺浘", "鐢诲浘", "鍦板浘", "鍥"),
+        ("制图", "画图", "画", "图", "地图", "分布图", "专题图", "可视化", "出一张图"),
     )
-    result_hits = _contains_any(text, ("解释", "说明", "解读", "含义", "怎么看", "瑙ｉ噴", "璇存槑", "鎬庝箞鐪"))
-    modeling_hits = _contains_any(text, ("建模", "模型", "预测", "训练", "寤烘ā", "妯", "棰勬祴", "璁粌"))
+    result_hits = _contains_any(text, ("解释", "说明", "解读", "含义", "怎么看"))
+    modeling_hits = _contains_any(text, ("建模", "模型", "预测", "训练"))
 
     ordered: list[str] = []
     if processing_hits:
@@ -185,10 +181,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "traceback",
             "error",
             "failed",
-            "鎶ラ敊",
-            "閿欒",
-            "澶辫触",
-            "寮傚父",
         ),
     )
     if troubleshooting_hits:
@@ -217,12 +209,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "改进一下",
             "再做",
             "它",
-            "杩欎釜",
-            "鍒氭墠",
-            "缁х画",
-            "涓嬩竴姝",
-            "璇存槑",
-            "鎬庝箞鐪",
         ),
     )
     if followup_hits and _state_has_recent_object(state):
@@ -243,15 +229,15 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             )
         if processing_request:
             intent = "data_processing"
-        elif ("上传" in text or "涓婁紶" in text) and ("数据" in text or "鏁版嵁" in text):
+        elif "上传" in text and "数据" in text:
             intent = "data_upload_analysis"
-        elif ("数据" in text or "鏁版嵁" in text) and ("能做什么" in text or "鑳藉仛" in text):
+        elif "数据" in text and "能做什么" in text:
             intent = "data_upload_analysis"
-        elif any(word in text for word in ("图", "地图", "制图", "分布", "鍥", "鍦板浘", "鍒跺浘")):
+        elif any(word in text for word in ("图", "地图", "制图", "分布")):
             intent = "map_generation" if map_request else "follow_up_question"
-        elif any(word in text for word in ("结果", "指标", "模型", "缁撴灉", "鎸囨爣", "妯")):
+        elif any(word in text for word in ("结果", "指标", "模型")):
             intent = "result_analysis"
-        elif "下一步" in text or "继续" in text or "涓嬩竴姝" in text or "缁х画" in text:
+        elif "下一步" in text or "继续" in text:
             intent = "follow_up_question"
         else:
             intent = "follow_up_question"
@@ -281,12 +267,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "行政区",
             "边界",
             "遥感",
-            "涓嬭浇",
-            "鑾峰彇",
-            "闄嶆按",
-            "琛屾斂鍖",
-            "杈圭晫",
-            "閬ユ劅",
         ),
     )
     if download_hits:
@@ -357,14 +337,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "转点",
             "缺失值",
             "字段检查",
-            "娓呮礂",
-            "杞崲",
-            "瑁佸壀",
-            "鍙犲姞",
-            "鎻愬彇",
-            "缂撳啿",
-            "鐩镐氦",
-            "閲嶆姇",
         ),
     )
     if processing_hits:
@@ -394,14 +366,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "人口密度图",
             "map",
             "plot",
-            "鍒跺浘",
-            "鐢诲浘",
-            "鍦板浘",
-            "鍥句欢",
-            "涓撻鍥",
-            "鍙",
-            "鐢",
-            "鍥",
         ),
     )
     if map_hits:
@@ -429,12 +393,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "评价",
             "精度",
             "残差",
-            "缁撴灉",
-            "鎸囨爣",
-            "瑙ｉ噴",
-            "璇存槑",
-            "璇勪环",
-            "娈嬪樊",
         ),
     )
     if result_hits:
@@ -472,11 +430,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "describe dataset",
             "what can this data do",
             "what can this dataset do",
-            "涓婁紶",
-            "鍒氫笂浼",
-            "鏁版嵁鑳藉仛",
-            "鑳藉仛",
-            "妫€鏌ユ暟鎹",
         ),
     )
     if upload_hits and (dataset_count > 0 or state.get("active_dataset")):
@@ -503,11 +456,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "gis",
             "遥感",
             "空间分析",
-            "浠€涔堟槸",
-            "濡備綍",
-            "鍘熺悊",
-            "鍖哄埆",
-            "閬ユ劅",
             "绌洪棿鍒嗘瀽",
         ),
     )

@@ -8,6 +8,8 @@ class DownloadJobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     WAITING_LOGIN = "waiting_login"
+    WAITING_PARAMETERS = "waiting_parameters"
+    READY_TO_START = "ready_to_start"
     WAITING_MANUAL = "waiting_manual"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -15,14 +17,16 @@ class DownloadJobStatus(StrEnum):
 
 
 TERMINAL_STATUSES = {DownloadJobStatus.COMPLETED, DownloadJobStatus.FAILED, DownloadJobStatus.CANCELED}
-ACTIVE_STATUSES = {DownloadJobStatus.QUEUED, DownloadJobStatus.RUNNING, DownloadJobStatus.WAITING_LOGIN, DownloadJobStatus.WAITING_MANUAL}
-RETRYABLE_STATUSES = {DownloadJobStatus.FAILED, DownloadJobStatus.CANCELED, DownloadJobStatus.WAITING_LOGIN, DownloadJobStatus.WAITING_MANUAL}
+ACTIVE_STATUSES = {DownloadJobStatus.QUEUED, DownloadJobStatus.READY_TO_START, DownloadJobStatus.RUNNING, DownloadJobStatus.WAITING_LOGIN, DownloadJobStatus.WAITING_PARAMETERS, DownloadJobStatus.WAITING_MANUAL}
+RETRYABLE_STATUSES = {DownloadJobStatus.FAILED, DownloadJobStatus.CANCELED, DownloadJobStatus.WAITING_LOGIN, DownloadJobStatus.WAITING_PARAMETERS, DownloadJobStatus.WAITING_MANUAL}
 
 
 STATUS_METADATA: dict[str, dict[str, str]] = {
     "queued": {"label": "Queued", "message": "The download job is queued."},
     "running": {"label": "Running", "message": "The download job is running."},
     "waiting_login": {"label": "Login required", "message": "The data source login state is missing or expired."},
+    "waiting_parameters": {"label": "Parameters required", "message": "The download job is waiting for required parameters."},
+    "ready_to_start": {"label": "Ready", "message": "The download job is ready to start."},
     "waiting_manual": {"label": "Needs attention", "message": "The job needs manual action before it can continue."},
     "completed": {"label": "Completed", "message": "The download job completed and the result was validated."},
     "failed": {"label": "Failed", "message": "The download job failed."},
@@ -71,7 +75,11 @@ def status_message(status: str | DownloadJobStatus, error_message: str = "") -> 
 def decorate_job_record(row: dict[str, Any], json_loads) -> dict[str, Any]:
     status = normalize_status(str(row.get("status") or ""))
     row["status"] = status.value
-    row["state"] = status.value
+    row["state"] = {
+        DownloadJobStatus.QUEUED: "ready_to_start",
+        DownloadJobStatus.COMPLETED: "success",
+        DownloadJobStatus.CANCELED: "cancelled",
+    }.get(status, status.value)
     row["status_label"] = STATUS_METADATA[status.value]["label"]
     row["message"] = status_message(status, str(row.get("error_message") or ""))
 

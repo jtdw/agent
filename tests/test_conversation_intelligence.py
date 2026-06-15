@@ -39,6 +39,35 @@ class ConversationIntelligenceTests(unittest.TestCase):
             ),
         )
 
+    def seed_gcp_prediction_result(self, service: GISWorkspaceService, rows: int = 36) -> None:
+        dataset_name = service.manager.put_table(
+            "xgb_sm_demo",
+            pd.DataFrame(
+                {
+                    "soil_moisture": [float(i) / 100.0 for i in range(rows)],
+                    "xgb_sm_demo_xgb": [float(i) / 100.0 + (0.002 if i % 2 else -0.001) for i in range(rows)],
+                    "date": pd.date_range("2024-01-01", periods=rows, freq="D").astype(str),
+                    "lon": [115.0 + i * 0.01 for i in range(rows)],
+                    "lat": [41.0 + i * 0.01 for i in range(rows)],
+                }
+            ),
+        )
+        state = ConversationState(
+            active_dataset=dataset_name,
+            last_model_result={
+                "model": "XGBoost",
+                "output_prefix": "xgb_sm_demo",
+                "result_dataset": dataset_name,
+                "summary": {
+                    "dataset": "demo_xgboost_soil_moisture",
+                    "target_col": "soil_moisture",
+                    "prediction_column": "xgb_sm_demo_xgb",
+                    "date_col": "date",
+                },
+            },
+        )
+        save_conversation_state(service.manager, service.current_session_id, state)
+
     def test_uploaded_data_capability_question_uses_data_upload_analysis_intent(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
@@ -155,6 +184,72 @@ class ConversationIntelligenceTests(unittest.TestCase):
         self.assertIn("missing_model", reply)
         self.assertIn("找不到", reply)
         self.assertNotIn("RMSE=0", reply)
+
+    def test_structured_model_reply_is_not_wrapped_again(self) -> None:
+        raw = "\n".join(
+            [
+                "已完成操作：XGBoost 土壤水分模型训练完成。",
+                "关键结果",
+                "- 预测列：xgb_sm_demo_xgb",
+                "输出文件",
+                "- 模型文件：xgb_sm_demo_xgb_model.joblib",
+                "下一步建议",
+                "- 查看特征重要性表。",
+            ]
+        )
+        model = {
+            "model": "XGBoost",
+            "output_prefix": "xgb_sm_demo",
+            "metrics": {"R": 0.99, "RMSE": 0.01},
+            "artifacts": [{"label": "metrics", "path": "derived/xgb_sm_demo_xgb_metrics.csv"}],
+        }
+
+        reply = interpret_result(
+            "训练 XGBoost 模型",
+            {"intent": "modeling"},
+            {"task_type": "modeling"},
+            raw,
+            {"active_dataset": {"name": "demo_xgboost_soil_moisture.csv"}, "recent_model_result": model},
+            {"model_results": [model]},
+        )
+
+        self.assertEqual(reply.count("已完成操作"), 1)
+        self.assertEqual(reply.count("关键结果"), 1)
+        self.assertEqual(reply.count("下一步建议"), 1)
+        self.assertNotIn("最新模型结果", reply)
+        self.assertNotIn("该回答基于当前工作区", reply)
+
+    def test_service_does_not_append_model_context_to_structured_reply(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            reply = "\n".join(
+                [
+                    "已完成操作：XGBoost 土壤水分模型训练完成。",
+                    "输出文件",
+                    "- xgb_sm_demo.csv",
+                    "下一步建议",
+                    "- 查看残差。",
+                ]
+            )
+
+            self.assertFalse(service._should_append_model_result_context("训练 XGBoost 模型", reply))
+
+    def test_gcp_prompt_executes_uncertainty_analysis_without_mojibake(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            self.seed_gcp_prediction_result(service)
+
+            response = service.ask("做 GCP 不确定性分析。")
+
+            self.assertEqual(response["mode"], "deterministic_workflow")
+            self.assertEqual(response["reason"], "workflow_plan")
+            self.assertIn("GCP 分析已完成", str(response["task_outcome"]))
+            self.assertIn("GCP", response["reply"])
+            self.assertIn("低于名义覆盖率", response["reply"])
+            self.assertIn("校准样本", response["reply"])
+            self.assertNotIn("请指定要预测的目标变量字段", response["reply"])
+            for token in ["\u9417", "\u5a08", "\u934f\u62bd", "\u6d93\u5b29\u7af4", "\u5bb8\u63d2"]:
+                self.assertNotIn(token, response["reply"])
 
     def test_error_followup_explains_last_error(self) -> None:
         state = ConversationState(last_error={"message": "字段 target 不存在", "task_type": "modeling"}).to_dict()
@@ -297,6 +392,51 @@ class ConversationIntelligenceTests(unittest.TestCase):
         self.assertIn(intent["intent"], {"unclear_request", "general_gis_question"})
         self.assertEqual(intent["classifier"], "rule")
         self.assertIn("fallback_reason", intent)
+
+    def test_general_gis_question_is_not_wrapped_or_grounded_in_workspace_data(self) -> None:
+        class FakeGeneralAgent:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def ask(self, prompt, history=None, image_paths=None, **kwargs):
+                self.calls.append(
+                    {
+                        "prompt": prompt,
+                        "history": history,
+                        "image_paths": image_paths,
+                        "kwargs": kwargs,
+                    }
+                )
+                return (
+                    "\u5df2\u5b8c\u6210\u64cd\u4f5c\uff1a\u57fa\u4e8eGIS\u9886\u57df\u5171\u8bc6\u4e0e\u5f53\u524d\u5de5\u4f5c\u533a\u6570\u636e\u7c7b\u578b\u8fdb\u884c\u6982\u62ec\u6027\u56de\u7b54\u3002\n"
+                    "\u4f7f\u7528\u7684\u6570\u636e\uff1a\u672a\u4f7f\u7528\u5177\u4f53\u6570\u636e\u96c6\uff0c\u4ec5\u53c2\u8003\u5de5\u4f5c\u533a\u5df2\u6709\u7684\u77e2\u91cf\uff08shandianhe_basin_boundary\uff09\u3001\u6805\u683c\uff08Dem\uff09\u548c\u8868\u683c\uff08demo_xgboost_soil_moisture_1\uff09\u3002\n"
+                    "\u5173\u952e\u7ed3\u679c\uff1aGIS\u7684\u672a\u6765\u53d1\u5c55\u65b9\u5411\u5305\u62ec\u4e91\u539f\u751f\u4e0e\u5b9e\u65f6\u534f\u540c\u3001AI\u878d\u5408\u3001\u4e09\u7ef4\u4e0e\u65f6\u7a7a\u4e00\u4f53\u5316\u3002\n"
+                    "\u8f93\u51fa\u6587\u4ef6\uff1a\u672c\u6b21\u672a\u751f\u6210\u65b0\u6587\u4ef6\u3002\n"
+                    "\u7ed3\u679c\u542b\u4e49\uff1aGIS\u6b63\u4ece\u4f20\u7edf\u684c\u9762\u5de5\u5177\u5411\u667a\u80fd\u3001\u5b9e\u65f6\u3001\u4e09\u7ef4\u4e0e\u4e91\u534f\u540c\u7684\u5e73\u53f0\u6f14\u8fdb\u3002\n"
+                    "\u4e0b\u4e00\u6b65\u5efa\u8bae\uff1a\u5982\u9700\u5728\u5de5\u4f5c\u533a\u4e2d\u5b9e\u8df5\u4e0a\u8ff0\u65b9\u5411\uff0c\u8bf7\u8bf4\u660e\u76ee\u6807\u3002",
+                    [],
+                )
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            self.seed_table(service)
+            fake_agent = FakeGeneralAgent()
+            service._get_agent = lambda model_name: fake_agent  # type: ignore[method-assign]
+
+            result = service.ask("gis\u7684\u672a\u6765\u53d1\u5c55\u65b9\u5411")
+
+        reply = result["reply"]
+        self.assertEqual(result["mode"], "general_knowledge")
+        self.assertNotIn("\u5df2\u5b8c\u6210\u64cd\u4f5c", reply)
+        self.assertNotIn("\u4f7f\u7528\u7684\u6570\u636e", reply)
+        self.assertNotIn("\u8f93\u51fa\u6587\u4ef6", reply)
+        self.assertNotIn("demo_xgboost_soil_moisture_1", reply)
+        self.assertNotIn("shandianhe_basin_boundary", reply)
+        self.assertNotIn("Dem", reply)
+        self.assertEqual(reply.count("GIS\u7684\u672a\u6765\u53d1\u5c55\u65b9\u5411\u5305\u62ec"), 1)
+        self.assertIn("\u4e91\u539f\u751f", reply)
+        self.assertEqual(fake_agent.calls[0]["history"], [])
+        self.assertFalse(fake_agent.calls[0]["kwargs"].get("include_workspace_hint", True))  # type: ignore[union-attr]
 
     def test_low_confidence_plan_asks_clarification_before_tools(self) -> None:
         intent = {

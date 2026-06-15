@@ -32,6 +32,18 @@ function mapBoundsPayload(map: MapLibreMap): MapBounds | undefined {
   return normalizeMapBounds([bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]) || undefined;
 }
 
+function mapLayerSignature(layers: ResultMapLayer[]) {
+  return JSON.stringify(layers.map((layer) => ({
+    id: layer.id,
+    name: layer.name,
+    type: layer.type,
+    kind: layer.kind,
+    preview_url: layer.preview_url,
+    bounds: layer.bounds,
+    geojson: layer.geojson
+  })));
+}
+
 function fitPaddingForCanvas(map: MapLibreMap) {
   const canvas = map.getCanvas();
   const width = canvas.clientWidth || canvas.offsetWidth || 0;
@@ -462,6 +474,7 @@ export function MapStage({
   const mapRef = useRef<MapLibreMap | null>(null);
   const resizeTimerRef = useRef<number | null>(null);
   const hasFitRef = useRef(false);
+  const resultLayerSignatureRef = useRef('');
   const [tdtConfig, setTdtConfig] = useState<TiandituConfig | null>();
   const [stationCollection, setStationCollection] = useState<StationCollection | null>(null);
   const [resultLayers, setResultLayers] = useState<ResultMapLayer[]>([]);
@@ -574,17 +587,36 @@ export function MapStage({
           const fallbackLayers = (fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary');
           layers = [...fallbackLayers, ...layers];
         }
-        if (!cancelled) setResultLayers(layers);
+        if (!cancelled) {
+          const signature = mapLayerSignature(layers);
+          if (signature !== resultLayerSignatureRef.current) {
+            resultLayerSignatureRef.current = signature;
+            setResultLayers(layers);
+          }
+        }
       } catch {
         if (!userId) {
-          if (!cancelled) setResultLayers([]);
+          if (!cancelled && resultLayerSignatureRef.current !== '[]') {
+            resultLayerSignatureRef.current = '[]';
+            setResultLayers([]);
+          }
           return;
         }
         try {
           const fallback = await api.mapLayers();
-          if (!cancelled) setResultLayers((fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary'));
+          if (!cancelled) {
+            const fallbackLayers = (fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary');
+            const signature = mapLayerSignature(fallbackLayers);
+            if (signature !== resultLayerSignatureRef.current) {
+              resultLayerSignatureRef.current = signature;
+              setResultLayers(fallbackLayers);
+            }
+          }
         } catch {
-          if (!cancelled) setResultLayers([]);
+          if (!cancelled && resultLayerSignatureRef.current !== '[]') {
+            resultLayerSignatureRef.current = '[]';
+            setResultLayers([]);
+          }
         }
       }
     };

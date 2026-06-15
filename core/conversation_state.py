@@ -6,6 +6,9 @@ from typing import Any
 
 @dataclass
 class ConversationState:
+    model_route_mode: str = "auto"
+    selected_chat_model: str = ""
+    last_active_chat_model: str = ""
     active_dataset: str = ""
     active_artifacts: list[dict[str, Any]] = field(default_factory=list)
     last_task_type: str = ""
@@ -31,6 +34,9 @@ class ConversationState:
         active_artifacts = data.get("active_artifacts")
         last_tool_results = data.get("last_tool_results")
         return cls(
+            model_route_mode="manual" if data.get("model_route_mode") == "manual" else "auto",
+            selected_chat_model=str(data.get("selected_chat_model") or ""),
+            last_active_chat_model=str(data.get("last_active_chat_model") or ""),
             active_dataset=str(data.get("active_dataset") or ""),
             active_artifacts=active_artifacts if isinstance(active_artifacts, list) else [],
             last_task_type=str(data.get("last_task_type") or ""),

@@ -19,6 +19,7 @@ import pandas as pd
 import rasterio
 
 from .archive_utils import safe_extract_zip
+from .artifacts import artifact_download_url, artifact_meta_url, artifact_mime_type, safe_download_filename
 from .model_results import generate_model_result_id
 from .workspace_db import WorkspaceDatabase
 
@@ -503,7 +504,11 @@ class DataManager:
         return files
 
     def list_artifacts(self) -> list[dict[str, Any]]:
-        registered = self.list_registered_artifacts(limit=200)
+        registered = [
+            item
+            for item in self.list_registered_artifacts(limit=200)
+            if Path(str(item.get("path") or "")).exists()
+        ]
         seen_paths = {str(Path(item.get("path", "")).resolve()) for item in registered if item.get("path")}
         artifacts: list[dict[str, Any]] = []
         root_to_category = {
@@ -807,6 +812,58 @@ class DataManager:
         artifact = self.database.get_artifact(artifact_id)
         return self._enrich_registered_artifact(artifact) if artifact else None
 
+    def resolve_artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        clean = str(artifact_id or "").strip()
+        if not clean:
+            return None
+        registered = self.get_artifact(clean)
+        if registered:
+            return registered
+        for artifact in self.list_artifacts():
+            if str(artifact.get("artifact_id") or "") == clean:
+                return artifact
+        return None
+
+    def _delete_artifact_files(self, path: Path) -> list[str]:
+        candidates = [path]
+        if path.suffix.lower() == ".shp":
+            candidates = [
+                sidecar
+                for sidecar in sorted(path.parent.glob(f"{path.stem}.*"))
+                if sidecar.suffix.lower() in SHAPE_SIDE_EXTS
+            ]
+        deleted: list[str] = []
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                candidate.unlink()
+                deleted.append(str(candidate))
+        return deleted
+
+    def delete_artifact(self, artifact_id: str, *, delete_file: bool = True) -> dict[str, Any]:
+        artifact = self.resolve_artifact(artifact_id)
+        if not artifact:
+            return {"ok": False, "artifact_id": str(artifact_id or ""), "status": "not_found", "file_deleted": False}
+        path = Path(str(artifact.get("path") or "")).resolve()
+        deleted_files = self._delete_artifact_files(path) if delete_file else []
+        removed = self.database.delete_artifact(str(artifact.get("artifact_id") or artifact_id))
+        references_removed = self.database.remove_artifact_references(str(artifact.get("artifact_id") or artifact_id))
+        datasets_removed = self.database.drop_datasets_by_path(path) if delete_file else []
+        for dataset_name in datasets_removed:
+            self.datasets.pop(dataset_name, None)
+        file_gone = not path.exists()
+        ok = bool(removed or deleted_files or references_removed or datasets_removed or (delete_file and file_gone))
+        self.log_operation("删除结果文件", str(artifact.get("filename") or artifact.get("name") or artifact_id), "artifact")
+        return {
+            "ok": ok,
+            "artifact_id": str(artifact.get("artifact_id") or artifact_id),
+            "filename": str(artifact.get("filename") or artifact.get("name") or path.name),
+            "status": "deleted" if ok else "not_found",
+            "file_deleted": bool(deleted_files),
+            "deleted_files": deleted_files,
+            "references_removed": references_removed,
+            "datasets_removed": datasets_removed,
+        }
+
     def list_registered_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
         return [self._enrich_registered_artifact(item) for item in self.database.list_artifacts(model_result_id=model_result_id, limit=limit)]
 
@@ -818,6 +875,16 @@ class DataManager:
         except Exception:
             relative = path.name
         item.setdefault("name", path.name)
+        item["filename"] = safe_download_filename(str(item.get("title") or item.get("name") or path.name))
+        item["mime_type"] = artifact_mime_type(item["filename"], str(item.get("type") or ""))
+        item["download_url"] = artifact_download_url(str(item.get("artifact_id") or ""))
+        item["metadata_url"] = artifact_meta_url(str(item.get("artifact_id") or ""))
+        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+        item["source"] = {
+            "tool_name": str(meta.get("tool_name") or item.get("tool_name") or ""),
+            "workflow_id": str(meta.get("workflow_id") or item.get("workflow_id") or ""),
+            "message_id": str(meta.get("message_id") or item.get("message_id") or ""),
+        }
         item["display_path"] = str(relative).replace("\\", "/")
         category = "derived"
         try:
@@ -829,7 +896,9 @@ class DataManager:
             pass
         item["category"] = category
         if path.exists():
-            item["size_kb"] = round(path.stat().st_size / 1024, 2)
+            size_bytes = path.stat().st_size
+            item["size_bytes"] = size_bytes
+            item["size_kb"] = round(size_bytes / 1024, 2)
             item["modified"] = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
         else:
             item.setdefault("size_kb", 0)
@@ -846,8 +915,19 @@ class DataManager:
     def _attach_registered_model_artifacts(self, result: dict[str, Any] | None) -> dict[str, Any]:
         item = dict(result or {})
         model_result_id = str(item.get("model_result_id") or "")
-        registered = self.list_registered_artifacts(model_result_id=model_result_id, limit=100) if model_result_id else []
+        registered = [
+            artifact
+            for artifact in (self.list_registered_artifacts(model_result_id=model_result_id, limit=100) if model_result_id else [])
+            if Path(str(artifact.get("path") or "")).exists()
+        ]
         if registered:
             item["artifacts"] = registered
             item["artifact_ids"] = [str(artifact.get("artifact_id") or "") for artifact in registered if artifact.get("artifact_id")]
+        else:
+            stale_checked = []
+            for artifact in item.get("artifacts") if isinstance(item.get("artifacts"), list) else []:
+                if isinstance(artifact, dict) and Path(str(artifact.get("path") or "")).exists():
+                    stale_checked.append(artifact)
+            item["artifacts"] = stale_checked
+            item["artifact_ids"] = [str(artifact.get("artifact_id") or "") for artifact in stale_checked if isinstance(artifact, dict) and artifact.get("artifact_id")]
         return item

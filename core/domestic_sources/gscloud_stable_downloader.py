@@ -25,6 +25,24 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def per_tile_download_timeout_ms(timeout_seconds: int) -> int:
+    return min(120, max(30, int(timeout_seconds or 30))) * 1000
+
+
+def existing_gscloud_tile_downloads(target_dir: Path, tile_ids: list[str]) -> dict[str, Path]:
+    expected = {str(tile_id).strip().upper() for tile_id in tile_ids if str(tile_id).strip()}
+    found: dict[str, Path] = {}
+    if not target_dir.exists():
+        return found
+    for path in target_dir.iterdir():
+        if not path.is_file() or path.stat().st_size <= 0:
+            continue
+        tile_id = extract_astgtm_tile_id_from_name(path.name)
+        if tile_id in expected:
+            found[tile_id] = path
+    return found
+
+
 def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
     if not path:
         return {}
@@ -269,9 +287,10 @@ def download_gscloud_tiles_by_identifier_search(
     start_url = f"https://www.gscloud.cn/sources/accessdata/{dataset_id}?pid=1"
     target_dir = Path(manager.workdir) / "domestic_downloads" / "gscloud"
     target_dir.mkdir(parents=True, exist_ok=True)
-    timeout_ms = max(30, int(timeout_seconds or 1800)) * 1000
-    downloaded: list[Path] = []
-    downloaded_tiles: set[str] = set()
+    timeout_ms = per_tile_download_timeout_ms(timeout_seconds)
+    existing = existing_gscloud_tile_downloads(target_dir, expected)
+    downloaded: list[Path] = list(existing.values())
+    downloaded_tiles: set[str] = set(existing)
     not_found: list[str] = []
     errors: list[str] = []
     step_records: list[dict[str, Any]] = []
@@ -298,6 +317,7 @@ def download_gscloud_tiles_by_identifier_search(
 
         for idx, tile_id in enumerate(expected, start=1):
             if tile_id in downloaded_tiles:
+                step_records.append({"tile_id": tile_id, "status": "reused", "file": str(existing[tile_id])})
                 continue
             _update_status(
                 status_path,
@@ -307,41 +327,50 @@ def download_gscloud_tiles_by_identifier_search(
                 downloaded_count=len(downloaded_tiles),
                 remaining_count=len(expected) - len(downloaded_tiles),
             )
-            search_result = _search_tile_id(page, tile_id)
-            if not search_result.get("ok"):
+            tile_errors: list[str] = []
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    try:
+                        page.goto(start_url, wait_until="domcontentloaded", timeout=60_000)
+                    except Exception:
+                        pass
+                search_result = _search_tile_id(page, tile_id)
+                if not search_result.get("ok"):
+                    tile_errors.append(str(search_result.get("error") or "not found"))
+                    step_records.append({"tile_id": tile_id, "status": "search_retry", "attempt": attempt, "error": search_result.get("error")})
+                    continue
+                try:
+                    with page.expect_download(timeout=timeout_ms) as dl_info:
+                        clicked = _click_download_in_exact_row(search_result["row"])
+                        if not clicked:
+                            raise RuntimeError("找到目标行，但未找到可点击下载按钮。")
+                    download = dl_info.value
+                    saved = _save_download(download, target_dir, tile_id)
+                    detected = extract_astgtm_tile_id_from_name(saved.name)
+                    if detected != tile_id:
+                        raise RuntimeError(f"下载文件校验失败：目标 {tile_id}，实际 {saved.name}，识别为 {detected or '无法识别'}。")
+                    downloaded.append(saved)
+                    downloaded_tiles.add(tile_id)
+                    step_records.append({"tile_id": tile_id, "status": "downloaded", "attempt": attempt, "file": str(saved)})
+                    _update_status(
+                        status_path,
+                        state="IDENTIFIER_SEARCH_DOWNLOADING",
+                        message=f"已下载 {len(downloaded_tiles)}/{len(expected)}：{tile_id}",
+                        current_tile=tile_id,
+                        downloaded_count=len(downloaded_tiles),
+                        remaining_count=len(expected) - len(downloaded_tiles),
+                        last_download=str(saved),
+                    )
+                    break
+                except PlaywrightTimeoutError:
+                    tile_errors.append(f"第 {attempt} 次等待下载超时")
+                    step_records.append({"tile_id": tile_id, "status": "download_timeout", "attempt": attempt})
+                except Exception as exc:
+                    tile_errors.append(str(exc))
+                    step_records.append({"tile_id": tile_id, "status": "error", "attempt": attempt, "error": str(exc)})
+            if tile_id not in downloaded_tiles:
                 not_found.append(tile_id)
-                errors.append(f"{tile_id}: {search_result.get('error')}")
-                step_records.append({"tile_id": tile_id, "status": "not_found", "error": search_result.get("error")})
-                continue
-
-            try:
-                with page.expect_download(timeout=timeout_ms) as dl_info:
-                    clicked = _click_download_in_exact_row(search_result["row"])
-                    if not clicked:
-                        raise RuntimeError("找到目标行，但未找到可点击下载按钮。")
-                download = dl_info.value
-                saved = _save_download(download, target_dir, tile_id)
-                detected = extract_astgtm_tile_id_from_name(saved.name)
-                if detected != tile_id:
-                    raise RuntimeError(f"下载文件校验失败：目标 {tile_id}，实际 {saved.name}，识别为 {detected or '无法识别'}。")
-                downloaded.append(saved)
-                downloaded_tiles.add(tile_id)
-                step_records.append({"tile_id": tile_id, "status": "downloaded", "file": str(saved)})
-                _update_status(
-                    status_path,
-                    state="IDENTIFIER_SEARCH_DOWNLOADING",
-                    message=f"已下载 {len(downloaded_tiles)}/{len(expected)}：{tile_id}",
-                    current_tile=tile_id,
-                    downloaded_count=len(downloaded_tiles),
-                    remaining_count=len(expected) - len(downloaded_tiles),
-                    last_download=str(saved),
-                )
-            except PlaywrightTimeoutError:
-                errors.append(f"{tile_id}: 等待下载超时")
-                step_records.append({"tile_id": tile_id, "status": "download_timeout"})
-            except Exception as exc:
-                errors.append(f"{tile_id}: {exc}")
-                step_records.append({"tile_id": tile_id, "status": "error", "error": str(exc)})
+                errors.append(f"{tile_id}: {'; '.join(tile_errors[-3:])}")
 
         if storage_state_path:
             try:
@@ -357,6 +386,7 @@ def download_gscloud_tiles_by_identifier_search(
             + " 系统没有打开给用户随便选择；请检查登录态、数据标识输入框或网站权限。"
         )
 
+    _update_status(status_path, download_steps=step_records, auto_tile_errors=errors, not_found_tile_ids=not_found)
     validation = assert_valid_gscloud_tile_downloads(downloaded, expected_tile_ids=expected, require_all=True)
     result = _postprocess_gscloud_files(manager, downloaded, get_source("gscloud"), output_name=output_name, auto_load=auto_load)
     result["tile_validation"] = validation

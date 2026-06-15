@@ -16,11 +16,13 @@ import zipfile
 from .config import AUTO_ROUTE_LABEL, Settings, is_vision_model, load_settings, pick_preferred_model
 from .context_builder import build_conversation_context, format_context_for_agent
 from .conversation_intent import classify_user_intent
-from .conversation_state import ConversationState, recover_conversation_state, save_conversation_state
+from .conversation_state import ConversationState, load_conversation_state, recover_conversation_state, save_conversation_state
 from .followup_resolver import resolve_followup
 from .frontend_context import apply_frontend_context_to_state, sanitize_frontend_context
 from .model_results import generate_model_result_id
 from .result_interpreter import interpret_result
+from .response_postprocess import dedupe_assistant_reply, repair_mojibake_text
+from .chat_tasks import is_chat_task_canceled
 from .task_planner import build_task_plan
 from .task_outcome_advisor import build_task_outcome
 from .tool_executor import execute_validated_tool_plan
@@ -328,6 +330,9 @@ class GISWorkspaceService:
             agent = self._get_agent(model_name)
             reply, _ = agent.ask(text, history=self._history_for_agent()[:-1], image_paths=image_paths)
             self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
+            state = load_conversation_state(self.manager, self.current_session_id)
+            state.last_active_chat_model = model_name
+            save_conversation_state(self.manager, self.current_session_id, state)
             assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "regenerated_from": int(message_id)}
             self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
             self.manager.log_operation("重新生成回复", f"message_id={message_id} | {model_name}", "chat")
@@ -383,6 +388,7 @@ class GISWorkspaceService:
         return candidates, f"检测到图件/图片解读需求，自动附带 {len(candidates)} 张最近图件"
 
     def _decide_model(self, prompt: str) -> tuple[str, list[str], str]:
+        self._load_chat_model_route(self.current_session_id)
         if self.route_mode == "manual":
             image_paths, image_reason = self._resolve_visual_context(prompt)
             if not is_vision_model(self.selected_model):
@@ -423,7 +429,15 @@ class GISWorkspaceService:
                 raise
             dataset_name = self.manager.load_path(str(path))
             record = self.manager.get(dataset_name)
-            return f"Loaded dataset {dataset_name} ({record.data_type}) from {Path(path).name} using deterministic registration because the LLM provider is unavailable."
+            meta = record.meta if isinstance(record.meta, dict) else {}
+            details = [record.data_type]
+            if meta.get("rows") is not None:
+                details.append(f"{meta.get('rows')} 行")
+            columns = meta.get("columns")
+            if isinstance(columns, list):
+                details.append(f"{len(columns)} 个字段")
+            detail_text = f"（{'，'.join(str(item) for item in details if item)}）" if details else ""
+            return f"已加载数据：{dataset_name}{detail_text}。"
 
     def upload_bytes_batch(self, files: list[tuple[str, bytes]]) -> list[str]:
         if not files:
@@ -830,9 +844,43 @@ class GISWorkspaceService:
         lines.append("你可以直接上传数据后点击推荐问题，我会优先用本地工作区数据给出确定性检查结果；需要复杂推理时再调用模型。")
         return "\n".join(lines)
 
+    def _is_capability_prompt(self, prompt: str) -> bool:
+        clean = " ".join(str(prompt or "").strip().split()).lower()
+        if not clean:
+            return False
+        data_reference_tokens = (
+            "这个数据",
+            "这些数据",
+            "当前数据",
+            "上传的数据",
+            "刚才上传",
+            "刚上传",
+            "dataset",
+        )
+        if any(token in clean for token in data_reference_tokens):
+            return False
+        return any(
+            token in clean
+            for token in (
+                "你能做什么",
+                "你可以做什么",
+                "你能干什么",
+                "能帮我做什么",
+                "有什么功能",
+                "有哪些功能",
+                "有什么能力",
+                "有哪些能力",
+                "智能体能做什么",
+                "助手能做什么",
+            )
+        )
+
     def _read_first_csv_record(self, path: str | Path) -> dict[str, Any]:
-        with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
-            rows = list(csv.DictReader(handle))
+        try:
+            with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except (FileNotFoundError, OSError, UnicodeError, csv.Error):
+            return {}
         if not rows:
             return {}
         preferred = next((row for row in rows if str(row.get("scope") or "").lower() in {"overall", "test", "spatial_cv"}), rows[0])
@@ -914,6 +962,8 @@ class GISWorkspaceService:
             model = model_keys.get(key, key.upper())
             metrics_dataset = Path(name).stem
             metrics_path = str(item.get("path") or "")
+            if not metrics_path or not Path(metrics_path).exists():
+                continue
             if (metrics_dataset, metrics_path, prefix, model) in registered_keys:
                 continue
             metrics = self._read_first_csv_record(metrics_path)
@@ -991,6 +1041,16 @@ class GISWorkspaceService:
         ])
 
     def _should_append_model_result_context(self, prompt: str, reply: str) -> bool:
+        structured_markers = (
+            "已完成操作",
+            "关键结果",
+            "输出文件",
+            "处理后的数据位置",
+            "最新模型结果",
+            "下一步建议",
+        )
+        if sum(1 for marker in structured_markers if marker in reply) >= 2:
+            return False
         text = f"{prompt}\n{reply}".lower()
         if "处理后的数据位置" in reply:
             return False
@@ -1076,6 +1136,92 @@ class GISWorkspaceService:
         save_conversation_state(self.manager, self.current_session_id, state)
         return state
 
+    def _register_turn_artifacts(
+        self,
+        artifacts: list[Any],
+        *,
+        tool_name: str = "",
+        workflow_id: str = "",
+        message_id: str = "",
+    ) -> list[dict[str, Any]]:
+        registered: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in artifacts or []:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("path") or "").strip()
+            if not path:
+                continue
+            meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+            source_meta = {
+                **meta,
+                "tool_name": str(raw.get("tool_name") or tool_name or meta.get("tool_name") or ""),
+                "workflow_id": str(raw.get("workflow_id") or workflow_id or meta.get("workflow_id") or ""),
+                "message_id": str(raw.get("message_id") or message_id or meta.get("message_id") or ""),
+            }
+            artifact_id = str(raw.get("artifact_id") or raw.get("id") or "")
+            key = artifact_id or path
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                registered.append(
+                    self.manager.register_artifact(
+                        artifact_id=artifact_id,
+                        path=path,
+                        type=str(raw.get("type") or raw.get("kind") or raw.get("category") or "artifact"),
+                        title=str(raw.get("title") or raw.get("name") or Path(path).name),
+                        description=str(raw.get("description") or ""),
+                        quality_status=str(raw.get("quality_status") or "unchecked"),
+                        preview_available=bool(raw.get("preview_available")),
+                        task_id=str(raw.get("task_id") or ""),
+                        model_result_id=str(raw.get("model_result_id") or ""),
+                        dataset_id=str(raw.get("dataset_id") or ""),
+                        meta=source_meta,
+                    )
+                )
+            except Exception:
+                continue
+        return registered
+
+    def _artifact_snapshot(self) -> dict[str, tuple[int, int]]:
+        snapshot: dict[str, tuple[int, int]] = {}
+        for artifact in self.manager.list_artifacts():
+            path = Path(str(artifact.get("path") or ""))
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                key = str(path.resolve())
+                stat = path.stat()
+                snapshot[key] = (int(stat.st_size), int(stat.st_mtime_ns))
+            except OSError:
+                continue
+        return snapshot
+
+    def _register_artifacts_changed_since(
+        self,
+        before: dict[str, tuple[int, int]],
+        *,
+        tool_name: str,
+    ) -> list[dict[str, Any]]:
+        changed: list[dict[str, Any]] = []
+        for artifact in self.manager.list_artifacts():
+            path = Path(str(artifact.get("path") or ""))
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                key = str(path.resolve())
+                stat = path.stat()
+                signature = (int(stat.st_size), int(stat.st_mtime_ns))
+            except OSError:
+                continue
+            if before.get(key) == signature:
+                continue
+            item = dict(artifact)
+            item["tool_name"] = str(item.get("tool_name") or tool_name)
+            changed.append(item)
+        return self._register_turn_artifacts(changed, tool_name=tool_name)
+
     def apply_frontend_context(self, frontend_context: dict[str, Any] | None) -> None:
         if not self.current_session_id:
             self.current_session_id = self._ensure_session()
@@ -1086,7 +1232,25 @@ class GISWorkspaceService:
         apply_frontend_context_to_state(state, clean_frontend_context)
         save_conversation_state(self.manager, self.current_session_id, state)
 
-    def ask(self, prompt: str, visible_prompt: str | None = None, frontend_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _clean_assistant_reply(self, reply: str) -> str:
+        return dedupe_assistant_reply(repair_mojibake_text(str(reply or "")))
+
+    def _canceled_chat_result(self, task_id: str, model: str = "conversation-coordinator") -> dict[str, Any]:
+        reply = "任务已取消。已停止后续步骤，迟到的工具或模型结果不会继续作为本轮回复展示。"
+        assistant_meta = {"model": model, "mode": "canceled", "reason": "task_canceled", "task_id": task_id}
+        self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+        self._set_runtime_status("任务已取消", "用户已取消本次智能体任务", busy=False, phase="canceled", progress=100)
+        return {
+            "reply": reply,
+            "model": model,
+            "mode": "canceled",
+            "reason": "task_canceled",
+            "images": [],
+            "artifacts": [],
+            "task_outcome": {"task_type": "analysis", "status": "canceled", "has_results": False, "summary": reply, "result_paths": [], "metrics": {}, "recommendations": []},
+        }
+
+    def ask(self, prompt: str, visible_prompt: str | None = None, frontend_context: dict[str, Any] | None = None, task_id: str = "") -> dict[str, Any]:
         if not self.current_session_id:
             self.current_session_id = self._ensure_session()
 
@@ -1113,6 +1277,105 @@ class GISWorkspaceService:
             plan = build_task_plan(user_message, intent, context, manager=self.manager)
             builtin_reply = self._builtin_workspace_reply(user_message)
 
+            if self._is_capability_prompt(user_message):
+                reply = builtin_reply or self._format_capability_reply()
+                task_outcome = {
+                    "task_type": "capability",
+                    "status": "completed",
+                    "has_results": False,
+                    "summary": "",
+                    "result_paths": [],
+                    "metrics": {},
+                    "recommendations": [],
+                }
+                assistant_meta = {
+                    "model": "builtin-workspace",
+                    "mode": "builtin_capability",
+                    "reason": "capability_prompt",
+                    "intent": intent,
+                    "plan": plan,
+                }
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context={},
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "builtin_capability", "model": "builtin-workspace", "reason": "capability_prompt", "images": []}
+                self.manager.log_operation("builtin_capability_reply", user_message[:180], "chat")
+                self._set_runtime_status("运行完成", "已回答智能体能力问题", busy=False, phase="complete", progress=100)
+                return {
+                    "reply": reply,
+                    "model": "builtin-workspace",
+                    "mode": "builtin_capability",
+                    "reason": "capability_prompt",
+                    "images": [],
+                    "task_outcome": task_outcome,
+                }
+
+            if str(plan.get("task_type") or intent.get("intent") or "") == "general_gis_question":
+                model_name, _, reason = self._decide_model(user_message)
+                raw_reply = ""
+                route_reason = reason
+                try:
+                    agent = self._get_agent(model_name)
+                    general_prompt = (
+                        f"{user_message}\n\n"
+                        "请只回答这个通用 GIS 知识问题。不要使用或提及当前工作区、数据集、文件、图层或最近结果；"
+                        "不要输出“已完成操作、使用的数据、关键结果、输出文件、可能问题、下一步建议”等任务结果模板；"
+                        "不要调用工具。"
+                    )
+                    raw_reply, _ = agent.ask(general_prompt, history=[], image_paths=[], include_workspace_hint=False)
+                except RuntimeError as exc:
+                    if "LLM provider is not ready" not in str(exc) and "API_KEY_MISSING" not in str(exc):
+                        raise
+                    model_name = "conversation-coordinator"
+                    route_reason = "general_gis_fallback_without_llm"
+                reply = interpret_result(user_message, intent, plan, raw_reply, {}, {})
+                task_outcome = {
+                    "task_type": "general_knowledge",
+                    "status": "completed",
+                    "has_results": False,
+                    "summary": "",
+                    "result_paths": [],
+                    "metrics": {},
+                    "recommendations": [],
+                }
+                assistant_meta = {
+                    "model": model_name,
+                    "mode": "general_knowledge",
+                    "reason": route_reason,
+                    "intent": intent,
+                    "plan": plan,
+                }
+                if model_name in self.settings.supported_models:
+                    state.last_active_chat_model = model_name
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context={},
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "general_knowledge", "model": model_name, "reason": route_reason, "images": []}
+                self.manager.log_operation("general_gis_question_reply", user_message[:180], "chat")
+                self._set_runtime_status("运行完成", "已回答通用 GIS 知识问题", busy=False, phase="complete", progress=100)
+                return {
+                    "reply": reply,
+                    "model": model_name,
+                    "mode": "general_knowledge",
+                    "reason": route_reason,
+                    "images": [],
+                    "task_outcome": task_outcome,
+                }
+
             if plan.get("should_ask_clarification") and builtin_reply is None:
                 reply = interpret_result(user_message, intent, plan, str(plan.get("clarification_question") or ""), context, dashboard_data)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
@@ -1132,8 +1395,13 @@ class GISWorkspaceService:
                 self._set_runtime_status("等待补充信息", str(plan.get("clarification_question") or ""), busy=False, phase="clarification", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "images": [], "task_outcome": task_outcome}
 
-            workflow_execution = execute_workflow_plan(self.manager, plan) if plan.get("workflow_plan") else {"executed": False}
+            cancel_checker = (lambda: is_chat_task_canceled(task_id)) if task_id else None
+            if cancel_checker and cancel_checker():
+                return self._canceled_chat_result(task_id)
+            workflow_execution = execute_workflow_plan(self.manager, plan, cancel_checker=cancel_checker) if plan.get("workflow_plan") else {"executed": False}
             if workflow_execution.get("executed"):
+                if workflow_execution.get("canceled"):
+                    return self._canceled_chat_result(task_id)
                 raw_reply = str(workflow_execution.get("raw_reply") or "")
                 dashboard_data = self.dashboard()
                 context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
@@ -1142,6 +1410,10 @@ class GISWorkspaceService:
                 images: list[str] = []
                 workflow_result = workflow_execution.get("workflow_result") if isinstance(workflow_execution.get("workflow_result"), dict) else {}
                 artifacts = workflow_result.get("final_artifacts") if isinstance(workflow_result.get("final_artifacts"), list) else []
+                message_artifacts = self._register_turn_artifacts(
+                    artifacts,
+                    workflow_id=str(workflow_result.get("workflow_id") or ""),
+                )
                 for artifact in artifacts:
                     if isinstance(artifact, dict) and str(artifact.get("type") or "") == "map" and artifact.get("path"):
                         images.append(str(artifact["path"]))
@@ -1159,6 +1431,12 @@ class GISWorkspaceService:
                     "intent": intent,
                     "plan": plan,
                     "workflow_execution": workflow_execution,
+                    "artifacts": message_artifacts,
+                    "workflow_summary": {
+                        "workflow_id": workflow_result.get("workflow_id"),
+                        "ok": workflow_result.get("ok"),
+                        "failed_step": workflow_result.get("failed_step"),
+                    },
                 }
                 self._update_conversation_state_after_turn(
                     state,
@@ -1170,6 +1448,7 @@ class GISWorkspaceService:
                     dashboard_data=dashboard_data,
                     images=images,
                 )
+                reply = self._clean_assistant_reply(reply)
                 self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
                 self.last_route = {
                     "mode": "deterministic_workflow",
@@ -1185,7 +1464,9 @@ class GISWorkspaceService:
                     "mode": "deterministic_workflow",
                     "reason": "workflow_plan",
                     "images": images,
+                    "artifacts": message_artifacts,
                     "task_outcome": task_outcome,
+                    "workflow_summary": assistant_meta["workflow_summary"],
                 }
 
             deterministic_execution = execute_validated_tool_plan(self.manager, plan)
@@ -1196,6 +1477,7 @@ class GISWorkspaceService:
                 reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
                 images: list[str] = []
+                raw_artifacts: list[dict[str, Any]] = []
                 for tool_result in deterministic_execution.get("tool_results", []):
                     if not isinstance(tool_result, dict):
                         continue
@@ -1203,6 +1485,11 @@ class GISWorkspaceService:
                     for artifact in artifacts:
                         if isinstance(artifact, dict) and str(artifact.get("type") or "") == "map" and artifact.get("path"):
                             images.append(str(artifact["path"]))
+                        if isinstance(artifact, dict):
+                            item = dict(artifact)
+                            item.setdefault("tool_name", tool_result.get("tool_name"))
+                            raw_artifacts.append(item)
+                message_artifacts = self._register_turn_artifacts(raw_artifacts)
                 if not deterministic_execution.get("ok"):
                     state.last_error = {
                         "message": raw_reply,
@@ -1217,6 +1504,8 @@ class GISWorkspaceService:
                     "intent": intent,
                     "plan": plan,
                     "tool_execution": deterministic_execution,
+                    "artifacts": message_artifacts,
+                    "tool_results": deterministic_execution.get("tool_results", []),
                 }
                 self._update_conversation_state_after_turn(
                     state,
@@ -1243,7 +1532,9 @@ class GISWorkspaceService:
                     "mode": "deterministic_tool",
                     "reason": "validated_tool_args",
                     "images": images,
+                    "artifacts": message_artifacts,
                     "task_outcome": task_outcome,
+                    "tool_results": deterministic_execution.get("tool_results", []),
                 }
 
             if builtin_reply is not None:
@@ -1317,22 +1608,30 @@ class GISWorkspaceService:
             model_name, image_paths, reason = self._decide_model(prompt)
             self._set_runtime_status("智能体正在运行", f"正在调用 {model_name} 并执行 GIS 工具", busy=True, phase="reasoning", progress=45)
             agent = self._get_agent(model_name)
+            artifact_snapshot = self._artifact_snapshot()
             enhanced_prompt = (
                 f"{prompt}\n\n【对话协调上下文】\n{format_context_for_agent(context)}"
                 f"\n\n【结构化任务计划】\n{json.dumps(plan, ensure_ascii=False, indent=2, default=str)}"
                 "\n\n请严格基于以上上下文、当前工作区和工具结果回答；不要编造字段、路径、指标或图件内容。"
             )
             reply, _ = agent.ask(enhanced_prompt, history=self._history_for_agent()[:-1], image_paths=image_paths)
+            if cancel_checker and cancel_checker():
+                return self._canceled_chat_result(task_id, model=model_name)
+            message_artifacts = self._register_artifacts_changed_since(
+                artifact_snapshot,
+                tool_name="agent_tool_execution",
+            )
             if self._should_append_model_result_context(user_message, reply):
                 model_context = self._format_latest_model_result_context()
                 if model_context:
                     reply = f"{reply.rstrip()}\n{model_context}"
             dashboard_data = self.dashboard()
             context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
-            reply = interpret_result(user_message, intent, plan, reply, context, dashboard_data)
+            reply = self._clean_assistant_reply(interpret_result(user_message, intent, plan, reply, context, dashboard_data))
             task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
             self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
-            assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "intent": intent, "plan": plan}
+            state.last_active_chat_model = model_name
+            assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "intent": intent, "plan": plan, "artifacts": message_artifacts}
             self._update_conversation_state_after_turn(
                 state,
                 user_message=user_message,
@@ -1346,7 +1645,7 @@ class GISWorkspaceService:
             self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
             self.manager.log_operation("模型路由", f"{model_name} | {reason}", "route")
             self._set_runtime_status("运行完成", f"已完成任务，使用模型 {model_name}", busy=False, phase="complete", progress=100)
-            return {"reply": reply, "model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "task_outcome": task_outcome}
+            return {"reply": reply, "model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "artifacts": message_artifacts, "task_outcome": task_outcome}
         except Exception as exc:
             try:
                 state = recover_conversation_state(self.manager, self.current_session_id)
@@ -1360,10 +1659,58 @@ class GISWorkspaceService:
     def available_models(self) -> list[str]:
         return list(self.settings.supported_models)
 
+    def _load_chat_model_route(self, session_id: str | None = None) -> ConversationState:
+        target = session_id or self.current_session_id
+        state = load_conversation_state(self.manager, target)
+        selected = state.selected_chat_model
+        if state.model_route_mode == "manual" and selected in self.settings.supported_models:
+            self.route_mode = "manual"
+            self.selected_model = selected
+            return state
+        if state.model_route_mode != "auto" or selected:
+            state.model_route_mode = "auto"
+            state.selected_chat_model = ""
+            save_conversation_state(self.manager, target, state)
+        self.route_mode = "auto"
+        self.selected_model = self.settings.model
+        return state
+
+    def chat_model_state(self, session_id: str | None = None) -> dict[str, Any]:
+        target = session_id or self.current_session_id
+        existing = {item["session_id"] for item in self.manager.database.list_conversations()}
+        if target not in existing:
+            raise ValueError(f"未找到会话：{target}")
+        state = self._load_chat_model_route(target)
+        return {
+            "session_id": target,
+            "route_mode": self.route_mode,
+            "selected_model": self.selected_model if self.route_mode == "manual" else "auto",
+            "active_model": state.last_active_chat_model or "",
+            "models": [
+                {"id": model, "capability": "vision" if is_vision_model(model) else "text"}
+                for model in self.available_models()
+            ],
+        }
+
+    def select_chat_model(self, model_name: str, session_id: str | None = None) -> dict[str, Any]:
+        target = session_id or self.current_session_id
+        existing = {item["session_id"] for item in self.manager.database.list_conversations()}
+        if target not in existing:
+            raise ValueError(f"未找到会话：{target}")
+        clean = str(model_name or "").strip()
+        if clean != "auto" and clean not in self.settings.supported_models:
+            raise ValueError(f"不支持的模型：{clean}")
+        state = load_conversation_state(self.manager, target)
+        state.model_route_mode = "auto" if clean == "auto" else "manual"
+        state.selected_chat_model = "" if clean == "auto" else clean
+        save_conversation_state(self.manager, target, state)
+        return self.chat_model_state(target)
+
     def route_options(self) -> list[str]:
         return [AUTO_ROUTE_LABEL, *self.available_models()]
 
     def current_model(self) -> str:
+        self._load_chat_model_route(self.current_session_id)
         return self.selected_model if self.route_mode == "manual" else AUTO_ROUTE_LABEL
 
     def active_model(self) -> str:
@@ -1371,24 +1718,16 @@ class GISWorkspaceService:
 
     def switch_model(self, model_name: str) -> str:
         if model_name == AUTO_ROUTE_LABEL:
-            self.route_mode = "auto"
-            self.last_route = {"mode": "auto", "model": self.active_model(), "reason": "已切换为自动选择模型", "images": []}
+            self.select_chat_model("auto")
             self.manager.log_operation("切换模型策略", "已切换为自动选择", "config")
-            message = "已切换为自动选择模型：系统会根据用户需求在文本模型和视觉模型之间自动分流。"
-            self.append_system_message(message)
-            return message
+            return "已切换为自动选择模型"
 
         if model_name not in self.settings.supported_models:
             raise ValueError(f"不支持的模型：{model_name}")
 
-        self.route_mode = "manual"
-        self.selected_model = model_name
-        self.settings.model = model_name
-        self.last_route = {"mode": "manual", "model": model_name, "reason": f"已手动指定模型：{model_name}", "images": []}
+        self.select_chat_model(model_name)
         self.manager.log_operation("切换模型策略", f"手动指定 {model_name}", "config")
-        message = f"已切换为手动模式：{model_name}。后续新对话将固定使用该模型，直到你再次改回自动选择。"
-        self.append_system_message(message)
-        return message
+        return f"已为当前对话选择模型：{model_name}"
 
     def dashboard(self) -> dict[str, Any]:
         datasets = self.manager.list_datasets()

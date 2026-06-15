@@ -40,12 +40,10 @@ function LibraryItemCard({
 }) {
   return (
     <motion.div
-      layout
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      whileHover={{ x: 2 }}
       className={cn(
-        'rounded-[18px] border border-white/30 bg-white/35 p-3 transition dark:border-white/10 dark:bg-slate-950/20',
+        'rounded-[18px] border border-white/30 bg-white/35 p-3 transition-colors dark:border-white/10 dark:bg-slate-950/20',
         selected && 'border-cyan-glow/50 bg-cyan-glow/10 shadow-glow'
       )}
     >
@@ -53,7 +51,7 @@ function LibraryItemCard({
         <button
           onClick={onToggle}
           className={cn(
-            'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border transition',
+            'mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border transition-colors',
             selected ? 'border-cyan-glow/50 bg-cyan-glow/25 text-ocean shadow-glow dark:text-cyan-glow' : 'border-white/40 bg-white/35 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400'
           )}
           title="选择该条目"
@@ -80,7 +78,7 @@ function LibraryItemCard({
       </div>
       <div className="mt-3 flex items-center justify-between gap-3">
         <div className="truncate text-[11px] text-slate-400" title={item.path}>{item.size_mb ? `${item.size_mb} MB · ` : ''}{item.path}</div>
-        <button onClick={onImport} disabled={busy || !item.exists} className="rounded-2xl bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 text-xs font-black text-white shadow-glow transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50">
+        <button onClick={onImport} disabled={busy || !item.exists} className="rounded-2xl bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 text-xs font-black text-white shadow-glow transition-colors disabled:cursor-not-allowed disabled:opacity-50">
           载入
         </button>
       </div>

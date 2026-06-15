@@ -7,7 +7,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from ..admin_boundary import extract_local_admin_boundary
@@ -144,6 +144,7 @@ def open_login_and_save_state(
     timeout_seconds: int = 300,
     headless: bool = False,
     start_url: str = GSCLOUD_HOME,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
     """打开地理空间数据云，让操作者手动登录并保存 Cookie。
 
@@ -189,6 +190,9 @@ def open_login_and_save_state(
         deadline = time.time() + timeout_seconds
         # 周期性保存，避免用户已经登录但主程序还要等完整 300 秒；也避免提前关浏览器后完全丢失 Cookie。
         while time.time() < deadline:
+            if stop_requested and stop_requested():
+                launch_info["stop_requested"] = True
+                break
             try:
                 context.storage_state(path=str(state_path))
                 launch_info["periodic_saved"] = True
@@ -201,7 +205,13 @@ def open_login_and_save_state(
                     launch_info["closed_early"] = True
                     break
                 raise
-            time.sleep(5)
+            for _ in range(10):
+                if stop_requested and stop_requested():
+                    launch_info["stop_requested"] = True
+                    break
+                time.sleep(0.5)
+            if launch_info.get("stop_requested"):
+                break
 
         try:
             context.storage_state(path=str(state_path))

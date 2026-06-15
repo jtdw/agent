@@ -169,14 +169,14 @@ def route_gscloud_download_intent(prompt: str) -> GSCloudIntentRoute:
         best_score, best_spec, best_terms = scored[0]
         second_score = scored[1][0] if len(scored) > 1 else 0.0
         if best_score >= 0.72 and best_score - second_score >= 0.12:
-            if best_spec.product_key == LANDSAT8_OLI_TIRS.key and _has_download_action(text) and not _has_region_hint(text):
+            if _has_download_action(text) and not _has_region_hint(text):
                 return GSCloudIntentRoute(
                     kind="clarify",
                     product_key=best_spec.product_key,
                     resource_type=best_spec.resource_type,
                     confidence=round(best_score, 3),
                     matched_terms=best_terms,
-                    clarification="已识别产品，但还缺少下载区域。请补充区域，例如“成都”“四川省”，或选择/上传工作区边界。",
+                    clarification="请确认下载区域或范围：当前研究区 / 上传边界文件 / 输入行政区名称 / 手动输入 bbox。DEM 默认使用 30m GeoTIFF，并裁剪到研究区。",
                 )
             return GSCloudIntentRoute(
                 kind="matched",

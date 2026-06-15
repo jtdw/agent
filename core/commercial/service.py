@@ -477,6 +477,32 @@ class CommercialService:
         )
         return str(row.get("storage_state_path") or "") if row else ""
 
+    def clear_user_storage_state(self, user_id: str, source_key: str) -> dict[str, Any]:
+        user = self.get_user(user_id)
+        source = str(source_key or "").strip().lower()
+        rows = self.db.fetch_all(
+            "SELECT * FROM source_credentials WHERE user_id=? AND source_key=?",
+            [user["user_id"], source],
+        )
+        deleted_paths: list[str] = []
+        for row in rows:
+            state_path = str(row.get("storage_state_path") or "").strip()
+            if state_path:
+                target = Path(state_path).resolve()
+                auth_root = (self.workdir / "domestic_auth").resolve()
+                try:
+                    target.relative_to(auth_root)
+                except ValueError:
+                    target = None
+                if target and target.exists() and target.is_file():
+                    target.unlink()
+                    deleted_paths.append(target.name)
+        self.db.execute(
+            "UPDATE source_credentials SET status='revoked', storage_state_path='', updated_at=? WHERE user_id=? AND source_key=?",
+            [now_str(), user["user_id"], source],
+        )
+        return {"ok": True, "provider": source, "deleted_count": len(deleted_paths)}
+
     def set_platform_account_storage_state(self, account_id: str, storage_state_path: str) -> dict[str, Any]:
         row = self.db.fetch_one("SELECT * FROM platform_accounts WHERE account_id=?", [account_id])
         if not row:
@@ -763,7 +789,7 @@ class CommercialService:
             user = self.get_user(user_id)
             if row.get("user_id") != user["user_id"]:
                 raise PermissionError("只能删除自己的下载任务记录。")
-        if row.get("status") in {"queued", "running", "waiting_login", "waiting_manual"}:
+        if row.get("status") in {"queued", "ready_to_start", "running", "waiting_login", "waiting_parameters", "waiting_manual"}:
             raise ValueError("任务仍在进行或等待处理，请先取消任务后再删除记录。")
         self.db.execute("DELETE FROM download_jobs WHERE job_id=?", [job_id])
         return {"ok": True, "deleted_job_id": job_id}
@@ -939,7 +965,7 @@ class CommercialService:
             user = self.get_user(user_id)
             if job.get("user_id") != user["user_id"]:
                 raise PermissionError("只能重试自己的下载任务。")
-        if job.get("status") not in {"failed", "canceled", "waiting_login", "waiting_manual"}:
+        if job.get("status") not in {"failed", "canceled", "waiting_login", "waiting_parameters", "waiting_manual"}:
             raise ValueError(f"当前状态不能重试: {job.get('status')}")
         retry = self.submit_job(
             user_id=job.get("user_id", ""),

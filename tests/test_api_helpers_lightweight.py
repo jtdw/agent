@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import tempfile
 import unittest
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 
 class ApiHelpersLightweightTests(unittest.TestCase):
@@ -24,20 +22,37 @@ class ApiHelpersLightweightTests(unittest.TestCase):
 
         self.assertEqual(proc.stdout.strip(), "False")
 
-    def test_relative_artifact_url_uses_explicit_workspace_root(self) -> None:
+    def test_relative_artifact_url_uses_artifact_id_only(self) -> None:
         from core.api_helpers import relative_artifact_url
 
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "workspace"
-            target = root / "exports" / "result.txt"
-            target.parent.mkdir(parents=True)
-            target.write_text("ok", encoding="utf-8")
+        url = relative_artifact_url("artifact_result", user_id="u_alice")
 
-            url = relative_artifact_url(root, target, user_id="u_alice")
-            query = parse_qs(urlparse(url).query)
+        self.assertEqual(url, "/api/artifacts/artifact_result/download?user_id=u_alice")
+        self.assertNotIn("path=", url)
 
-            self.assertEqual(query.get("path"), ["exports/result.txt"])
-            self.assertEqual(query.get("user_id"), ["u_alice"])
+    def test_workspace_mentions_are_compact(self) -> None:
+        from core.api_helpers import build_workspace_mentions
+
+        result = build_workspace_mentions(
+            [
+                {
+                    "name": "demo_xgboost_soil_moisture",
+                    "type": "table",
+                    "path": "workspace/users/u_1/uploads/demo_xgboost_soil_moisture.csv",
+                    "meta": {"rows": 48, "columns": ["station_id", "lon", "lat", "date"]},
+                }
+            ]
+        )
+
+        self.assertEqual(result["count"], 1)
+        self.assertEqual(result["items"][0]["name"], "demo_xgboost_soil_moisture")
+        self.assertEqual(result["items"][0]["mention"], "@{demo_xgboost_soil_moisture}")
+        self.assertEqual(result["items"][0]["filename"], "demo_xgboost_soil_moisture.csv")
+        self.assertEqual(result["items"][0]["row_count"], 48)
+        self.assertEqual(result["items"][0]["column_count"], 4)
+        serialized = str(result)
+        self.assertNotIn("workspace/users", serialized)
+        self.assertNotIn("uploads/demo_xgboost", serialized)
 
 
 if __name__ == "__main__":

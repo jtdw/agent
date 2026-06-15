@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.task_outcome_advisor import build_task_outcome
+from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 
 
 class TaskOutcomeAdvisorTests(unittest.TestCase):
@@ -52,6 +52,33 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
         self.assertTrue(outcome["has_results"])
         self.assertIn("station.csv", outcome["summary"])
         self.assertTrue(any("字段" in item for item in outcome["recommendations"]))
+
+    def test_upload_outcome_omits_raw_dataset_brief(self) -> None:
+        raw_message = (
+            '已加载数据: demo_xgboost_soil_moisture_1\n'
+            '[ { "name": "demo_xgboost_soil_moisture", "type": "table", '
+            '"path": "workspace/users/u_1/uploads/demo.csv", "meta": { "rows": 48, '
+            '"columns": [ "station_id", "lon", "lat" ] } } ]'
+        )
+        result = {"count": 1, "messages": [raw_message]}
+        dashboard = {
+            "datasets": [
+                {
+                    "name": "demo_xgboost_soil_moisture_1",
+                    "type": "table",
+                    "meta": {"rows": 48, "columns": ["station_id", "lon", "lat"]},
+                }
+            ]
+        }
+
+        outcome = build_task_outcome("upload", result, dashboard=dashboard)
+        markdown = format_task_outcome_markdown(outcome)
+
+        self.assertIn("已处理 1 个上传文件", markdown)
+        self.assertIn("demo_xgboost_soil_moisture_1", markdown)
+        self.assertNotIn('"path"', markdown)
+        self.assertNotIn('"columns"', markdown)
+        self.assertNotIn("[ {", markdown)
 
     def test_analysis_without_model_results_does_not_claim_result_files(self) -> None:
         outcome = build_task_outcome(

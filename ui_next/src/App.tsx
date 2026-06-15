@@ -100,6 +100,13 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, []);
 
+  useEffect(() => {
+    if (!chatOpen || !toolsOpen) return;
+    if (window.matchMedia('(max-width: 639px)').matches) {
+      setToolsOpen(false);
+    }
+  }, [chatOpen, toolsOpen]);
+
   return (
     <div className="relative isolate h-screen w-screen overflow-hidden text-slate-950 transition-colors duration-500 dark:text-slate-50">
       <SplashScreen visible={splash} />
@@ -130,7 +137,7 @@ export default function App() {
       <Suspense fallback={null}>
         {!consoleOpen && (
           <>
-            <SettingsPanel />
+            <SettingsPanel user={user} />
             <AnalysisPanel userId={user?.user_id || ''} resultPanel={latestResultPanel} onChatContextChange={updateChatContext} />
           </>
         )}
@@ -141,11 +148,14 @@ export default function App() {
             user={user}
             setUser={setUser}
             resultPanel={latestResultPanel}
-            onOpenChat={() => setChatOpen(true)}
+            onMapTextCommand={handleTextMapCommand}
+            externalPrompt={externalPrompt}
+            onResultPanel={setLatestResultPanel}
+            chatContext={chatContext}
             onOpenMap={() => {
               setConsoleOpen(false);
               setChatOpen(true);
-              setToolsOpen(true);
+              setToolsOpen(window.matchMedia('(min-width: 640px)').matches);
             }}
           />
         )}
@@ -156,7 +166,7 @@ export default function App() {
         <motion.div
           initial={{ opacity: 0, y: 18 }}
           animate={{ opacity: 1, y: 0 }}
-          className="no-drag fixed bottom-5 right-5 z-40 flex items-center gap-2 rounded-[24px] border border-white/50 bg-white/70 p-2 shadow-glass backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/65"
+          className={`no-drag fixed bottom-5 right-5 z-40 items-center gap-2 rounded-[24px] border border-white/50 bg-white/70 p-2 shadow-glass backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/65 ${chatOpen ? 'hidden sm:flex' : 'flex'}`}
         >
           <div className="hidden items-center gap-2 px-2 text-xs font-black text-slate-500 dark:text-slate-300 sm:flex">
             <Sparkles size={14} strokeWidth={1.7} /> 工作台

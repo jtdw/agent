@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlencode
@@ -22,16 +24,18 @@ from core.api_security import optional_authenticated_session, require_admin_toke
 from core.api_helpers import (
     SESSION_COOKIE_ID,
     SESSION_COOKIE_TOKEN,
+    build_workspace_mentions as _build_workspace_mentions,
     build_result_panel as _api_build_result_panel,
     cors_origins as _cors_origins,
     download_requires_login_result as _api_download_requires_login_result,
-    relative_artifact_url,
     relative_shared_download_url,
     request_admin_token as _request_admin_token,
     request_session as _request_session,
     safe_key as _safe_key,
 )
+from core.artifacts import artifact_download_url, assert_artifact_path_allowed, public_artifact_payload, safe_download_filename, shapefile_zip_path
 from core.archive_utils import safe_extract_zip
+from core.chat_tasks import cancel_chat_task, finish_chat_task, start_chat_task
 from core.chat_response import attach_chat_state, build_chat_response
 from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 from core.api_utils import api_guard, resolve_child_path
@@ -41,6 +45,8 @@ from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gsclou
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
+from core.domestic_sources.gscloud_adapter import gscloud_user_state_path
+from core.commercial.login_jobs import read_gscloud_login_job, request_gscloud_login_stop, start_gscloud_login_process
 from core.ops_config import require_valid_production_config, validate_production_config
 from core.llm_config import check_llm_provider_health, validate_llm_config
 
@@ -185,6 +191,16 @@ def _require_request_user_if_present(request: Request, user_id: str) -> str:
     return _require_request_user(request, user_id)
 
 
+def _authenticated_request_user(request: Request) -> str:
+    session_id, session_token = _request_session(request)
+    payload = commercial_service.validate_session(session_id, session_token)
+    user = payload.get("user") if isinstance(payload, dict) else None
+    user_id = str((user or {}).get("user_id") or "").strip()
+    if not user_id:
+        raise PermissionError("请先登录账号。")
+    return user_id
+
+
 def _require_admin_or_mock_payment_user(request: Request, user_id: str) -> str:
     admin_token = _request_admin_token(request)
     if admin_token:
@@ -235,7 +251,14 @@ class AskIn(BaseModel):
     user_id: str = ""
     session_id: str = ""
     session_token: str = ""
+    task_id: str = ""
     frontend_context: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatCancelIn(BaseModel):
+    user_id: str = ""
+    task_id: str = Field(min_length=1, max_length=120)
+    reason: str = ""
 
 
 class ChatSessionIn(BaseModel):
@@ -249,6 +272,12 @@ class ChatRetryIn(BaseModel):
     session_id: str = ""
     message_id: int
     content: str = Field(min_length=1, max_length=12000)
+
+
+class ChatModelIn(BaseModel):
+    user_id: str = ""
+    session_id: str
+    model: str = Field(min_length=1, max_length=120)
 
 
 class PaymentIn(BaseModel):
@@ -277,6 +306,14 @@ class DownloadActionIn(BaseModel):
     user_id: str = ""
     job_id: str
     reason: str = ""
+
+
+class GSCloudLoginStartIn(BaseModel):
+    timeout_seconds: int = Field(default=300, ge=30, le=900)
+
+
+class GSCloudLoginCompleteIn(BaseModel):
+    login_session_id: str = Field(min_length=1, max_length=120, pattern=r"^login_[A-Za-z0-9_-]+$")
 
 
 class DownloadPreflightIn(BaseModel):
@@ -311,6 +348,12 @@ class LocalLibraryImportIn(BaseModel):
 
 class LocalLibraryRescanIn(BaseModel):
     pass
+
+
+class ArtifactBatchDeleteIn(BaseModel):
+    user_id: str = ""
+    artifact_ids: list[str] = Field(default_factory=list)
+    delete_file: bool = True
 
 
 def guard(fn):
@@ -352,7 +395,169 @@ def _safe_layer_id(value: str) -> str:
 
 
 def _relative_artifact_url(service: GISWorkspaceService, file_path: str, user_id: str = "") -> str:
-    return relative_artifact_url(service.manager.workdir, file_path, user_id=user_id)
+    try:
+        target = assert_artifact_path_allowed(service.manager.workdir, file_path)
+    except (PermissionError, ValueError):
+        return ""
+    if not target.exists() or not target.is_file():
+        return ""
+    existing = None
+    for item in service.manager.list_artifacts():
+        try:
+            if Path(str(item.get("path") or "")).resolve() == target:
+                existing = item
+                break
+        except OSError:
+            continue
+    if existing is None:
+        existing = service.manager.register_artifact(
+            path=str(target),
+            type="artifact",
+            title=target.name,
+            meta={"tool_name": "workspace_result"},
+        )
+    elif not service.manager.get_artifact(str(existing.get("artifact_id") or "")):
+        existing = service.manager.register_artifact(
+            artifact_id=str(existing.get("artifact_id") or ""),
+            path=str(target),
+            type=str(existing.get("type") or existing.get("category") or "artifact"),
+            title=str(existing.get("title") or existing.get("name") or target.name),
+            meta=existing.get("meta") if isinstance(existing.get("meta"), dict) else {"tool_name": "workspace_result"},
+        )
+    return artifact_download_url(str(existing.get("artifact_id") or ""), user_id=user_id)
+
+
+def _download_job_artifacts(user_id: str, job: dict) -> list[dict]:
+    if str(job.get("status") or "") not in {"completed", "success"}:
+        return []
+    service = workspace_for(user_id)
+    job_id = str(job.get("job_id") or "download")
+    target_dir = service.manager.derived_dir / "downloads" / safe_download_filename(job_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    candidates: list[str] = []
+    for value in (job.get("output_path"), job.get("zip_path")):
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+    result = job.get("result") if isinstance(job.get("result"), dict) else {}
+    for key in ("downloaded_path", "path", "zip_path", "package_path", "metadata_path", "preview_path", "log_path"):
+        value = result.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() not in candidates:
+            candidates.append(value.strip())
+
+    copied: list[Path] = []
+    for value in candidates:
+        try:
+            source = assert_artifact_path_allowed(commercial_service.workdir, value)
+        except (PermissionError, ValueError):
+            continue
+        if not source.exists() or not source.is_file():
+            continue
+        destination = target_dir / safe_download_filename(source.name)
+        if not destination.exists() or destination.stat().st_size != source.stat().st_size:
+            shutil.copy2(source, destination)
+        copied.append(destination)
+
+    metadata_path = target_dir / "metadata.json"
+    metadata_path.write_text(json.dumps({
+        "job_id": job_id,
+        "provider": job.get("source_key"),
+        "resource_type": job.get("resource_type"),
+        "region": job.get("region"),
+        "status": job.get("status"),
+        "created_at": job.get("created_at"),
+        "finished_at": job.get("finished_at"),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    copied.append(metadata_path)
+
+    public: list[dict] = []
+    for path in copied:
+        existing = next((item for item in service.manager.list_registered_artifacts(limit=300) if Path(str(item.get("path") or "")).resolve() == path.resolve()), None)
+        artifact = existing or service.manager.register_artifact(
+            path=str(path),
+            type="dem" if path.suffix.lower() in {".tif", ".tiff"} else path.suffix.lower().lstrip(".") or "artifact",
+            title=path.name,
+            quality_status="validated",
+            preview_available=path.suffix.lower() == ".png",
+            task_id=job_id,
+            meta={"tool_name": "gscloud_download", "job_id": job_id, "provider": "gscloud"},
+        )
+        public.append(public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=user_id))
+    return public
+
+
+def _public_download_job(job: dict) -> dict:
+    public = dict(job)
+    for key in ("output_path", "zip_path", "direct_url", "local_file_path", "result_json", "failure_diagnostic_json", "artifact_quality_json"):
+        public.pop(key, None)
+    public.pop("result", None)
+    return public
+
+
+def _artifact_error(status_code: int, error_code: str, message: str) -> HTTPException:
+    return HTTPException(status_code=status_code, detail={"error_code": error_code, "message": message})
+
+
+def _public_artifact_or_error(service: GISWorkspaceService, artifact_id: str, user_id: str = "") -> dict:
+    artifact = service.manager.get_artifact(artifact_id)
+    if not artifact:
+        raise _artifact_error(404, "ARTIFACT_NOT_FOUND", "Artifact does not exist or is no longer registered.")
+    try:
+        target = assert_artifact_path_allowed(service.manager.workdir, str(artifact.get("path") or ""))
+    except PermissionError as exc:
+        raise _artifact_error(403, "ARTIFACT_FORBIDDEN", str(exc)) from exc
+    if not target.exists() or not target.is_file():
+        raise _artifact_error(404, "ARTIFACT_FILE_MISSING", "Artifact file is missing or expired.")
+    try:
+        return public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=user_id)
+    except PermissionError as exc:
+        raise _artifact_error(403, "ARTIFACT_FORBIDDEN", str(exc)) from exc
+
+
+def _decorate_message_artifacts(service: GISWorkspaceService, messages: list[dict], user_id: str = "") -> list[dict]:
+    decorated: list[dict] = []
+    for message in messages or []:
+        item = dict(message)
+        meta = dict(item.get("meta") or {})
+        artifacts = meta.get("artifacts") if isinstance(meta.get("artifacts"), list) else []
+        public_artifacts: list[dict] = []
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = str(artifact.get("artifact_id") or "")
+            source = service.manager.get_artifact(artifact_id) if artifact_id else artifact
+            if not source:
+                continue
+            source = dict(source)
+            source.setdefault("message_id", item.get("message_id"))
+            try:
+                public = public_artifact_payload(source, workdir=service.manager.workdir, user_id=user_id)
+            except Exception:
+                continue
+            public_artifacts.append(public)
+        if public_artifacts:
+            meta["artifacts"] = public_artifacts
+        item["meta"] = meta
+        decorated.append(item)
+    return decorated
+
+
+def _decorate_chat_response_messages(service: GISWorkspaceService, user_id: str, response: dict) -> dict:
+    artifacts = response.get("artifacts") if isinstance(response.get("artifacts"), list) else []
+    public_artifacts: list[dict] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        artifact_id = str(artifact.get("artifact_id") or "")
+        source = service.manager.get_artifact(artifact_id) if artifact_id else None
+        try:
+            public_artifacts.append(public_artifact_payload(source or artifact, workdir=service.manager.workdir, user_id=user_id))
+        except (PermissionError, FileNotFoundError, OSError):
+            continue
+    if artifacts:
+        response = {**response, "artifacts": public_artifacts}
+    if isinstance(response.get("messages"), list):
+        response = {**response, "messages": _decorate_message_artifacts(service, response["messages"], user_id=user_id)}
+    return response
 
 
 def _decorate_dashboard(service: GISWorkspaceService, user_id: str = "") -> dict:
@@ -402,6 +607,27 @@ def _decorate_dashboard(service: GISWorkspaceService, user_id: str = "") -> dict
     return data
 
 
+def _build_upload_summaries(service: GISWorkspaceService, payload: list[tuple[str, bytes]], messages: list[str]) -> list[dict[str, Any]]:
+    catalog = service.manager.database.list_catalog()
+    by_filename = {Path(str(item.get("path") or "")).name: item for item in catalog if isinstance(item, dict)}
+    summaries: list[dict[str, Any]] = []
+    for index, (filename, data) in enumerate(payload):
+        safe_name = Path(str(filename or "uploaded.bin")).name
+        item = by_filename.get(safe_name, {})
+        summaries.append(
+            {
+                "filename": safe_name,
+                "type": str(item.get("data_type") or Path(safe_name).suffix.lower().lstrip(".") or "file"),
+                "size_bytes": len(data or b""),
+                "row_count": item.get("row_count"),
+                "dataset_name": item.get("dataset_name") or "",
+                "status": "loaded",
+                "message": messages[index] if index < len(messages) else "",
+            }
+        )
+    return summaries
+
+
 def _build_result_panel(response: dict, dashboard: dict) -> dict:
     return _api_build_result_panel(response, dashboard)
     outcome = response.get("task_outcome") if isinstance(response.get("task_outcome"), dict) else {}
@@ -437,6 +663,7 @@ def _build_result_panel(response: dict, dashboard: dict) -> dict:
 
 
 def _attach_result_panel(service: GISWorkspaceService, user_id: str, response: dict) -> dict:
+    response = _decorate_chat_response_messages(service, user_id, response)
     dashboard = _decorate_dashboard(service, user_id=user_id)
     return {**response, "result_panel": _build_result_panel(response, dashboard)}
 
@@ -498,7 +725,11 @@ def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str, user
             out_width = max(1, int(src.width / scale))
             out_height = max(1, int(src.height / scale))
             data = src.read(1, out_shape=(out_height, out_width), masked=True)
-            arr = np.asarray(data.filled(np.nan), dtype="float32")
+            masked = np.ma.asarray(data)
+            arr = np.asarray(masked.data, dtype="float32")
+            mask = np.ma.getmaskarray(masked)
+            if mask.any():
+                arr[mask] = np.nan
             valid = np.isfinite(arr)
             rgba = np.zeros((out_height, out_width, 4), dtype=np.uint8)
             if valid.any():
@@ -506,6 +737,7 @@ def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str, user
                 if hi <= lo:
                     hi = lo + 1
                 norm = np.clip((arr - lo) / (hi - lo), 0, 1)
+                norm = np.where(valid, norm, 0)
                 rgba[..., 0] = (32 + 210 * norm).astype(np.uint8)
                 rgba[..., 1] = (96 + 120 * norm).astype(np.uint8)
                 rgba[..., 2] = (180 - 140 * norm).astype(np.uint8)
@@ -783,7 +1015,12 @@ def logout(response: Response, request: Request):
 
 @app.get("/api/chat/messages")
 def messages(request: Request, user_id: str = Query(default="")):
-    return guard(lambda: {"messages": workspace_for(_require_request_user_if_present(request, user_id)).current_messages()})
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        service = workspace_for(authorized_user_id)
+        return {"messages": _decorate_message_artifacts(service, service.current_messages(), user_id=authorized_user_id)}
+
+    return guard(run)
 
 
 @app.get("/api/chat/sessions")
@@ -793,7 +1030,7 @@ def chat_sessions(request: Request, user_id: str = Query(default="")):
         return {
             "sessions": service.list_sessions(),
             "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
+            "messages": _decorate_message_artifacts(service, service.current_messages(), user_id=user_id),
         }
 
     return guard(run)
@@ -808,7 +1045,7 @@ def create_chat_session(body: ChatSessionIn, request: Request):
             "session_id": session_id,
             "sessions": service.list_sessions(),
             "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
+            "messages": _decorate_message_artifacts(service, service.current_messages(), user_id=body.user_id),
         }
 
     return guard(run)
@@ -822,8 +1059,29 @@ def switch_chat_session(body: ChatSessionIn, request: Request):
         return {
             "sessions": service.list_sessions(),
             "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
+            "messages": _decorate_message_artifacts(service, service.current_messages(), user_id=body.user_id),
         }
+
+    return guard(run)
+
+
+@app.get("/api/chat/models")
+def chat_models(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
+    def run():
+        service = workspace_for(_require_request_user_if_present(request, user_id))
+        if session_id:
+            service.use_session_or_current(session_id)
+        return service.chat_model_state(session_id or service.current_session_id)
+
+    return guard(run)
+
+
+@app.post("/api/chat/models/select")
+def select_chat_model(body: ChatModelIn, request: Request):
+    def run():
+        service = workspace_for(_require_request_user_if_present(request, body.user_id))
+        service.switch_session(body.session_id)
+        return service.select_chat_model(body.model, body.session_id)
 
     return guard(run)
 
@@ -846,7 +1104,7 @@ def delete_chat_session(body: ChatSessionIn, request: Request):
         return {
             "current_session_id": current,
             "sessions": service.list_sessions(),
-            "messages": service.current_messages(),
+            "messages": _decorate_message_artifacts(service, service.current_messages(), user_id=body.user_id),
         }
 
     return guard(run)
@@ -862,7 +1120,7 @@ def clear_chat_session(body: ChatSessionIn, request: Request):
         return {
             "current_session_id": service.current_session_id,
             "sessions": service.list_sessions(),
-            "messages": service.current_messages(),
+            "messages": _decorate_message_artifacts(service, service.current_messages(), user_id=body.user_id),
         }
 
     return guard(run)
@@ -875,7 +1133,7 @@ def retry_chat_message(body: ChatRetryIn, request: Request):
         if body.session_id:
             service.use_session_or_current(body.session_id)
         result = service.edit_user_message_and_retry(body.message_id, body.content)
-        return {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id}
+        return _decorate_chat_response_messages(service, body.user_id, {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id})
 
     return guard(run)
 
@@ -1007,7 +1265,7 @@ def _is_gscloud_modev1f_download_prompt(prompt: str) -> bool:
     product = match_gscloud_product(text)
     if product is None or product.key != MODEV1F_CHINA_250M_EVI_5DAY.key:
         return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索", "涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱?")):
+    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
         return False
     upper = text.upper()
     return (
@@ -1102,7 +1360,7 @@ def _is_gscloud_mod021km_download_prompt(prompt: str) -> bool:
     product = match_gscloud_product(text)
     if product is None or product.key != MOD021KM_1KM_SURFACE_REFLECTANCE.key:
         return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索", "涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱?")):
+    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
         return False
     upper = text.upper()
     return (
@@ -1206,7 +1464,7 @@ def _is_gscloud_sentinel2_download_prompt(prompt: str) -> bool:
     product = match_gscloud_product(text)
     if product is None or product.key != SENTINEL2_MSI.key:
         return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索", "涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱?")):
+    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
         return False
     upper = text.upper()
     return (
@@ -1597,7 +1855,7 @@ def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str) -> dict:
         )
     else:
         if account_mode == "own":
-            next_step = "请先为你自己的地理空间数据云账号保存 Cookie/storage state，或在前台后续的“我的数据源账号”功能中保存账号凭据。"
+            next_step = "请点击聊天中的“去登录”，或打开“设置 → 我的数据源账号”完成官方网页登录。"
         else:
             next_step = "请先在服务器后台 .env 中配置平台账号 storage_state，或运行平台账号登录态保存脚本。"
         reply = (
@@ -1608,9 +1866,22 @@ def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str) -> dict:
             f"输出名：{output_name}\n"
             f"当前状态：waiting_login\n\n"
             f"下一步：{next_step}\n"
-            f"登录态配置完成后，再输入：启动这个任务的地理空间数据云 DEM 自动分幅下载，任务编号 {job['job_id']}。"
+            "登录成功后点击“继续下载”，系统会恢复当前任务。"
         )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_dem_download", "job": job}
+    result = {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_dem_download", "job": job}
+    if job.get("status") == "waiting_login":
+        result["reply"] = (
+            "这个数据源需要登录地理空间数据云账号后才能下载。"
+            "任务尚未开始下载，登录成功后可直接继续当前任务。"
+        )
+        result["action_required"] = {
+            "type": "login_required",
+            "provider": "gscloud",
+            "job_id": job["job_id"],
+            "user_message": "需要登录地理空间数据云账号。",
+            "actions": ["login", "cancel"],
+        }
+    return result
 
 
 def _submit_gscloud_intent_route_from_chat(user_id: str, prompt: str, route: GSCloudIntentRoute) -> dict:
@@ -1925,16 +2196,6 @@ def _format_download_job_log_text(job: dict, scene_jobs: list[dict], tile_jobs: 
 
 def _download_requires_login_result(prompt: str) -> dict:
     return _api_download_requires_login_result(prompt)
-    request = str(prompt or "").strip()
-    return {
-        "reply": (
-            "这个请求涉及平台数据下载或下载任务状态，需先登录账号后才能继续。"
-            "我可以先保留你的下载意图；登录后请重新发送这句话，或在右侧“数据下载”区域选择产品、区域并提交。"
-            f"\n\n当前识别到的请求：{request or '下载数据'}"
-        ),
-        "model": "direct-router",
-        "reason": "download_requires_login",
-    }
 
 
 @app.post("/api/chat/ask")
@@ -1943,10 +2204,15 @@ def ask(body: AskIn, request: Request):
         user_id = _require_request_user_if_present(request, body.user_id)
         service = workspace_for(user_id)
         def finalize(response: dict) -> dict:
-            return _attach_result_panel(service, user_id, response)
+            try:
+                return _attach_result_panel(service, user_id, response)
+            finally:
+                finish_chat_task(body.task_id)
         if body.session_id:
             service.use_session_or_current(body.session_id)
         service.apply_frontend_context(body.frontend_context)
+        if body.task_id:
+            start_chat_task(body.task_id, user_id=user_id, session_id=service.current_session_id)
         if _is_commercial_download_status_prompt(body.prompt):
             if not user_id:
                 return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
@@ -1959,6 +2225,17 @@ def ask(body: AskIn, request: Request):
                 "model": "direct-router",
                 "reason": "gscloud_intent_clarification",
                 "intent_route": intent_route.__dict__,
+                "action_required": {
+                    "type": "clarification_required",
+                    "missing_parameters": ["region"],
+                    "recommended_defaults": {"resolution": "30m", "format": "GeoTIFF", "clip_to_region": True},
+                    "options": [
+                        {"value": "active_region", "label": "当前研究区"},
+                        {"value": "upload_boundary", "label": "上传边界文件"},
+                        {"value": "admin_region", "label": "输入行政区名称"},
+                        {"value": "bbox", "label": "手动输入 bbox"},
+                    ],
+                },
             }
             return finalize(build_chat_response(service, user_prompt=body.prompt, result=result, meta_keys=("model", "reason", "intent_route")))
         if intent_route.kind == "matched":
@@ -2008,7 +2285,22 @@ def ask(body: AskIn, request: Request):
         if imported:
             prompt += "\n\n系统已根据你的指令从本地文件库预加载以下数据：\n" + "\n".join(f"- {m}" for m in imported)
         prompt += "\n\n【本地文件库上下文】\n" + library_hint + "\n如用户需要内置基础数据，请优先建议或调用本地文件库中已有条目；不要虚构不存在的数据。"
-        return finalize(attach_chat_state(service, service.ask(prompt, visible_prompt=body.prompt, frontend_context=body.frontend_context)))
+        try:
+            return finalize(attach_chat_state(service, service.ask(prompt, visible_prompt=body.prompt, frontend_context=body.frontend_context, task_id=body.task_id)))
+        finally:
+            finish_chat_task(body.task_id)
+
+    return guard(run)
+
+
+@app.post("/api/chat/cancel")
+def cancel_chat(body: ChatCancelIn, request: Request):
+    def run():
+        user_id = _require_request_user_if_present(request, body.user_id)
+        result = cancel_chat_task(body.task_id, user_id=user_id, reason=body.reason)
+        if result.get("status") == "forbidden":
+            raise HTTPException(status_code=403, detail={"error_code": "CHAT_TASK_FORBIDDEN", "message": result.get("message")})
+        return result
 
     return guard(run)
 
@@ -2040,7 +2332,13 @@ async def upload_files(request: Request, user_id: str = Form(default=""), files:
         result = {"ok": True, "count": len(payload), "messages": messages}
         dashboard_data = _decorate_dashboard(service, user_id=authorized_user_id)
         outcome = build_task_outcome("upload", result, dashboard=dashboard_data)
-        return {**result, "dashboard": dashboard_data, "task_outcome": outcome, "outcome_markdown": format_task_outcome_markdown(outcome)}
+        return {
+            **result,
+            "dashboard": dashboard_data,
+            "upload_summaries": _build_upload_summaries(service, payload, messages),
+            "task_outcome": outcome,
+            "outcome_markdown": format_task_outcome_markdown(outcome),
+        }
 
     return guard(run)
 
@@ -2057,8 +2355,12 @@ def list_local_library(
 
 
 @app.post("/api/local-library/rescan")
-def rescan_local_library():
-    return guard(lambda: local_library.rescan())
+def rescan_local_library(request: Request):
+    def run():
+        require_admin_token(os.getenv("GIS_AGENT_ADMIN_TOKEN", ""), _request_admin_token(request))
+        return local_library.rescan()
+
+    return guard(run)
 
 
 @app.post("/api/local-library/import")
@@ -2090,6 +2392,16 @@ def dashboard(request: Request, user_id: str = Query(default="")):
     return guard(run)
 
 
+@app.get("/api/workspace/mentions")
+def workspace_mentions(request: Request, user_id: str = Query(default="")):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        service = workspace_for(authorized_user_id)
+        return _build_workspace_mentions(service.manager.list_datasets())
+
+    return guard(run)
+
+
 @app.post("/api/workspace/export")
 def export_workspace(body: ExportIn, request: Request):
     def run():
@@ -2103,14 +2415,106 @@ def export_workspace(body: ExportIn, request: Request):
     return guard(run)
 
 
-@app.get("/api/files/artifact")
-def artifact(request: Request, user_id: str = Query(default=""), path: str = Query(...)):
+@app.get("/api/artifacts/{artifact_id}")
+def artifact_metadata(artifact_id: str, request: Request, user_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
         service = workspace_for(authorized_user_id)
-        target = resolve_child_path(service.manager.workdir, path)
-        _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="workspace_file", resource_id=path)
-        return FileResponse(str(target), filename=target.name)
+        payload = _public_artifact_or_error(service, artifact_id, user_id=authorized_user_id)
+        _audit(request, user_id=authorized_user_id, action="artifact.metadata", resource_type="artifact", resource_id=artifact_id)
+        return payload
+
+    return guard(run)
+
+
+@app.get("/api/artifacts/{artifact_id}/download")
+def artifact_download(artifact_id: str, request: Request, user_id: str = Query(default="")):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        service = workspace_for(authorized_user_id)
+        artifact = service.manager.get_artifact(artifact_id)
+        if not artifact:
+            raise _artifact_error(404, "ARTIFACT_NOT_FOUND", "Artifact does not exist or is no longer registered.")
+        public = _public_artifact_or_error(service, artifact_id, user_id=authorized_user_id)
+        source = assert_artifact_path_allowed(service.manager.workdir, str(artifact.get("path") or ""))
+        download_path = shapefile_zip_path(service.manager.workdir, source, artifact_id) if source.suffix.lower() == ".shp" else source
+        if not download_path.exists() or not download_path.is_file():
+            raise _artifact_error(404, "ARTIFACT_FILE_MISSING", "Artifact file is missing or expired.")
+        _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="artifact", resource_id=artifact_id)
+        return FileResponse(str(download_path), media_type=str(public.get("mime_type") or "application/octet-stream"), filename=str(public.get("filename") or download_path.name))
+
+    return guard(run)
+
+
+@app.delete("/api/artifacts/{artifact_id}")
+def artifact_delete(artifact_id: str, request: Request, user_id: str = Query(default=""), delete_file: bool = Query(default=True)):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        service = workspace_for(authorized_user_id)
+        artifact = service.manager.resolve_artifact(artifact_id)
+        if not artifact:
+            raise _artifact_error(404, "ARTIFACT_NOT_FOUND", "Artifact does not exist or is no longer registered.")
+        try:
+            assert_artifact_path_allowed(service.manager.workdir, str(artifact.get("path") or ""))
+        except PermissionError as exc:
+            raise _artifact_error(403, "ARTIFACT_FORBIDDEN", str(exc)) from exc
+        result = service.manager.delete_artifact(artifact_id, delete_file=delete_file)
+        _audit(request, user_id=authorized_user_id, action="artifact.delete", resource_type="artifact", resource_id=artifact_id, detail={"delete_file": delete_file, "file_deleted": result.get("file_deleted")})
+        return result
+
+    return guard(run)
+
+
+@app.post("/api/artifacts/delete-batch")
+def artifact_delete_batch(body: ArtifactBatchDeleteIn, request: Request):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, body.user_id)
+        service = workspace_for(authorized_user_id)
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw_id in body.artifact_ids:
+            artifact_id = str(raw_id or "").strip()
+            if not artifact_id or artifact_id in seen:
+                continue
+            seen.add(artifact_id)
+            artifact = service.manager.resolve_artifact(artifact_id)
+            if not artifact:
+                results.append({"ok": False, "artifact_id": artifact_id, "status": "not_found", "file_deleted": False})
+                continue
+            try:
+                assert_artifact_path_allowed(service.manager.workdir, str(artifact.get("path") or ""))
+                result = service.manager.delete_artifact(artifact_id, delete_file=body.delete_file)
+            except PermissionError as exc:
+                result = {"ok": False, "artifact_id": artifact_id, "status": "forbidden", "file_deleted": False, "error": str(exc)}
+            results.append(result)
+            _audit(
+                request,
+                user_id=authorized_user_id,
+                action="artifact.delete",
+                resource_type="artifact",
+                resource_id=artifact_id,
+                detail={"delete_file": body.delete_file, "batch": True, "ok": result.get("ok"), "file_deleted": result.get("file_deleted")},
+            )
+        return {
+            "ok": all(bool(item.get("ok")) for item in results) if results else False,
+            "deleted_count": sum(1 for item in results if item.get("ok")),
+            "failed_count": sum(1 for item in results if not item.get("ok")),
+            "results": results,
+        }
+
+    return guard(run)
+
+
+@app.get("/api/files/artifact")
+def artifact(request: Request, user_id: str = Query(default=""), path: str = Query(default="")):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        _audit(request, user_id=authorized_user_id, action="artifact.legacy_download_blocked", status="blocked", resource_type="workspace_file")
+        raise _artifact_error(
+            410,
+            "LEGACY_ARTIFACT_DOWNLOAD_DISABLED",
+            "Legacy path downloads are disabled. Use an artifact_id download URL.",
+        )
 
     return guard(run)
 
@@ -2131,6 +2535,135 @@ def simulate_payment(body: PaymentIn, request: Request):
         )
         _audit(request, user_id=user_id, action="payment.simulate", resource_type="payment", resource_id=str((result.get("payment") or {}).get("payment_id") or ""), detail={"plan": body.plan})
         return result
+
+    return guard(run)
+
+
+def _gscloud_public_status(user_id: str) -> dict:
+    state_path = commercial_service.get_user_storage_state_path(user_id, "gscloud")
+    health = inspect_storage_state(state_path) if state_path else {"ok": False, "reason": "missing_storage_state"}
+    logged_in = bool(health.get("ok"))
+    return {
+        "provider": "gscloud",
+        "logged_in": logged_in,
+        "account_mode": "own",
+        "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "expires_at": None,
+        "masked_account": None,
+        "storage_state_exists": bool(state_path and Path(state_path).exists()),
+        "health_status": "healthy" if logged_in else str(health.get("reason") or "login_required"),
+        "user_message": "地理空间数据云账号已登录。" if logged_in else "需要登录地理空间数据云账号。",
+    }
+
+
+@app.get("/api/data-sources/gscloud/status")
+def gscloud_account_status(request: Request):
+    return guard(lambda: _gscloud_public_status(_authenticated_request_user(request)))
+
+
+@app.post("/api/data-sources/gscloud/login/start")
+def gscloud_login_start(body: GSCloudLoginStartIn, request: Request):
+    def run():
+        user_id = _authenticated_request_user(request)
+        state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
+        login_job = start_gscloud_login_process(
+            workdir=commercial_service.workdir,
+            subject_type="customer",
+            subject_id=user_id,
+            state_path=state_path,
+            timeout_seconds=body.timeout_seconds,
+            headless=False,
+        )
+        _audit(request, user_id=user_id, action="data_source.login_start", resource_type="data_source", resource_id="gscloud")
+        return {
+            "provider": "gscloud",
+            "login_session_id": str(login_job.get("login_job_id") or ""),
+            "state": str(login_job.get("state") or "STARTING"),
+            "user_message": str(login_job.get("message") or "已打开地理空间数据云登录窗口。"),
+            "poll_interval_ms": 2000,
+        }
+
+    return guard(run)
+
+
+@app.post("/api/data-sources/gscloud/login/complete")
+def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
+    def run():
+        user_id = _authenticated_request_user(request)
+        login_job = read_gscloud_login_job(commercial_service.workdir, body.login_session_id)
+        if str(login_job.get("subject_type") or "customer") != "customer" or str(login_job.get("subject_id") or "") != user_id:
+            raise PermissionError("无权访问其他用户的数据源登录会话。")
+        state = str(login_job.get("state") or "")
+        state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
+        health = inspect_storage_state(state_path)
+        if health.get("ok"):
+            commercial_service.set_user_credential_storage_state(user_id, "gscloud", str(state_path))
+            request_gscloud_login_stop(commercial_service.workdir, body.login_session_id)
+            waiting_jobs = [
+                job for job in commercial_service.list_jobs(user_id=user_id, limit=100)
+                if job.get("source_key") == "gscloud" and job.get("status") == "waiting_login"
+            ]
+            _audit(request, user_id=user_id, action="data_source.login_complete", resource_type="data_source", resource_id="gscloud")
+            return {
+                **_gscloud_public_status(user_id),
+                "login_session_id": body.login_session_id,
+                "login_state": state,
+                "pending": False,
+                "waiting_jobs": waiting_jobs,
+            }
+        if state not in {"COMPLETED", "FAILED"}:
+            return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": True}
+        if not health.get("ok"):
+            return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": False}
+        raise RuntimeError("unreachable")
+
+    return guard(run)
+
+
+@app.delete("/api/data-sources/gscloud/logout")
+def gscloud_account_logout(request: Request):
+    def run():
+        user_id = _authenticated_request_user(request)
+        commercial_service.clear_user_storage_state(user_id, "gscloud")
+        _audit(request, user_id=user_id, action="data_source.logout", resource_type="data_source", resource_id="gscloud")
+        return _gscloud_public_status(user_id)
+
+    return guard(run)
+
+
+@app.post("/api/download-jobs/{job_id}/resume")
+def resume_download_job(job_id: str, request: Request):
+    def run():
+        user_id = _authenticated_request_user(request)
+        job = require_resource_owner(commercial_service.get_job(job_id), user_id=user_id, resource_name="download job")
+        if job.get("status") not in {"waiting_login", "waiting_manual", "waiting_parameters", "ready_to_start", "queued"}:
+            raise ValueError(f"当前状态不能恢复: {job.get('status')}")
+        if not str(job.get("region") or "").strip():
+            commercial_service._update_job(job_id, status="waiting_parameters", stage="needs_region")
+            return {
+                "job": commercial_service.get_job(job_id),
+                "auto_supported": True,
+                "auto_started": False,
+                "reason": "clarification_required",
+                "action_required": {
+                    "type": "clarification_required",
+                    "missing_parameters": ["region"],
+                    "recommended_defaults": {"resolution": "30m", "format": "GeoTIFF", "clip_to_region": True},
+                },
+            }
+        status = _gscloud_public_status(user_id)
+        if not status["logged_in"]:
+            commercial_service._update_job(job_id, status="waiting_login", stage="needs_gscloud_login_state")
+            return {
+                "job": commercial_service.get_job(job_id),
+                "auto_supported": True,
+                "auto_started": False,
+                "reason": "login_required",
+                "action_required": {"type": "login_required", "provider": "gscloud", "job_id": job_id},
+            }
+        auto = _maybe_start_gscloud_auto_download(job, region=str(job.get("region") or ""))
+        _audit(request, user_id=user_id, action="download.resume", resource_type="download_job", resource_id=job_id, detail={"auto_started": auto.get("auto_started")})
+        return {"job": commercial_service.get_job(job_id), **auto}
 
     return guard(run)
 
@@ -2254,7 +2787,9 @@ def list_jobs(request: Request, user_id: str = ""):
                     if url:
                         job["download_url"] = url
                         break
-        return {"jobs": jobs}
+                if job.get("status") in {"completed", "success"}:
+                    job["artifacts"] = _download_job_artifacts(authorized_user_id, job)
+        return {"jobs": [_public_download_job(job) for job in jobs]}
     return guard(run)
 
 
@@ -2345,6 +2880,7 @@ def download_job_artifact(request: Request, user_id: str = Query(...), job_id: s
         authorized_user_id = _require_request_user(request, user_id)
         job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
         target = resolve_child_path(base_settings.workdir, path)
+        assert_artifact_path_allowed(base_settings.workdir, target)
         allowed = {str(job.get("zip_path") or ""), str(job.get("output_path") or "")}
         if str(target.resolve()) not in {str(Path(item).resolve()) for item in allowed if item}:
             _audit(request, user_id=authorized_user_id, action="download.artifact", status="denied", resource_type="download_job", resource_id=job_id, detail={"path": path})

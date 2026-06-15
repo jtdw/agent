@@ -1921,13 +1921,6 @@ def build_tools(manager: DataManager):
             ).to_json()
         except Exception as exc:
             return _tool_internal_error("vector_clip_by_vector", inputs, exc)
-        source = manager.get_vector(dataset_name)
-        clipper = manager.get_vector(clip_name)
-        source, clipper = _align_crs(source, clipper)
-        clipped = gpd.clip(source, clipper)
-        saved_name = manager.put_vector(output_name, clipped)
-        manager.log_operation("矢量裁剪", f"{dataset_name} by {clip_name} -> {saved_name}", "analysis")
-        return f"矢量裁剪完成，结果: {saved_name}，要素数量: {len(clipped)}，保存路径: {manager.get(saved_name).path}"
 
     @tool
     def vector_overlay(dataset_name: str, overlay_name: str, how: str, output_name: str) -> str:
@@ -1969,7 +1962,7 @@ def build_tools(manager: DataManager):
             saved_name = manager.put_vector(output_name, result)
             record = manager.get(saved_name)
             warnings_list = ["叠加结果为空，请检查两个图层是否存在空间重叠或叠加方式是否合适。"] if result.empty else []
-            manager.log_operation("鐭㈤噺鍙犲姞", f"{dataset_name} {how} {overlay_name} -> {saved_name}", "analysis")
+            manager.log_operation("矢量叠加", f"{dataset_name} {how} {overlay_name} -> {saved_name}", "analysis")
             return tool_result_ok(
                 "vector_overlay",
                 inputs=inputs,
@@ -2003,15 +1996,6 @@ def build_tools(manager: DataManager):
             ).to_json()
         except Exception as exc:
             return _tool_internal_error("vector_overlay", inputs, exc)
-        if how not in allowed:
-            raise ValueError(f"how 必须是 {sorted(allowed)} 之一")
-        left = manager.get_vector(dataset_name)
-        right = manager.get_vector(overlay_name)
-        left, right = _align_crs(left, right)
-        result = gpd.overlay(left, right, how=how)
-        saved_name = manager.put_vector(output_name, result)
-        manager.log_operation("矢量叠加", f"{dataset_name} {how} {overlay_name} -> {saved_name}", "analysis")
-        return f"矢量叠加完成，方式: {how}，结果: {saved_name}，要素数量: {len(result)}，保存路径: {manager.get(saved_name).path}"
 
     @tool
     def vector_dissolve(dataset_name: str, by_field: str, output_name: str) -> str:
@@ -2053,13 +2037,6 @@ def build_tools(manager: DataManager):
             ).to_json()
         except Exception as exc:
             return _tool_internal_error("vector_dissolve", inputs, exc)
-        gdf = manager.get_vector(dataset_name)
-        if by_field not in gdf.columns:
-            raise ValueError(f"字段不存在: {by_field}。可用字段: {list(gdf.columns)}")
-        dissolved = gdf.dissolve(by=by_field).reset_index()
-        saved_name = manager.put_vector(output_name, dissolved)
-        manager.log_operation("矢量融合", f"{dataset_name} by {by_field} -> {saved_name}", "analysis")
-        return f"融合完成，结果: {saved_name}，要素数量: {len(dissolved)}，保存路径: {manager.get(saved_name).path}"
 
     @tool
     def vector_spatial_join(target_name: str, join_name: str, predicate: str, output_name: str, how: str = "left") -> str:
@@ -4258,6 +4235,7 @@ def build_tools(manager: DataManager):
             "cv_fold_column": cv_fold_col if cv_fold_col in df.columns else None,
             "cv_available_column": cv_available_col if cv_available_col in df.columns else None,
             "residual_column": resid_col,
+            "date_col": date_col or None,
             "split_date": split_date or None,
             "spatial_validation": bool(spatial_enabled),
             "params": {

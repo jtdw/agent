@@ -19,9 +19,13 @@ function loadApiModule() {
 
 assert.match(apiSource, /task_outcome\?: Record<string, unknown>/, 'upload/import responses must expose task_outcome');
 assert.match(apiSource, /outcome_markdown\?: string/, 'upload/import responses must expose outcome_markdown');
+assert.match(apiSource, /upload_summaries\?: UploadSummary\[\]/, 'upload/import responses must expose compact upload summaries');
 assert.match(apiSource, /result_panel\?: ResultPanel/, 'chat responses must expose result_panel for the right-side result panel');
 assert.match(chatPanelSource, /onResultPanel\?\.\(r\.result_panel\)/, 'ChatPanel must forward chat result_panel to the app shell');
 assert.match(chatPanelSource, /r\.outcome_markdown/, 'ChatPanel upload flow must show backend task outcome guidance');
+assert.match(chatPanelSource, /UploadResultCard/, 'ChatPanel upload flow must render compact upload cards');
+assert.doesNotMatch(chatPanelSource, /appendSystem\(`已上传并载入 \$\{r\.count\}/, 'Upload flow must not append long raw system text as the primary UI');
+assert.doesNotMatch(chatPanelSource, /r\.messages\.slice\(0,\s*2\)\.join/, 'Upload flow must not append raw backend upload messages after the compact outcome');
 
 const apiModule = await loadApiModule();
 assert.equal(

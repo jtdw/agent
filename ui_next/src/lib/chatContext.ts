@@ -32,6 +32,7 @@ const allowedKeys = new Set([
   'user_focus_hint'
 ]);
 const blockedKeyParts = ['file', 'content', 'blob', 'base64', 'raw', 'text', 'html', 'password', 'token', 'secret', 'cookie'];
+const sensitiveValuePattern = /(password|token|secret|cookie|authorization|api[_-]?key)\s*[:=]/i;
 
 function cleanString(value: unknown, max = 200) {
   return String(value || '').trim().slice(0, max);
@@ -40,6 +41,34 @@ function cleanString(value: unknown, max = 200) {
 function blockedKey(key: string) {
   const lower = key.toLowerCase();
   return blockedKeyParts.some((part) => lower.includes(part));
+}
+
+function looksSensitiveValue(value: unknown) {
+  const text = String(value || '');
+  return sensitiveValuePattern.test(text) || /\bsk-[A-Za-z0-9_-]{8,}/.test(text);
+}
+
+function sanitizeArtifactPath(value: unknown) {
+  const text = cleanString(value);
+  if (!text) return '';
+  const lower = text.toLowerCase();
+  if (/^[a-zA-Z]:[\\/]/.test(text)) return '';
+  if (lower.startsWith('data:') || lower.startsWith('javascript:') || lower.startsWith('file:') || lower.startsWith('http:') || lower.startsWith('https:')) return '';
+
+  let decoded = '';
+  try {
+    decoded = decodeURIComponent(text).replace(/\\/g, '/');
+  } catch {
+    decoded = text.replace(/\\/g, '/');
+  }
+  if (decoded.startsWith('/api/files/artifact?')) {
+    const query = decoded.split('?', 2)[1] || '';
+    const path = new URLSearchParams(query).get('path') || '';
+    return sanitizeArtifactPath(path);
+  }
+  if (decoded.startsWith('/')) return '';
+  if (decoded.split('/').filter(Boolean).includes('..')) return '';
+  return text;
 }
 
 function scalar(value: unknown): string | number | boolean | null {
@@ -85,8 +114,11 @@ export function sanitizeChatContextPayload(input: Partial<ChatContextPayload> | 
     } else if (key === 'selected_map_bounds') {
       const bounds = sanitizeBounds(value);
       if (bounds) output.selected_map_bounds = bounds;
+    } else if (key === 'selected_artifact_path') {
+      const path = sanitizeArtifactPath(value);
+      if (path) output.selected_artifact_path = path;
     } else {
-      (output as Record<string, unknown>)[key] = cleanString(value);
+      if (!looksSensitiveValue(value)) (output as Record<string, unknown>)[key] = cleanString(value);
     }
   }
   while (JSON.stringify(output).length > 4096) {

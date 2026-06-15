@@ -111,6 +111,51 @@ class TaskSlotsTests(unittest.TestCase):
         self.assertEqual(plan["validated_tool_args"]["train_xgboost_fusion_model"]["target_col"], "ndvi")
         self.assertEqual(plan["validated_tool_args"]["train_xgboost_fusion_model"]["feature_cols"], "rainfall,elevation")
 
+    def test_planner_preserves_explicit_xgboost_training_options(self) -> None:
+        context = {
+            "workspace": {"dataset_count": 1},
+            "active_dataset": {"name": "soil_samples", "type": "vector"},
+            "available_fields": [
+                "soil_moisture",
+                "elevation",
+                "slope",
+                "precip_7d",
+                "ndvi",
+                "lst",
+                "lon",
+                "lat",
+                "date",
+            ],
+            "numeric_fields": [
+                "soil_moisture",
+                "elevation",
+                "slope",
+                "precip_7d",
+                "ndvi",
+                "lst",
+                "lon",
+                "lat",
+            ],
+        }
+        prompt = (
+            "使用当前上传的数据训练 XGBoost 土壤水分模型。"
+            "目标列是 soil_moisture。"
+            "特征列使用 elevation,slope,precip_7d,ndvi,lst,lon,lat。"
+            "时间列是 date。"
+            "输出名称为 xgb_sm_demo。"
+            "开启空间分块验证，生成预测结果、残差、特征重要性、精度指标和模型文件。"
+        )
+
+        plan = build_task_plan(prompt, _intent("modeling"), context)
+
+        self.assertFalse(plan["should_ask_clarification"])
+        args = plan["validated_tool_args"]["train_xgboost_fusion_model"]
+        self.assertEqual(args["target_col"], "soil_moisture")
+        self.assertEqual(args["feature_cols"], "elevation,slope,precip_7d,ndvi,lst,lon,lat")
+        self.assertEqual(args["date_col"], "date")
+        self.assertEqual(args["output_name"], "xgb_sm_demo")
+        self.assertTrue(args["spatial_validation"])
+
     def test_planner_clarifies_regression_request_without_target_or_features(self) -> None:
         context = {
             "workspace": {"dataset_count": 1},

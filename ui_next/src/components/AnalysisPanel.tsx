@@ -87,7 +87,7 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                               if (!view.bestModel?.modelResultId) return;
                               onChatContextChange?.({ selected_model_result_id: view.bestModel.modelResultId, last_visible_panel: 'analysis', user_focus_hint: 'selected model result' });
                             }}
-                            className="mt-3 w-full rounded-2xl bg-cyan-glow/10 px-3 py-2 text-left text-xs leading-5 text-slate-600 transition hover:bg-cyan-glow/15 dark:text-slate-300"
+                            className="mt-3 w-full rounded-2xl bg-cyan-glow/10 px-3 py-2 text-left text-xs leading-5 text-slate-600 transition-colors hover:bg-cyan-glow/15 dark:text-slate-300"
                           >
                             当前最优模型：<b>{view.bestModel.name}</b>，优先按 RMSE 最小判断。
                           </button>
@@ -159,7 +159,7 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                                 last_visible_panel: 'analysis',
                                 user_focus_hint: `selected artifact ${item.label}`
                               })}
-                              className="flex w-full items-center justify-between rounded-[18px] border border-white/30 bg-white/35 px-4 py-3 text-left text-sm font-bold transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+                              className="flex w-full items-center justify-between rounded-[18px] border border-white/30 bg-white/35 px-4 py-3 text-left text-sm font-bold transition-colors hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                             >
                               <span className="flex min-w-0 items-center gap-2"><Download size={16} className="shrink-0" /> <span className="truncate">{item.label}</span></span><ChevronRight size={16} className="shrink-0" />
                             </a>

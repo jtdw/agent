@@ -18,6 +18,9 @@ class TaskSlots:
     model_type: str = ""
     target_variable: str = ""
     feature_fields: list[str] = field(default_factory=list)
+    date_field: str = ""
+    output_name: str = ""
+    spatial_validation: bool | None = None
     spatial_operation: str = ""
     filter_condition: str = ""
     output_format: str = ""
@@ -121,6 +124,38 @@ def _model_type(prompt: str) -> str:
     return ""
 
 
+def _explicit_field(prompt: str, labels: tuple[str, ...]) -> str:
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    match = re.search(
+        rf"(?:{label_pattern})\s*(?:是|为|使用|[:：=])?\s*[`'\"]?([A-Za-z_][A-Za-z0-9_.-]*)",
+        str(prompt or ""),
+        flags=re.IGNORECASE,
+    )
+    return match.group(1) if match else ""
+
+
+def _explicit_feature_fields(prompt: str, available_fields: list[str]) -> list[str]:
+    match = re.search(
+        r"(?:特征列|特征字段|feature\s*(?:columns?|fields?))\s*(?:是|为|使用|包括|[:：=])?\s*(.+?)(?:[。；;\n]|$)",
+        str(prompt or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return []
+    requested = [token for token in re.split(r"[,，、\s]+", match.group(1).strip()) if token]
+    field_lookup = {field.lower(): field for field in available_fields}
+    return [field_lookup[token.lower()] for token in requested if token.lower() in field_lookup]
+
+
+def _explicit_spatial_validation(prompt: str) -> bool | None:
+    text = str(prompt or "")
+    if not re.search(r"空间\s*(?:分块|交叉)?\s*验证|spatial\s*(?:block|cross)?\s*validation", text, flags=re.IGNORECASE):
+        return None
+    if re.search(r"(?:关闭|禁用|不要|不启用|取消)\s*空间", text):
+        return False
+    return True
+
+
 def _output_format(prompt: str) -> str:
     text = str(prompt or "").lower()
     formats = []
@@ -202,17 +237,22 @@ def extract_task_slots(
     elif task_type == "modeling":
         slots.model_type = _model_type(text)
         mentioned = _mentioned_fields(text, fields)
-        target = _target_after_predict(text, fields)
+        explicit_target = _explicit_field(text, ("目标列", "目标字段", "target column", "target field"))
+        target = explicit_target or _target_after_predict(text, fields)
         semantic = match_user_field_concept(text, fields)
         slots.target_concept = str(semantic.get("concept") or "")
         slots.candidate_fields = [item for item in semantic.get("candidates", []) if isinstance(item, dict)]
-        if target:
+        if target and target in fields:
             slots.target_variable = target
         elif semantic.get("best_field") and not semantic.get("needs_clarification"):
             slots.target_variable = str(semantic["best_field"])
-        features = [field for field in mentioned if field != slots.target_variable]
+        explicit_features = _explicit_feature_fields(text, fields)
+        features = explicit_features or [field for field in mentioned if field != slots.target_variable]
         numeric_set = set(numeric_fields or fields)
         slots.feature_fields = [field for field in features if field in numeric_set]
+        slots.date_field = _explicit_field(text, ("时间列", "日期列", "时间字段", "日期字段", "date column", "date field"))
+        slots.output_name = _explicit_field(text, ("输出名称", "输出名", "结果名称", "output name"))
+        slots.spatial_validation = _explicit_spatial_validation(text)
         if not slots.target_variable:
             _add_missing(slots, ["target column"])
         if not slots.feature_fields:

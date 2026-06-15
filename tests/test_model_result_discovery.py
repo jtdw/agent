@@ -68,6 +68,40 @@ class ModelResultDiscoveryTests(unittest.TestCase):
             self.assertEqual(results[0]["model_result_id"], "model_result_registered")
             self.assertEqual(results[0]["metrics"]["RMSE"], 0.1)
 
+    def test_dashboard_ignores_registered_metrics_artifact_when_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            missing_metrics = service.manager.derived_dir / "xgb_sm_demo_gcp_gcp_metrics.csv"
+            service.manager.register_artifact(
+                artifact_id="artifact_missing_gcp_metrics",
+                path=str(missing_metrics),
+                type="metrics",
+                title=missing_metrics.name,
+            )
+
+            dashboard = service.dashboard()
+
+            self.assertEqual(dashboard["model_results"], [])
+            self.assertNotIn(
+                "artifact_missing_gcp_metrics",
+                {item.get("artifact_id") for item in dashboard["artifacts"]},
+            )
+
+    def test_dashboard_ignores_stale_pipeline_metrics_dataset(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.manager.database.start_pipeline_run("run_stale_metrics", "workflow", "dataset", "demo", "xgb_sm_demo")
+            service.manager.database.finish_pipeline_run(
+                "run_stale_metrics",
+                "success",
+                {"reports": {"metrics_dataset": "missing_metrics", "gcp_metrics_dataset": "missing_gcp_metrics"}},
+            )
+
+            dashboard = service.dashboard()
+
+            self.assertEqual(dashboard["latest_pipeline"]["summary"]["reports"]["metrics_dataset"], "missing_metrics")
+            self.assertEqual(dashboard["model_results"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

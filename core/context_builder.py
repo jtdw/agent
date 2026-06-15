@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from core.field_semantics import match_user_field_concept
@@ -40,6 +41,14 @@ def _available_datasets(manager: Any) -> list[dict[str, Any]]:
     except Exception:
         return []
     return [item for item in datasets if isinstance(item, dict)]
+
+
+def _mentioned_datasets(manager: Any, prompt: str) -> list[dict[str, Any]]:
+    names = [item.strip() for item in re.findall(r"@\{([^{}]+)\}", str(prompt or "")) if item.strip()]
+    if not names:
+        return []
+    available = {str(item.get("name") or ""): item for item in _available_datasets(manager)}
+    return [available[name] for name in dict.fromkeys(names) if name in available]
 
 
 def _compact_object_index(items: list[dict[str, Any]], active_name: str = "", limit: int = MAX_CONTEXT_OBJECTS) -> list[dict[str, Any]]:
@@ -174,7 +183,8 @@ def build_conversation_context(
 ) -> dict[str, Any]:
     state_dict = _as_dict(state)
     dashboard_dict = _as_dict(dashboard)
-    active_dataset = _compact_dataset(manager, str(state_dict.get("active_dataset") or "")) or _latest_dataset(manager)
+    mentioned_datasets = _mentioned_datasets(manager, str(prompt or ""))
+    active_dataset = (mentioned_datasets[0] if mentioned_datasets else None) or _compact_dataset(manager, str(state_dict.get("active_dataset") or "")) or _latest_dataset(manager)
     active_name = _dataset_name(active_dataset)
     artifacts = _as_list(state_dict.get("active_artifacts")) or _as_list(dashboard_dict.get("artifacts"))
     field_profile = _field_profile(manager, active_dataset, str(prompt or ""))
@@ -192,6 +202,7 @@ def build_conversation_context(
         "intent": intent,
         "workspace": dashboard_dict.get("summary") or getattr(manager, "workspace_summary", lambda: {})(),
         "active_dataset": active_dataset,
+        "mentioned_datasets": _compact_object_index(mentioned_datasets, active_name),
         "available_datasets": available_datasets,
         "available_layers": available_layers[:MAX_CONTEXT_OBJECTS],
         "latest_derived_datasets": _compact_object_index(_latest_derived_datasets(manager), active_name),
@@ -219,6 +230,7 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         "intent": _as_dict(context.get("intent")).get("intent"),
         "workspace": context.get("workspace"),
         "active_dataset": context.get("active_dataset"),
+        "mentioned_datasets": context.get("mentioned_datasets"),
         "available_datasets": context.get("available_datasets"),
         "available_layers": context.get("available_layers"),
         "latest_derived_datasets": context.get("latest_derived_datasets"),

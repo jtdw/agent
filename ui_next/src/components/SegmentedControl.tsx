@@ -20,7 +20,7 @@ export function SegmentedControl<T extends string>({
           <button
             key={item.value}
             onClick={() => onChange(item.value)}
-            className={cn('relative z-10 flex-1 rounded-xl px-3 py-2 text-sm font-bold transition', active ? 'text-white' : 'text-slate-600 hover:text-slate-950 dark:text-slate-400 dark:hover:text-slate-50')}
+            className={cn('relative z-10 flex-1 rounded-xl px-3 py-2 text-sm font-bold transition-colors', active ? 'text-white' : 'text-slate-600 hover:text-slate-950 dark:text-slate-400 dark:hover:text-slate-50')}
           >
             {active && <motion.span layoutId="segmented-pill" className="absolute inset-0 -z-10 rounded-xl bg-gradient-to-r from-ocean to-cyan-glow shadow-glow" transition={{ type: 'spring', stiffness: 320, damping: 32 }} />}
             {item.label}

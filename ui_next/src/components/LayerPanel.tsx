@@ -329,7 +329,6 @@ export function LayerPanel({
 
   return (
     <motion.aside
-      layout
       className={cn('no-drag fixed bottom-3 top-3 z-30 w-[min(360px,calc(100vw-1.5rem))] sm:bottom-4 sm:top-8', side === 'right' ? 'right-3 sm:right-4' : 'left-3 sm:left-[470px]')}
       initial={{ opacity: 0, x: 18 }}
       animate={{ opacity: 1, x: 0 }}
@@ -366,7 +365,7 @@ export function LayerPanel({
             <div className="mb-1 flex items-center gap-2 text-sm font-black"><BarChart3 size={16} strokeWidth={1.5} /> 运行状态</div>
             <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">{String(runtime.label || '就绪')} · {String(runtime.detail || '等待任务')}</p>
             <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200/70 dark:bg-white/10">
-              <div className="h-full rounded-full bg-gradient-to-r from-ocean to-cyan-glow transition-all" style={{ width: `${Number(runtime.progress || 0)}%` }} />
+              <div className="h-full rounded-full bg-gradient-to-r from-ocean to-cyan-glow transition-[width]" style={{ width: `${Number(runtime.progress || 0)}%` }} />
             </div>
             {runningJobs.length > 0 && (
               <div className="mt-3 rounded-2xl border border-cyan-glow/25 bg-cyan-glow/10 px-3 py-2 text-xs font-semibold text-slate-600 dark:text-slate-200">
@@ -405,7 +404,7 @@ export function LayerPanel({
                             <button
                               onClick={() => cancelJob(job)}
                               disabled={busy}
-                              className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-amber-600 transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                              className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-amber-600 transition-colors hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
                               title="取消任务并释放预占额度"
                             >
                               <XCircle size={14} strokeWidth={1.8} />
@@ -415,7 +414,7 @@ export function LayerPanel({
                             <button
                               onClick={() => retryJob(job)}
                               disabled={busy}
-                              className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-ocean transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                              className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-ocean transition-colors hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
                               title="按原条件重试任务"
                             >
                               <RotateCcw size={14} strokeWidth={1.8} />
@@ -424,7 +423,7 @@ export function LayerPanel({
                           <button
                             onClick={() => inspectJobLog(job)}
                             disabled={busy}
-                            className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                            className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition-colors hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
                             title="查看任务日志摘要"
                           >
                             <ScanSearch size={14} strokeWidth={1.8} />
@@ -432,7 +431,7 @@ export function LayerPanel({
                           <button
                             onClick={() => deleteJob(job)}
                             disabled={busy || !deletable}
-                            className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-coral transition hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
+                            className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-coral transition-colors hover:bg-white/70 disabled:opacity-50 dark:border-white/10 dark:bg-white/10"
                             title={deletable ? '删除这条下载任务记录' : '任务进行中，请先取消'}
                           >
                             <Trash2 size={14} strokeWidth={1.8} />
@@ -472,15 +471,15 @@ export function LayerPanel({
               const active = hasLayerVisibility(layer.id) ? layerVisibility[layer.id] : layer.active;
               const opacityLayerId = hasLayerOpacity(layer.id) ? layer.id : null;
               return (
-                <motion.div key={layer.id} whileHover={{ x: 3 }} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/30 p-2.5 transition hover:bg-white/45 dark:border-white/10 dark:hover:bg-white/5', active && 'bg-white/45 dark:bg-white/5')}>
-                  {active && <motion.span layoutId="layer-active" className="absolute left-0 top-3 h-10 w-1 rounded-full bg-gradient-to-b from-ocean to-cyan-glow" />}
+                <motion.div key={layer.id} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/30 p-2.5 transition-colors hover:bg-white/45 dark:border-white/10 dark:hover:bg-white/5', active && 'bg-white/45 dark:bg-white/5')}>
+                  {active && <span className="pointer-events-none absolute left-0 top-3 h-10 w-1 rounded-full bg-gradient-to-b from-ocean to-cyan-glow" />}
                   <LayerThumb accent={layer.accent} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-black">{layer.name}</div>
                     <div className="truncate text-xs text-slate-500 dark:text-slate-400">{layer.desc}</div>
                   </div>
                   {opacityLayerId && (
-                    <button type="button" onClick={() => onLayerLocate(opacityLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="定位到图层">
+                    <button type="button" onClick={() => onLayerLocate(opacityLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition-colors hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="定位到图层">
                       <Map size={14} strokeWidth={1.7} />
                     </button>
                   )}
@@ -501,7 +500,7 @@ export function LayerPanel({
             <select
               value={downloadResourceType}
               onChange={(event) => setDownloadResourceType(event.target.value)}
-              className="mt-3 w-full rounded-2xl border border-white/35 bg-white/55 px-3 py-2 text-sm font-semibold text-slate-700 outline-none transition focus:border-cyan-300 dark:border-white/10 dark:bg-slate-900 dark:text-slate-100"
+              className="mt-3 w-full rounded-2xl border border-white/35 bg-white/55 px-3 py-2 text-sm font-semibold text-slate-700 outline-none transition-colors focus:border-cyan-300 dark:border-white/10 dark:bg-slate-900 dark:text-slate-100"
               aria-label="选择下载产品"
             >
               {downloadProducts.map((product) => (
@@ -511,7 +510,7 @@ export function LayerPanel({
             <input
               value={downloadRegion}
               onChange={(event) => setDownloadRegion(event.target.value)}
-              className="mt-3 w-full rounded-2xl border border-white/35 bg-white/55 px-3 py-2 text-sm font-semibold text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 dark:border-white/10 dark:bg-white/10 dark:text-slate-100"
+              className="mt-3 w-full rounded-2xl border border-white/35 bg-white/55 px-3 py-2 text-sm font-semibold text-slate-700 outline-none transition-colors placeholder:text-slate-400 focus:border-cyan-300 dark:border-white/10 dark:bg-white/10 dark:text-slate-100"
               placeholder="输入下载区域，例如 成都市 / 四川省"
             />
             <button onClick={preflightPlatformJob} disabled={preflightBusy || busy} className="glass-button mt-3 w-full gap-2 rounded-2xl text-sm font-black disabled:opacity-60"><ScanSearch size={16} strokeWidth={1.5} /> {preflightBusy ? '验证中...' : '先验证可下载'}</button>
@@ -526,7 +525,7 @@ export function LayerPanel({
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 最近成果</div>
               <div className="space-y-2">
                 {artifacts.map((item, i) => (
-                  <button key={`${item.path}-${i}`} type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="block w-full rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-left text-xs font-semibold text-slate-600 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                  <button key={`${item.path}-${i}`} type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="block w-full rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-left text-xs font-semibold text-slate-600 transition-colors hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
                     {item.name || item.path.split(/[\\/]/).pop() || '成果文件'}
                   </button>
                 ))}

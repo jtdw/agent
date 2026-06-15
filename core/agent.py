@@ -310,8 +310,16 @@ class GISAgent:
         encoded = base64.b64encode(path.read_bytes()).decode("utf-8")
         return f"data:{mime_type};base64,{encoded}"
 
-    def _build_user_content(self, user_text: str, image_paths: list[str] | None = None) -> Any:
-        current_hint = f"\n\n当前已加载数据集概览：\n{self.manager.dataset_brief()}"
+    def _build_user_content(
+        self,
+        user_text: str,
+        image_paths: list[str] | None = None,
+        *,
+        include_workspace_hint: bool = True,
+    ) -> Any:
+        current_hint = ""
+        if include_workspace_hint:
+            current_hint = f"\n\n当前已加载数据集概览：\n{self.manager.dataset_brief()}"
         if not image_paths:
             return user_text + current_hint
 
@@ -333,9 +341,22 @@ class GISAgent:
             )
         return blocks
 
+    def _loaded_dataset_message(self, dataset_name: str) -> str:
+        record = self.manager.get(dataset_name)
+        meta = record.meta if isinstance(record.meta, dict) else {}
+        parts = [record.data_type]
+        rows = meta.get("rows")
+        columns = meta.get("columns")
+        if rows is not None:
+            parts.append(f"{rows} 行")
+        if isinstance(columns, list):
+            parts.append(f"{len(columns)} 个字段")
+        detail = f"（{'，'.join(str(item) for item in parts if item)}）" if parts else ""
+        return f"已加载数据：{dataset_name}{detail}。"
+
     def register_file(self, file_path: str) -> str:
         dataset_name = self.manager.load_path(file_path)
-        return f"已加载数据: {dataset_name}\n{self.manager.dataset_brief()}"
+        return self._loaded_dataset_message(dataset_name)
 
     def _append_direct_reply(self, user_text: str, reply: str, history: list[Any] | None) -> tuple[str, list[Any]]:
         messages = list(history or [])
@@ -998,6 +1019,8 @@ class GISAgent:
         user_text: str,
         history: list[Any] | None = None,
         image_paths: list[str] | None = None,
+        *,
+        include_workspace_hint: bool = True,
     ) -> tuple[str, list[Any]]:
         # Deterministic execution for GSCloud login-window commands.
         # If matched, bypass the LLM and open the browser immediately.
@@ -1023,7 +1046,16 @@ class GISAgent:
                 return self._append_direct_reply(user_text, direct_reply, history)
 
         messages = list(history or [])
-        messages.append({"role": "user", "content": self._build_user_content(user_text, image_paths=image_paths)})
+        messages.append(
+            {
+                "role": "user",
+                "content": self._build_user_content(
+                    user_text,
+                    image_paths=image_paths,
+                    include_workspace_hint=include_workspace_hint,
+                ),
+            }
+        )
         result = self.agent.invoke({"messages": messages})
 
         if isinstance(result, dict):

@@ -38,7 +38,7 @@ class DownloadStatusMachineTests(unittest.TestCase):
         done = self.service.run_job_with_result(job["job_id"], {"zip_path": str(result_path)})
 
         self.assertEqual(done["status"], "completed")
-        self.assertEqual(done["state"], "completed")
+        self.assertEqual(done["state"], "success")
         self.assertEqual(done["artifact_quality"][0]["ok"], True)
 
     def test_invalid_download_result_fails_instead_of_completing(self) -> None:
@@ -53,6 +53,16 @@ class DownloadStatusMachineTests(unittest.TestCase):
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["artifact_quality"][0]["ok"], False)
         self.assertIn("failure_diagnostic", failed)
+
+    def test_waiting_parameters_is_preserved_and_not_running(self) -> None:
+        job = self.service.submit_job(user_id="u_test", source_key="gscloud", resource_type="dem")
+        self.service._update_job(job["job_id"], status="waiting_parameters", stage="needs_region")
+
+        waiting = self.service.get_job(job["job_id"])
+
+        self.assertEqual(waiting["status"], "waiting_parameters")
+        self.assertEqual(waiting["state"], "waiting_parameters")
+        self.assertNotEqual(waiting["state"], "running")
 
 
 if __name__ == "__main__":

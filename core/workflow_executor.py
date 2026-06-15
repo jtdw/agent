@@ -4,7 +4,7 @@ import json
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from .gis_tools import build_tools
@@ -23,6 +23,7 @@ SUPPORTED_WORKFLOW_TOOLS = {
     "plot_dataset",
     "train_xgboost_fusion_model",
     "train_rf_fusion_model",
+    "geographical_conformal_prediction",
     "export_dataset",
 }
 VIRTUAL_WORKFLOW_TOOLS = {"field_match", "interpret_result", "export_artifact"}
@@ -150,6 +151,17 @@ def _error_result(tool_name: str, inputs: dict[str, Any], code: str, message: st
     ).to_dict()
 
 
+def _cancel_result(tool_name: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    return tool_result_error(
+        tool_name or "workflow_step",
+        inputs=inputs,
+        error_code="TASK_CANCELED",
+        error_title="任务已取消",
+        user_message="用户已取消本次任务，后续步骤未继续执行。",
+        next_actions=["如需继续，请重新发送任务。"],
+    ).to_dict()
+
+
 def _manager_has_dataset(manager: Any, name: str) -> bool:
     if not str(name or "").strip() or str(name).startswith("$steps."):
         return False
@@ -189,7 +201,7 @@ def _path_inside(root: Path, path: str) -> bool:
 
 def _validate_step_objects(manager: Any, step: WorkflowStep) -> dict[str, Any] | None:
     args = step.validated_tool_args
-    for key in ("dataset_name", "clip_name", "raster_name", "vector_name", "point_name", "polygon_name", "target_name", "join_name"):
+    for key in ("dataset_name", "clip_name", "raster_name", "vector_name", "point_name", "polygon_name", "target_name", "join_name", "calibration_dataset", "target_dataset_name"):
         if key in args and not _manager_has_dataset(manager, str(args.get(key) or "")):
             return _error_result(
                 step.tool_name,
@@ -315,10 +327,10 @@ def _skip_remaining(steps: list[WorkflowStep], start_index: int, completed: dict
             completed[step.step_id] = step
 
 
-def execute_workflow_plan(manager: Any, plan: dict[str, Any]) -> dict[str, Any]:
+def execute_workflow_plan(manager: Any, plan: dict[str, Any], *, cancel_checker: Callable[[], bool] | None = None) -> dict[str, Any]:
     steps = _workflow_steps(plan)
     if not steps:
-        return {"executed": False, "ok": False, "raw_reply": "", "workflow_result": None, "executed_steps": [], "failed_step": ""}
+        return {"executed": False, "ok": False, "raw_reply": "", "workflow_result": None, "executed_steps": [], "failed_step": "", "canceled": False}
 
     workflow_id = f"workflow_{uuid4().hex[:10]}"
     tool_map = {tool.name: tool for tool in build_tools(manager)}
@@ -326,10 +338,19 @@ def execute_workflow_plan(manager: Any, plan: dict[str, Any]) -> dict[str, Any]:
     final_artifacts: list[dict[str, Any]] = []
     failed_step = ""
     executed_steps: list[str] = []
+    canceled = False
 
     for index, step in enumerate(steps):
         if not step.step_id:
             step.step_id = f"step_{index + 1}"
+        if cancel_checker and cancel_checker():
+            canceled = True
+            step.status = "canceled"
+            step.tool_result = _cancel_result(step.tool_name, step.validated_tool_args)
+            completed[step.step_id] = step
+            failed_step = step.step_id
+            _skip_remaining(steps, index + 1, completed)
+            break
         missing_dependencies = [dep for dep in step.depends_on if dep not in completed or completed[dep].status != "success"]
         if missing_dependencies:
             step.status = "skipped"
@@ -385,16 +406,16 @@ def execute_workflow_plan(manager: Any, plan: dict[str, Any]) -> dict[str, Any]:
                 _skip_remaining(steps, index + 1, completed)
                 break
 
-    ok = not failed_step and all(step.status in {"success", "skipped"} for step in steps)
+    ok = not canceled and not failed_step and all(step.status in {"success", "skipped"} for step in steps)
     failed_result = _step_result_by_id(completed, failed_step) if failed_step else {}
     result = WorkflowResult(
         ok=ok,
         workflow_id=workflow_id,
         steps=[step.to_dict() for step in steps],
         final_artifacts=final_artifacts,
-        final_summary="Workflow completed successfully." if ok else f"Workflow stopped at step {failed_step}.",
+        final_summary="Workflow completed successfully." if ok else ("Workflow canceled by user." if canceled else f"Workflow stopped at step {failed_step}."),
         failed_step=failed_step,
-        diagnostics={"executed_steps": executed_steps, "tool_count": len([step for step in steps if step.tool_name not in VIRTUAL_WORKFLOW_TOOLS])},
+        diagnostics={"executed_steps": executed_steps, "tool_count": len([step for step in steps if step.tool_name not in VIRTUAL_WORKFLOW_TOOLS]), "canceled": canceled},
         next_actions=[str(item) for item in failed_result.get("next_actions", []) if str(item).strip()]
         if failed_step
         else ["Review the generated artifacts and continue with interpretation or downstream GIS processing."],
@@ -406,4 +427,5 @@ def execute_workflow_plan(manager: Any, plan: dict[str, Any]) -> dict[str, Any]:
         "workflow_result": result.to_dict(),
         "executed_steps": executed_steps,
         "failed_step": failed_step,
+        "canceled": canceled,
     }

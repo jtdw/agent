@@ -128,6 +128,22 @@ class ConversationStateContextTests(unittest.TestCase):
         self.assertLessEqual(len(context["available_layers"]), 12)
         self.assertEqual(context["active_dataset"]["name"], "dataset_29")
 
+    def test_context_uses_explicit_dataset_mention_for_current_turn(self) -> None:
+        manager = _Manager({"active_dataset": "county_points_clipped"})
+        dashboard = {"summary": manager.workspace_summary(), "artifacts": manager.artifacts, "model_results": manager.model_results}
+        state = recover_conversation_state(manager, "session_a")
+
+        context = build_conversation_context(
+            "检查 @{county_points} 的字段并画图",
+            {"intent": "data_upload_analysis"},
+            state.to_dict(),
+            manager,
+            dashboard,
+        )
+
+        self.assertEqual(context["active_dataset"]["name"], "county_points")
+        self.assertEqual(context["available_fields"], ["pop_density", "geometry"])
+
     def test_real_chinese_followup_prefers_selected_feature(self) -> None:
         state = {
             "selected_feature": {

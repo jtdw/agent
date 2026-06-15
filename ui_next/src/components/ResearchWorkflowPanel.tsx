@@ -77,7 +77,7 @@ export function ResearchWorkflowPanel({
           <button
             key={preset.title}
             onClick={() => createPlan(preset.prompt)}
-            className="rounded-2xl border border-white/30 bg-white/30 px-3 py-2 text-left transition hover:bg-white/55 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
+            className="rounded-2xl border border-white/30 bg-white/30 px-3 py-2 text-left transition-colors hover:bg-white/55 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
           >
             <div className="truncate text-xs font-black text-slate-700 dark:text-slate-100">{preset.title}</div>
             <div className="mt-0.5 line-clamp-1 text-[11px] text-slate-500 dark:text-slate-400">{preset.desc}</div>
@@ -100,7 +100,7 @@ export function ResearchWorkflowPanel({
               key={step.id}
               layout
               className={cn(
-                'rounded-2xl border p-3 transition',
+                'rounded-2xl border p-3 transition-colors',
                 done ? 'border-emerald-300/35 bg-emerald-400/10' : running ? 'border-cyan-glow/35 bg-cyan-glow/10 shadow-glow' : 'border-white/25 bg-white/25 dark:border-white/10 dark:bg-white/5'
               )}
             >

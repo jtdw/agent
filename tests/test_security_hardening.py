@@ -86,15 +86,22 @@ class SecurityHardeningTests(unittest.TestCase):
                 alice = TestClient(api_server.app)
                 bob = TestClient(api_server.app)
                 alice_user = alice.post("/api/auth/register", json={"email": "alice.sec@example.com", "password": "password1"}).json()["user"]["user_id"]
-                bob.post("/api/auth/register", json={"email": "bob.sec@example.com", "password": "password1"})
+                bob_user = bob.post("/api/auth/register", json={"email": "bob.sec@example.com", "password": "password1"}).json()["user"]["user_id"]
                 alice_service = api_server.workspace_for(alice_user)
                 artifact = alice_service.manager.plot_dir / "alice_map.png"
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_bytes(b"png")
+                registered = alice_service.manager.register_artifact(
+                    artifact_id="artifact_alice_map",
+                    path=str(artifact),
+                    type="png",
+                    title="alice_map.png",
+                )
 
-                alice_ok = alice.get("/api/files/artifact", params={"user_id": alice_user, "path": "plots/alice_map.png"})
-                bob_no_user = bob.get("/api/files/artifact", params={"path": "plots/alice_map.png"})
-                bob_claims_alice = bob.get("/api/files/artifact", params={"user_id": alice_user, "path": "plots/alice_map.png"})
+                endpoint = f"/api/artifacts/{registered['artifact_id']}/download"
+                alice_ok = alice.get(endpoint, params={"user_id": alice_user})
+                bob_no_user = bob.get(endpoint, params={"user_id": bob_user})
+                bob_claims_alice = bob.get(endpoint, params={"user_id": alice_user})
 
                 self.assertEqual(alice_ok.status_code, 200)
                 self.assertEqual(bob_no_user.status_code, 404)
@@ -123,7 +130,8 @@ class SecurityHardeningTests(unittest.TestCase):
 
                 response = client.get("/api/files/artifact?path=%2e%2e%2Foutside.txt")
 
-                self.assertIn(response.status_code, {403, 404})
+                self.assertEqual(response.status_code, 410)
+                self.assertEqual(response.json()["detail"]["error_code"], "LEGACY_ARTIFACT_DOWNLOAD_DISABLED")
                 self.assertNotEqual(response.text, "secret")
             finally:
                 api_server._workspace_services.clear()
@@ -185,6 +193,55 @@ class SecurityHardeningTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertFalse((root / "evil.csv").exists())
                 self.assertTrue((service.manager.upload_dir / "evil.csv").exists())
+            finally:
+                api_server._workspace_services.clear()
+                api_server._workspace_services.update(original_services)
+                api_server.base_settings.workdir = original_workdir
+                api_server.commercial_service = original_commercial
+
+    def test_local_library_rescan_requires_admin_token(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            original_workdir = api_server.base_settings.workdir
+            original_commercial = api_server.commercial_service
+            original_services = dict(api_server._workspace_services)
+            try:
+                root = Path(tmp) / "server"
+                root.mkdir(parents=True, exist_ok=True)
+                api_server._workspace_services.clear()
+                api_server.base_settings.workdir = root
+                api_server.base_settings.ensure_dirs()
+                api_server.commercial_service = CommercialService(root)
+                client = TestClient(api_server.app)
+
+                response = client.post("/api/local-library/rescan")
+
+                self.assertEqual(response.status_code, 403)
+            finally:
+                api_server._workspace_services.clear()
+                api_server._workspace_services.update(original_services)
+                api_server.base_settings.workdir = original_workdir
+                api_server.commercial_service = original_commercial
+
+    def test_local_library_rescan_allows_valid_admin_token(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            original_workdir = api_server.base_settings.workdir
+            original_commercial = api_server.commercial_service
+            original_services = dict(api_server._workspace_services)
+            try:
+                root = Path(tmp) / "server"
+                root.mkdir(parents=True, exist_ok=True)
+                api_server._workspace_services.clear()
+                api_server.base_settings.workdir = root
+                api_server.base_settings.ensure_dirs()
+                api_server.commercial_service = CommercialService(root)
+                client = TestClient(api_server.app)
+
+                with patch.dict(os.environ, {"GIS_AGENT_ADMIN_TOKEN": "expected"}):
+                    response = client.post("/api/local-library/rescan", headers={"x-admin-token": "expected"})
+
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(response.json()["ok"])
+                self.assertIn("total", response.json())
             finally:
                 api_server._workspace_services.clear()
                 api_server._workspace_services.update(original_services)

@@ -8,6 +8,10 @@ const chatPanelSource = readFileSync(resolve(root, 'src/components/ChatPanel.tsx
 
 assert.match(apiSource, /clearChatSession/, 'api.ts must expose a persistent clearChatSession call');
 assert.match(apiSource, /\/api\/chat\/sessions\/clear/, 'clearChatSession must call the backend clear endpoint');
+assert.match(apiSource, /async chatModels\(/, 'api.ts must expose chat model options');
+assert.match(apiSource, /\/api\/chat\/models/, 'chatModels must call the backend model endpoint');
+assert.match(apiSource, /async selectChatModel\(/, 'api.ts must expose per-conversation model selection');
+assert.match(apiSource, /\/api\/chat\/models\/select/, 'selectChatModel must call the backend selection endpoint');
 assert.match(chatPanelSource, /api\.clearChatSession/, 'ChatPanel delete action must clear the current session when it is the only session');
 assert.doesNotMatch(chatPanelSource, /sessions\.length\s*<=\s*1/, 'delete/clear button must remain usable for the last session');
 

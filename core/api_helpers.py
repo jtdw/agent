@@ -52,31 +52,59 @@ def request_admin_token(request: Any) -> str:
     return ""
 
 
-def relative_artifact_url(workdir: str | Path, file_path: str | Path, user_id: str = "") -> str:
-    path = Path(file_path).resolve()
-    root = Path(workdir).resolve()
-    try:
-        rel = path.relative_to(root)
-    except Exception:
+def relative_artifact_url(artifact_id: str, user_id: str = "") -> str:
+    clean_id = str(artifact_id or "").strip()
+    if not clean_id:
         return ""
-    rel_url_path = str(rel).replace("\\", "/")
-    params = {"path": rel_url_path}
+    url = f"/api/artifacts/{clean_id}/download"
     if str(user_id or "").strip():
-        params["user_id"] = safe_key(user_id)
-    return f"/api/files/artifact?{urlencode(params)}"
+        url = f"{url}?{urlencode({'user_id': safe_key(user_id)})}"
+    return url
 
 
 def relative_shared_download_url(base_workdir: str | Path, file_path: str | Path, user_id: str = "", job_id: str = "") -> str:
+    from .artifacts import assert_artifact_path_allowed
+
     path = Path(file_path or "").resolve()
     if not path.exists() or not path.is_file():
         return ""
     root = Path(base_workdir).resolve()
+    try:
+        assert_artifact_path_allowed(root, path)
+    except (PermissionError, ValueError):
+        return ""
     try:
         rel = path.relative_to(root)
     except Exception:
         return ""
     rel_url_path = str(rel).replace("\\", "/")
     return f"/api/downloads/artifact?{urlencode({'user_id': safe_key(user_id), 'job_id': job_id, 'path': rel_url_path})}"
+
+
+def build_workspace_mentions(datasets: list[Any]) -> dict[str, Any]:
+    items: list[dict[str, Any]] = []
+    for raw in datasets or []:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+        columns = meta.get("columns") if isinstance(meta.get("columns"), list) else []
+        path = Path(str(raw.get("path") or ""))
+        items.append(
+            {
+                "id": name,
+                "name": name,
+                "mention": f"@{{{name}}}",
+                "type": str(raw.get("type") or raw.get("data_type") or "file"),
+                "filename": path.name if path.name else name,
+                "row_count": meta.get("rows") if meta.get("rows") is not None else raw.get("row_count"),
+                "column_count": len(columns) if columns else None,
+                "crs": str(meta.get("crs") or ""),
+            }
+        )
+    return {"items": items, "count": len(items)}
 
 
 def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> dict[str, Any]:
@@ -101,7 +129,7 @@ def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> d
                 "label": str(item.get("label") or item.get("name") or Path(path).name or "result file"),
                 "path": path,
                 "download_url": url,
-                "kind": str(item.get("type") or item.get("category") or "artifact"),
+                "kind": str(item.get("category") or item.get("type") or "artifact"),
             }
         )
     return {
@@ -130,5 +158,6 @@ _safe_key = safe_key
 _cors_origins = cors_origins
 _request_session = request_session
 _request_admin_token = request_admin_token
+_build_workspace_mentions = build_workspace_mentions
 _build_result_panel = build_result_panel
 _download_requires_login_result = download_requires_login_result

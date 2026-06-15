@@ -46,6 +46,42 @@ def read_gscloud_login_job(workdir: str | Path, login_job_id: str) -> dict[str, 
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _process_is_alive(process_id: int | str | None) -> bool:
+    try:
+        pid = int(process_id or 0)
+        if pid <= 0:
+            return False
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _active_login_job(workdir: str | Path, subject_type: str, subject_id: str) -> dict[str, Any] | None:
+    active_states = {"STARTING", "BROWSER_OPENING", "BROWSER_OPEN", "STOP_REQUESTED"}
+    for job in list_gscloud_login_jobs(workdir, limit=100):
+        if job.get("subject_type") != subject_type or job.get("subject_id") != subject_id:
+            continue
+        if str(job.get("state") or "") not in active_states:
+            continue
+        if _process_is_alive(job.get("process_id")):
+            return job
+    return None
+
+
+def request_gscloud_login_stop(workdir: str | Path, login_job_id: str) -> dict[str, Any]:
+    path = gscloud_login_jobs_dir(workdir) / f"{login_job_id}.json"
+    current = read_gscloud_login_job(workdir, login_job_id)
+    if str(current.get("state") or "") not in {"COMPLETED", "FAILED", "CANCELLED"}:
+        current.update({
+            "state": "STOP_REQUESTED",
+            "message": "Login state captured; closing the login browser.",
+            "updated_at": _now(),
+        })
+        _safe_write_json(path, current)
+    return current
+
+
 def start_gscloud_login_process(
     *,
     workdir: str | Path,
@@ -67,6 +103,9 @@ def start_gscloud_login_process(
     timeout_seconds = max(30, int(timeout_seconds or 300))
     workdir = Path(workdir)
     state_path = Path(state_path)
+    active = _active_login_job(workdir, subject_type, subject_id)
+    if active:
+        return {**active, "reused": True}
     login_job_id = f"login_{uuid4().hex[:12]}"
     status_path = gscloud_login_jobs_dir(workdir) / f"{login_job_id}.json"
     log_path = status_path.with_suffix(".log")
@@ -85,6 +124,7 @@ def start_gscloud_login_process(
         "log_path": str(log_path),
         "created_at": _now(),
         "updated_at": _now(),
+        "reused": False,
     }
     _safe_write_json(status_path, manifest)
 

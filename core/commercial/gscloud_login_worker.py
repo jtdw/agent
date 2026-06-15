@@ -39,12 +39,24 @@ def main() -> int:
         })
         _safe_write_json(status_path, current)
 
+        def stop_requested() -> bool:
+            try:
+                latest = json.loads(status_path.read_text(encoding="utf-8"))
+                return str(latest.get("state") or "") == "STOP_REQUESTED"
+            except Exception:
+                return False
+
         result = open_login_and_save_state(
             workdir,
             current["state_path"],
             timeout_seconds=int(current.get("timeout_seconds") or 300),
             headless=bool(current.get("headless", False)),
+            stop_requested=stop_requested,
         )
+        try:
+            Path(current["state_path"]).chmod(0o600)
+        except OSError:
+            pass
 
         service = CommercialService(workdir)
         subject_type = current.get("subject_type")
