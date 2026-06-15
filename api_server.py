@@ -46,8 +46,7 @@ from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gsclou
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
-from core.domestic_sources.gscloud_adapter import gscloud_user_state_path
-from core.commercial.login_jobs import read_gscloud_login_job, request_gscloud_login_stop, start_gscloud_login_process
+from services.data_sources.gscloud_accounts import GSCloudAccountService
 from core.ops_config import require_valid_production_config, validate_production_config
 from core.llm_config import check_llm_provider_health, validate_llm_config
 
@@ -2538,20 +2537,7 @@ def simulate_payment(body: PaymentIn, request: Request):
 
 
 def _gscloud_public_status(user_id: str) -> dict:
-    state_path = commercial_service.get_user_storage_state_path(user_id, "gscloud")
-    health = inspect_storage_state(state_path) if state_path else {"ok": False, "reason": "missing_storage_state"}
-    logged_in = bool(health.get("ok"))
-    return {
-        "provider": "gscloud",
-        "logged_in": logged_in,
-        "account_mode": "own",
-        "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "expires_at": None,
-        "masked_account": None,
-        "storage_state_exists": bool(state_path and Path(state_path).exists()),
-        "health_status": "healthy" if logged_in else str(health.get("reason") or "login_required"),
-        "user_message": "地理空间数据云账号已登录。" if logged_in else "需要登录地理空间数据云账号。",
-    }
+    return GSCloudAccountService(commercial_service).status(user_id)
 
 
 @app.get("/api/data-sources/gscloud/status")
@@ -2563,23 +2549,9 @@ def gscloud_account_status(request: Request):
 def gscloud_login_start(body: GSCloudLoginStartIn, request: Request):
     def run():
         user_id = _authenticated_request_user(request)
-        state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
-        login_job = start_gscloud_login_process(
-            workdir=commercial_service.workdir,
-            subject_type="customer",
-            subject_id=user_id,
-            state_path=state_path,
-            timeout_seconds=body.timeout_seconds,
-            headless=False,
-        )
+        result = GSCloudAccountService(commercial_service).start_login(user_id, timeout_seconds=body.timeout_seconds)
         _audit(request, user_id=user_id, action="data_source.login_start", resource_type="data_source", resource_id="gscloud")
-        return {
-            "provider": "gscloud",
-            "login_session_id": str(login_job.get("login_job_id") or ""),
-            "state": str(login_job.get("state") or "STARTING"),
-            "user_message": str(login_job.get("message") or "已打开地理空间数据云登录窗口。"),
-            "poll_interval_ms": 2000,
-        }
+        return result
 
     return guard(run)
 
@@ -2588,37 +2560,10 @@ def gscloud_login_start(body: GSCloudLoginStartIn, request: Request):
 def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
     def run():
         user_id = _authenticated_request_user(request)
-        login_job = read_gscloud_login_job(commercial_service.workdir, body.login_session_id)
-        if str(login_job.get("subject_type") or "customer") != "customer" or str(login_job.get("subject_id") or "") != user_id:
-            raise PermissionError("无权访问其他用户的数据源登录会话。")
-        state = str(login_job.get("state") or "")
-        state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
-        health = inspect_storage_state(state_path)
-        if state == "COMPLETED" and health.get("ok"):
-            commercial_service.set_user_credential_storage_state(user_id, "gscloud", str(state_path))
-            waiting_jobs = [
-                job for job in commercial_service.list_jobs(user_id=user_id, limit=100)
-                if job.get("source_key") == "gscloud" and job.get("status") == "waiting_login"
-            ]
+        result = GSCloudAccountService(commercial_service).complete_login(user_id, body.login_session_id)
+        if result.get("logged_in"):
             _audit(request, user_id=user_id, action="data_source.login_complete", resource_type="data_source", resource_id="gscloud")
-            return {
-                **_gscloud_public_status(user_id),
-                "login_session_id": body.login_session_id,
-                "login_state": state,
-                "pending": False,
-                "waiting_jobs": waiting_jobs,
-            }
-        if state not in {"COMPLETED", "FAILED", "CANCELLED"}:
-            pending_status = _gscloud_public_status(user_id)
-            pending_status.update({
-                "logged_in": False,
-                "health_status": "login_in_progress",
-                "user_message": "请在地理空间数据云官方页面完成登录，系统检测到明确登录成功后会自动关闭窗口。",
-            })
-            return {**pending_status, "login_session_id": body.login_session_id, "login_state": state, "pending": True}
-        if not health.get("ok"):
-            return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": False}
-        raise RuntimeError("unreachable")
+        return result
 
     return guard(run)
 
@@ -2627,9 +2572,9 @@ def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
 def gscloud_account_logout(request: Request):
     def run():
         user_id = _authenticated_request_user(request)
-        commercial_service.clear_user_storage_state(user_id, "gscloud")
+        result = GSCloudAccountService(commercial_service).logout(user_id)
         _audit(request, user_id=user_id, action="data_source.logout", resource_type="data_source", resource_id="gscloud")
-        return _gscloud_public_status(user_id)
+        return result
 
     return guard(run)
 

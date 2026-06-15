@@ -66,13 +66,13 @@ class GSCloudAccountApiTests(unittest.TestCase):
             )
             return {"login_job_id": "login_test", "state": "COMPLETED", "message": "ok"}
 
-        with patch("api_server.start_gscloud_login_process", side_effect=fake_start):
+        with patch("services.data_sources.gscloud_accounts.start_gscloud_login_process", side_effect=fake_start):
             started = self.client.post("/api/data-sources/gscloud/login/start", json={})
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.json()["login_session_id"], "login_test")
 
         with patch(
-            "api_server.read_gscloud_login_job",
+            "services.data_sources.gscloud_accounts.read_gscloud_login_job",
             return_value={"login_job_id": "login_test", "subject_type": "customer", "subject_id": self.user_id, "state": "COMPLETED"},
         ):
             completed = self.client.post(
@@ -91,9 +91,9 @@ class GSCloudAccountApiTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        with (
-            patch("api_server.read_gscloud_login_job", return_value={"login_job_id": "login_test", "subject_type": "customer", "subject_id": self.user_id, "state": "BROWSER_OPEN"}),
-            patch("api_server.request_gscloud_login_stop") as stop_login,
+        with patch(
+            "services.data_sources.gscloud_accounts.read_gscloud_login_job",
+            return_value={"login_job_id": "login_test", "subject_type": "customer", "subject_id": self.user_id, "state": "BROWSER_OPEN"},
         ):
             response = self.client.post(
                 "/api/data-sources/gscloud/login/complete",
@@ -103,7 +103,6 @@ class GSCloudAccountApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["pending"])
         self.assertFalse(response.json()["logged_in"])
-        stop_login.assert_not_called()
 
     def test_logout_removes_state_and_marks_logged_out(self) -> None:
         state_path = self.workdir / "domestic_auth" / f"user_{self.user_id}_gscloud_storage_state.json"
