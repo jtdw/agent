@@ -14,6 +14,7 @@ for (const method of ['gscloudStatus', 'startGSCloudLogin', 'completeGSCloudLogi
 assert.match(settings, /GSCloudAccountPanel/, 'settings must include the data-source account panel');
 assert.match(productConsole, /GSCloudAccountPanel/, 'product console settings must include the data-source account panel');
 assert.match(productConsole, /enabled=\{Boolean\(user\)\}/, 'product console account panel must follow the signed-in user');
+assert.doesNotMatch(account, /setInterval/, 'login completion polling must not overlap requests');
 assert.match(settings, /我的数据源账号/, 'settings must label the account section');
 assert.match(account, /地理空间数据云账号/, 'account panel must identify GSCloud');
 assert.match(account, /账号密码不会保存在聊天记录中/, 'account panel must explain password safety');

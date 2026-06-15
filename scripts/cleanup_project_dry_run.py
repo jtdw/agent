@@ -156,8 +156,28 @@ def _resolved_under(path: Path, parent: Path) -> bool:
         return False
 
 
+def _is_link_like(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        return bool(path.stat(follow_symlinks=False).st_file_attributes & 0x400)
+    except (AttributeError, OSError):
+        return False
+
+
+def _safe_relative_child(path: Path, project_root: Path) -> Path | None:
+    try:
+        resolved = path.resolve(strict=False)
+        resolved.relative_to(project_root.resolve(strict=False))
+        return path.absolute().relative_to(project_root.absolute())
+    except ValueError:
+        return None
+
+
 def _size_and_files(path: Path) -> tuple[int, int]:
     if not path.exists():
+        return 0, 0
+    if _is_link_like(path):
         return 0, 0
     if path.is_file():
         return path.stat().st_size, 1
@@ -201,8 +221,8 @@ def print_plan(project_root: Path, destination_root: Path) -> int:
     for category in ("A", "B", "C", "D"):
         print(f"\n[{category}]")
         for item in (entry for entry in items if entry.category == category):
-            source = (project_root / item.source).resolve(strict=False)
-            if not _resolved_under(source, project_root):
+            source = project_root / item.source
+            if not _is_link_like(source) and not _resolved_under(source, project_root):
                 problems.append(f"source escapes project root: {item.source}")
             size, files = _size_and_files(source)
             target = str(item.destination) if item.destination else "KEEP IN PLACE"
@@ -214,9 +234,14 @@ def print_plan(project_root: Path, destination_root: Path) -> int:
             print(f"  evidence={item.evidence}")
             if item.move and exists and item.destination and item.destination.exists():
                 problems.append(f"target collision: {item.destination}")
-            if item.move and source.is_dir():
+            if item.move and _is_link_like(source):
+                print(f"  linked-directory={item.source} traversal=skipped")
+            elif item.move and source.is_dir():
                 for child in sorted(path for path in source.rglob("*") if path.is_file()):
-                    relative = child.relative_to(project_root)
+                    relative = _safe_relative_child(child, project_root)
+                    if relative is None:
+                        print("  linked-child traversal=skipped")
+                        continue
                     child_size = child.stat().st_size
                     label = "sensitive-file" if item.sensitive else "move-file"
                     print(f"  {label}={relative} size={_format_size(child_size)}")

@@ -29,6 +29,14 @@ def per_tile_download_timeout_ms(timeout_seconds: int) -> int:
     return min(120, max(30, int(timeout_seconds or 30))) * 1000
 
 
+def _tile_search_terms(tile_id: str) -> list[str]:
+    normalized = str(tile_id or "").strip().upper()
+    if not normalized:
+        return []
+    coordinate = normalized.removeprefix("ASTGTM_")
+    return list(dict.fromkeys([normalized, coordinate]))
+
+
 def existing_gscloud_tile_downloads(target_dir: Path, tile_ids: list[str]) -> dict[str, Path]:
     expected = {str(tile_id).strip().upper() for tile_id in tile_ids if str(tile_id).strip()}
     found: dict[str, Path] = {}
@@ -207,37 +215,39 @@ def _search_tile_id(page, tile_id: str) -> dict[str, Any]:
             "error": "未找到‘数据标识/标识’筛选输入框。为防止下载错误分幅，已停止自动点击。",
         }
 
-    try:
-        inp.click(timeout=3000)
+    attempted: list[str] = []
+    for search_term in _tile_search_terms(tile_id):
+        attempted.append(search_term)
         try:
-            inp.press("Control+A")
-            inp.press("Backspace")
-        except Exception:
-            pass
-        inp.fill(tile_id, timeout=5000)
-        try:
-            inp.press("Enter")
-        except Exception:
-            pass
-        clicked = _click_search_button(page)
-        if not clicked:
-            page.wait_for_timeout(2500)
-    except Exception as exc:
-        return {"ok": False, "error": f"填写数据标识失败：{exc}"}
+            inp.click(timeout=3000)
+            inp.fill("", timeout=3000)
+            inp.fill(search_term, timeout=5000)
+            clicked = _click_search_button(page)
+            if not clicked:
+                inp.press("Enter")
+                page.wait_for_timeout(1800)
+        except Exception as exc:
+            return {"ok": False, "error": f"填写数据标识失败：{exc}", "attempted_terms": attempted}
 
-    for _ in range(10):
-        rows = _get_table_rows(page)
-        exact = []
-        for row in rows:
-            text = _row_text(row)
-            if tile_id in text.upper():
+        for _ in range(10):
+            rows = _get_table_rows(page)
+            for row in rows:
+                text = _row_text(row)
                 found = re.findall(r"ASTGTM_[NS]\d{2}[EW]\d{3}", text.upper())
                 if tile_id in found:
-                    exact.append((row, text))
-        if exact:
-            return {"ok": True, "row": exact[0][0], "row_text": exact[0][1], "search_clicked": clicked}
-        page.wait_for_timeout(1000)
-    return {"ok": False, "error": f"搜索结果中没有找到目标分幅 {tile_id}。"}
+                    return {
+                        "ok": True,
+                        "row": row,
+                        "row_text": text,
+                        "search_clicked": clicked,
+                        "search_term": search_term,
+                    }
+            page.wait_for_timeout(800)
+    return {
+        "ok": False,
+        "error": f"搜索结果中没有找到目标分幅 {tile_id}。已尝试：{', '.join(attempted)}",
+        "attempted_terms": attempted,
+    }
 
 
 def _click_download_in_exact_row(row) -> bool:

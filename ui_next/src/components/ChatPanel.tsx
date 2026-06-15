@@ -29,6 +29,8 @@ export type ChatWorkspaceProps = {
   mode?: ChatWorkspaceMode;
 };
 
+const EMPTY_MENTION_DATASETS: Array<Record<string, unknown> | WorkspaceMention> = [];
+
 function normalizeWorkspaceMentions(items: Array<Record<string, unknown> | WorkspaceMention> = []): WorkspaceMention[] {
   return items.flatMap((item) => {
     const raw = item as Record<string, unknown>;
@@ -180,7 +182,7 @@ export function ChatWorkspace({
   externalPrompt,
   onResultPanel,
   chatContext = {},
-  mentionDatasets = [],
+  mentionDatasets = EMPTY_MENTION_DATASETS,
   mode = 'floating'
 }: ChatWorkspaceProps) {
   const [width, setWidth] = useState(430);

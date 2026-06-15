@@ -18,7 +18,7 @@ export function GSCloudAccountPanel({
   const pollRef = useRef<number | null>(null);
 
   const stopPolling = () => {
-    if (pollRef.current !== null) window.clearInterval(pollRef.current);
+    if (pollRef.current !== null) window.clearTimeout(pollRef.current);
     pollRef.current = null;
   };
 
@@ -58,9 +58,21 @@ export function GSCloudAccountPanel({
         }
         return result;
       };
+      const pollInterval = started.poll_interval_ms || 2000;
+      const scheduleCheck = () => {
+        pollRef.current = window.setTimeout(async () => {
+          pollRef.current = null;
+          try {
+            const result = await check();
+            if (!result.logged_in && result.pending) scheduleCheck();
+          } catch {
+            scheduleCheck();
+          }
+        }, pollInterval);
+      };
       const initial = await check();
       if (!initial.logged_in && initial.pending && !pollRef.current) {
-        pollRef.current = window.setInterval(() => check().catch(() => {}), started.poll_interval_ms || 2000);
+        scheduleCheck();
       }
     } catch (cause) {
       setBusy(false);

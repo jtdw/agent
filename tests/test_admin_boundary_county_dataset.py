@@ -4,12 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.admin_boundary import extract_local_admin_boundary
+from core.admin_boundary import ADMIN_ZIP_NAMES, extract_local_admin_boundary
 from core.config import Settings
 from core.data_manager import DataManager
 
 
 class CountyAdminBoundaryTests(unittest.TestCase):
+    def test_only_current_county_archive_is_supported(self) -> None:
+        self.assertEqual(ADMIN_ZIP_NAMES, {"china_admin_county_2023.zip"})
+
     def test_county_city_and_province_names_resolve_from_local_county_archive(self) -> None:
         archive = Path(__file__).resolve().parents[1] / "local_library" / "data" / "administrative" / "china_admin_county_2023.zip"
         if not archive.exists():

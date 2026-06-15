@@ -122,6 +122,24 @@ def _try_open_gscloud_login(page) -> dict[str, Any]:
     return {"clicked_login": clicked, "page_title": title, "page_url": url, "notes": notes[:6]}
 
 
+def _page_has_authenticated_gscloud_session(page) -> bool:
+    selectors = (
+        "text=退出",
+        "text=注销",
+        "text=个人中心",
+        "a[href*='logout']",
+        "button:has-text('Logout')",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if locator.count() > 0 and locator.is_visible(timeout=500):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def gscloud_state_dir(workdir: Path) -> Path:
     path = Path(workdir) / "domestic_auth"
     path.mkdir(parents=True, exist_ok=True)
@@ -166,6 +184,7 @@ def open_login_and_save_state(
         "periodic_saved": False,
         "last_save_at": "",
         "closed_early": False,
+        "authenticated": False,
         "save_errors": [],
     }
 
@@ -206,12 +225,22 @@ def open_login_and_save_state(
                     break
                 raise
             for _ in range(10):
+                if _page_has_authenticated_gscloud_session(page):
+                    launch_info["authenticated"] = True
+                    break
                 if stop_requested and stop_requested():
                     launch_info["stop_requested"] = True
                     break
                 time.sleep(0.5)
-            if launch_info.get("stop_requested"):
+            if launch_info.get("authenticated") or launch_info.get("stop_requested"):
                 break
+
+        if not launch_info.get("authenticated"):
+            if launch_info.get("stop_requested"):
+                raise RuntimeError("GSCloud login was stopped before authentication was confirmed.")
+            if launch_info.get("closed_early"):
+                raise RuntimeError("GSCloud login browser closed before authentication was confirmed.")
+            raise TimeoutError("GSCloud login was not confirmed before the login session timed out.")
 
         try:
             context.storage_state(path=str(state_path))

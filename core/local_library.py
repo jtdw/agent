@@ -135,7 +135,7 @@ class LocalFileLibrary:
             "把常用基础数据放到 `data/` 目录下，前端点击“扫描文件库”即可登记。\n\n"
             "建议目录示例：\n\n"
             "```text\n"
-            "data/administrative/china_admin_boundary.zip\n"
+            "data/administrative/china_admin_county_2023.zip\n"
             "data/climate/china_precip_2020.tif\n"
             "data/terrain/china_dem_1km.tif\n"
             "data/soil/shandian_station_template.csv\n"

@@ -75,6 +75,19 @@ class CleanupProjectDryRunTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("move-file=.streamlit\\config.toml", output.getvalue())
 
+    def test_safe_relative_child_rejects_link_targets_outside_project(self) -> None:
+        module = self._load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            outside = Path(temp_dir) / "outside" / "dependency.js"
+            root.mkdir()
+            outside.parent.mkdir()
+            outside.write_text("external", encoding="utf-8")
+
+            relative = module._safe_relative_child(outside, root)
+
+        self.assertIsNone(relative)
+
 
 if __name__ == "__main__":
     unittest.main()

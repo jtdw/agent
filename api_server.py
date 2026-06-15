@@ -14,6 +14,7 @@ from zipfile import ZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from infrastructure.storage.workspace_paths import workspace_root_for_user
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr, Field
 
@@ -45,8 +46,10 @@ from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gsclou
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
-from core.domestic_sources.gscloud_adapter import gscloud_user_state_path
-from core.commercial.login_jobs import read_gscloud_login_job, request_gscloud_login_stop, start_gscloud_login_process
+from services.data_sources.gscloud_accounts import GSCloudAccountService
+from api.routes.data_sources import create_data_sources_router
+from api.routes.downloads import create_downloads_router
+from services.downloads.resume import DownloadResumeService
 from core.ops_config import require_valid_production_config, validate_production_config
 from core.llm_config import check_llm_provider_health, validate_llm_config
 
@@ -125,10 +128,7 @@ app.add_middleware(
 
 
 def _user_workdir(user_id: str | None) -> Path:
-    key = _safe_key(user_id)
-    if key == "anonymous":
-        return base_settings.workdir / "anonymous"
-    return base_settings.workdir / "users" / key
+    return workspace_root_for_user(base_settings.workdir, user_id)
 
 
 def workspace_for(user_id: str | None = None) -> GISWorkspaceService:
@@ -306,14 +306,6 @@ class DownloadActionIn(BaseModel):
     user_id: str = ""
     job_id: str
     reason: str = ""
-
-
-class GSCloudLoginStartIn(BaseModel):
-    timeout_seconds: int = Field(default=300, ge=30, le=900)
-
-
-class GSCloudLoginCompleteIn(BaseModel):
-    login_session_id: str = Field(min_length=1, max_length=120, pattern=r"^login_[A-Za-z0-9_-]+$")
 
 
 class DownloadPreflightIn(BaseModel):
@@ -864,6 +856,28 @@ def _workspace_map_layers(service: GISWorkspaceService, user_id: str = "") -> di
             layers.insert(0, fallback)
     layers = _dedupe_boundary_layers(layers)
     return {"layers": layers}
+
+
+app.include_router(
+    create_data_sources_router(
+        account_service=lambda: GSCloudAccountService(commercial_service),
+        authenticated_user=_authenticated_request_user,
+        audit=_audit,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_downloads_router(
+        resume_service=lambda: DownloadResumeService(
+            commercial_service,
+            GSCloudAccountService(commercial_service),
+            _maybe_start_gscloud_auto_download,
+        ),
+        authenticated_user=_authenticated_request_user,
+        audit=_audit,
+        guard=guard,
+    )
+)
 
 
 @app.get("/api/status")
@@ -2540,132 +2554,7 @@ def simulate_payment(body: PaymentIn, request: Request):
 
 
 def _gscloud_public_status(user_id: str) -> dict:
-    state_path = commercial_service.get_user_storage_state_path(user_id, "gscloud")
-    health = inspect_storage_state(state_path) if state_path else {"ok": False, "reason": "missing_storage_state"}
-    logged_in = bool(health.get("ok"))
-    return {
-        "provider": "gscloud",
-        "logged_in": logged_in,
-        "account_mode": "own",
-        "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "expires_at": None,
-        "masked_account": None,
-        "storage_state_exists": bool(state_path and Path(state_path).exists()),
-        "health_status": "healthy" if logged_in else str(health.get("reason") or "login_required"),
-        "user_message": "地理空间数据云账号已登录。" if logged_in else "需要登录地理空间数据云账号。",
-    }
-
-
-@app.get("/api/data-sources/gscloud/status")
-def gscloud_account_status(request: Request):
-    return guard(lambda: _gscloud_public_status(_authenticated_request_user(request)))
-
-
-@app.post("/api/data-sources/gscloud/login/start")
-def gscloud_login_start(body: GSCloudLoginStartIn, request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
-        login_job = start_gscloud_login_process(
-            workdir=commercial_service.workdir,
-            subject_type="customer",
-            subject_id=user_id,
-            state_path=state_path,
-            timeout_seconds=body.timeout_seconds,
-            headless=False,
-        )
-        _audit(request, user_id=user_id, action="data_source.login_start", resource_type="data_source", resource_id="gscloud")
-        return {
-            "provider": "gscloud",
-            "login_session_id": str(login_job.get("login_job_id") or ""),
-            "state": str(login_job.get("state") or "STARTING"),
-            "user_message": str(login_job.get("message") or "已打开地理空间数据云登录窗口。"),
-            "poll_interval_ms": 2000,
-        }
-
-    return guard(run)
-
-
-@app.post("/api/data-sources/gscloud/login/complete")
-def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        login_job = read_gscloud_login_job(commercial_service.workdir, body.login_session_id)
-        if str(login_job.get("subject_type") or "customer") != "customer" or str(login_job.get("subject_id") or "") != user_id:
-            raise PermissionError("无权访问其他用户的数据源登录会话。")
-        state = str(login_job.get("state") or "")
-        state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
-        health = inspect_storage_state(state_path)
-        if health.get("ok"):
-            commercial_service.set_user_credential_storage_state(user_id, "gscloud", str(state_path))
-            request_gscloud_login_stop(commercial_service.workdir, body.login_session_id)
-            waiting_jobs = [
-                job for job in commercial_service.list_jobs(user_id=user_id, limit=100)
-                if job.get("source_key") == "gscloud" and job.get("status") == "waiting_login"
-            ]
-            _audit(request, user_id=user_id, action="data_source.login_complete", resource_type="data_source", resource_id="gscloud")
-            return {
-                **_gscloud_public_status(user_id),
-                "login_session_id": body.login_session_id,
-                "login_state": state,
-                "pending": False,
-                "waiting_jobs": waiting_jobs,
-            }
-        if state not in {"COMPLETED", "FAILED"}:
-            return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": True}
-        if not health.get("ok"):
-            return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": False}
-        raise RuntimeError("unreachable")
-
-    return guard(run)
-
-
-@app.delete("/api/data-sources/gscloud/logout")
-def gscloud_account_logout(request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        commercial_service.clear_user_storage_state(user_id, "gscloud")
-        _audit(request, user_id=user_id, action="data_source.logout", resource_type="data_source", resource_id="gscloud")
-        return _gscloud_public_status(user_id)
-
-    return guard(run)
-
-
-@app.post("/api/download-jobs/{job_id}/resume")
-def resume_download_job(job_id: str, request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        job = require_resource_owner(commercial_service.get_job(job_id), user_id=user_id, resource_name="download job")
-        if job.get("status") not in {"waiting_login", "waiting_manual", "waiting_parameters", "ready_to_start", "queued"}:
-            raise ValueError(f"当前状态不能恢复: {job.get('status')}")
-        if not str(job.get("region") or "").strip():
-            commercial_service._update_job(job_id, status="waiting_parameters", stage="needs_region")
-            return {
-                "job": commercial_service.get_job(job_id),
-                "auto_supported": True,
-                "auto_started": False,
-                "reason": "clarification_required",
-                "action_required": {
-                    "type": "clarification_required",
-                    "missing_parameters": ["region"],
-                    "recommended_defaults": {"resolution": "30m", "format": "GeoTIFF", "clip_to_region": True},
-                },
-            }
-        status = _gscloud_public_status(user_id)
-        if not status["logged_in"]:
-            commercial_service._update_job(job_id, status="waiting_login", stage="needs_gscloud_login_state")
-            return {
-                "job": commercial_service.get_job(job_id),
-                "auto_supported": True,
-                "auto_started": False,
-                "reason": "login_required",
-                "action_required": {"type": "login_required", "provider": "gscloud", "job_id": job_id},
-            }
-        auto = _maybe_start_gscloud_auto_download(job, region=str(job.get("region") or ""))
-        _audit(request, user_id=user_id, action="download.resume", resource_type="download_job", resource_id=job_id, detail={"auto_started": auto.get("auto_started")})
-        return {"job": commercial_service.get_job(job_id), **auto}
-
-    return guard(run)
+    return GSCloudAccountService(commercial_service).status(user_id)
 
 
 @app.post("/api/downloads/submit")

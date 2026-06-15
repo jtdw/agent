@@ -18,6 +18,8 @@ import geopandas as gpd
 import pandas as pd
 import rasterio
 
+from infrastructure.storage.workspace_paths import WorkspacePaths
+
 from .archive_utils import safe_extract_zip
 from .artifacts import artifact_download_url, artifact_meta_url, artifact_mime_type, safe_download_filename
 from .model_results import generate_model_result_id
@@ -128,18 +130,16 @@ class DatasetRecord:
 
 class DataManager:
     def __init__(self, workdir: Path):
-        self.workdir = Path(workdir)
-        self.upload_dir = self.workdir / "uploads"
-        self.plot_dir = self.workdir / "plots"
-        self.derived_dir = self.workdir / "derived"
-        self.temp_dir = self.workdir / "temp"
+        self.paths = WorkspacePaths(workdir).ensure()
+        self.workdir = self.paths.root
+        self.upload_dir = self.paths.uploads
+        self.plot_dir = self.paths.plots
+        self.derived_dir = self.paths.derived
+        self.temp_dir = self.paths.temp
         self.datasets: dict[str, DatasetRecord] = {}
-        self.database = WorkspaceDatabase(self.workdir / "workspace.db")
+        self.database = WorkspaceDatabase(self.paths.database)
         self.last_plot_path: str = ""
         self.operation_log: list[dict[str, Any]] = []
-
-        for folder in [self.upload_dir, self.plot_dir, self.derived_dir, self.temp_dir]:
-            folder.mkdir(parents=True, exist_ok=True)
 
         self._restore_workspace_state()
 
@@ -249,7 +249,7 @@ class DataManager:
     def _resolve_local_library_reference(self, file_path: str) -> Path | None:
         """Resolve accidental local-library item ids passed as file paths.
 
-        The agent sees manifest ids such as lib_china_admin_province_city_county_shp
+        The agent sees manifest ids such as lib_china_admin_county_2023
         in context and may pass them to load_dataset instead of the real zip path.
         """
         raw = str(file_path or "").strip()
