@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from domain.chat.actions import normalize_action
+
 from .artifacts import public_artifact_payload
 from .response_postprocess import dedupe_assistant_reply, repair_mojibake_text
 from .task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
@@ -42,8 +44,9 @@ def _assistant_message_meta(service: Any, result: dict[str, Any], meta_keys: Ite
         meta["tool_results"] = result["tool_results"]
     if isinstance(result.get("workflow_summary"), dict):
         meta["workflow_summary"] = result["workflow_summary"]
-    if isinstance(result.get("action_required"), dict):
-        meta["action_required"] = result["action_required"]
+    action_required = normalize_action(result.get("action_required"))
+    if action_required:
+        meta["action_required"] = action_required
     meta.setdefault("message_format", "markdown")
     meta.setdefault("text", str(result.get("reply") or ""))
     meta.setdefault("markdown", str(result.get("reply") or ""))
@@ -81,7 +84,8 @@ def build_chat_response(
     reply = str(result.get("reply") or "")
     outcome_text = format_task_outcome_markdown(task_outcome)
     is_status_query = reason in {"download_status", "commercial_download_status"} or reason.endswith("_status")
-    action_type = str((result.get("action_required") or {}).get("type") or "")
+    action_required = normalize_action(result.get("action_required"))
+    action_type = str((action_required or {}).get("type") or "")
     suppress_outcome = action_type in {"clarification_required", "login_required"}
     if outcome_text and not is_status_query and not suppress_outcome and "任务结果分析：" not in reply:
         reply = f"{reply.rstrip()}\n{outcome_text}"
@@ -90,9 +94,11 @@ def build_chat_response(
     service.manager.database.add_message(service.current_session_id, "assistant", reply, meta=assistant_meta)
     public_result = {
         key: result[key]
-        for key in ("job", "scene_job", "tile_job", "action_required", "artifacts")
+        for key in ("job", "scene_job", "tile_job", "artifacts")
         if result.get(key) is not None
     }
+    if action_required:
+        public_result["action_required"] = action_required
     return attach_chat_state(
         service,
         {
