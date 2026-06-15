@@ -113,6 +113,10 @@ test('chat artifact card downloads generated result', async ({ page, browserName
   expect((await download).suggestedFilename()).toBe('result.csv');
 });
 test('chat message and code block can be copied', async ({ page, browserName }) => {
+  const reactErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error' && message.text().includes('Maximum update depth exceeded')) reactErrors.push(message.text());
+  });
   await setupChatUpgradeMock(page);
   await openChat(page);
   await page.getByTestId('chat-input').first().fill('生成代码');
@@ -129,6 +133,7 @@ test('chat message and code block can be copied', async ({ page, browserName }) 
   } else {
     await expect(page.getByTestId('copy-code')).toContainText('已复制');
   }
+  expect(reactErrors).toEqual([]);
 });
 
 test('legacy path download endpoint is disabled', async ({ page }) => {

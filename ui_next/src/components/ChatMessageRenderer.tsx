@@ -1,5 +1,5 @@
 import { Check, Clipboard, Copy, LogIn, Play, XCircle } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { isValidElement, useEffect, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
@@ -59,33 +59,42 @@ function CopyButton({ text, label, testId }: { text: string; label: string; test
   );
 }
 
+const MARKDOWN_COMPONENTS = {
+  code({ inline, className, children, node: _node, ...props }: any) {
+    if (inline) {
+      return <code className="chat-inline-code" {...props}>{children}</code>;
+    }
+    return <code className={className} {...props}>{children}</code>;
+  },
+  pre({ children }: { children?: ReactNode }) {
+    const child = Array.isArray(children) ? children[0] : children;
+    const codeProps = isValidElement(child)
+      ? child.props as { className?: string; children?: ReactNode }
+      : {};
+    const value = String(codeProps.children || '').replace(/\n$/, '');
+    const lang = /language-([\w-]+)/.exec(codeProps.className || '')?.[1] || 'code';
+    return (
+      <div className="chat-code-block">
+        <div className="chat-code-toolbar">
+          <span>{lang}</span>
+          <CopyButton text={value} label="复制代码" testId="copy-code" />
+        </div>
+        <pre>{children}</pre>
+      </div>
+    );
+  },
+  table({ children }: { children?: ReactNode }) {
+    return <div className="chat-table-wrap"><table>{children}</table></div>;
+  },
+};
+
 function MarkdownBlocks({ content }: { content: string }) {
   return (
     <div className="chat-markdown" data-list-bullet="•">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize]}
-        components={{
-          code({ inline, className, children, ...props }: any) {
-            const value = String(children || '').replace(/\n$/, '');
-            if (inline) {
-              return <code className="chat-inline-code" {...props}>{children}</code>;
-            }
-            const lang = /language-([\w-]+)/.exec(className || '')?.[1] || 'code';
-            return (
-              <div className="chat-code-block">
-                <div className="chat-code-toolbar">
-                  <span>{lang}</span>
-                  <CopyButton text={value} label="复制代码" testId="copy-code" />
-                </div>
-                <pre><code className={className} {...props}>{children}</code></pre>
-              </div>
-            );
-          },
-          table({ children }) {
-            return <div className="chat-table-wrap"><table>{children}</table></div>;
-          },
-        }}
+        components={MARKDOWN_COMPONENTS}
       >
         {content}
       </ReactMarkdown>
