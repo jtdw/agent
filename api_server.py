@@ -47,6 +47,7 @@ from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
 from services.data_sources.gscloud_accounts import GSCloudAccountService
+from api.routes.data_sources import create_data_sources_router
 from core.ops_config import require_valid_production_config, validate_production_config
 from core.llm_config import check_llm_provider_health, validate_llm_config
 
@@ -303,14 +304,6 @@ class DownloadActionIn(BaseModel):
     user_id: str = ""
     job_id: str
     reason: str = ""
-
-
-class GSCloudLoginStartIn(BaseModel):
-    timeout_seconds: int = Field(default=300, ge=30, le=900)
-
-
-class GSCloudLoginCompleteIn(BaseModel):
-    login_session_id: str = Field(min_length=1, max_length=120, pattern=r"^login_[A-Za-z0-9_-]+$")
 
 
 class DownloadPreflightIn(BaseModel):
@@ -861,6 +854,16 @@ def _workspace_map_layers(service: GISWorkspaceService, user_id: str = "") -> di
             layers.insert(0, fallback)
     layers = _dedupe_boundary_layers(layers)
     return {"layers": layers}
+
+
+app.include_router(
+    create_data_sources_router(
+        account_service=lambda: GSCloudAccountService(commercial_service),
+        authenticated_user=_authenticated_request_user,
+        audit=_audit,
+        guard=guard,
+    )
+)
 
 
 @app.get("/api/status")
@@ -2538,45 +2541,6 @@ def simulate_payment(body: PaymentIn, request: Request):
 
 def _gscloud_public_status(user_id: str) -> dict:
     return GSCloudAccountService(commercial_service).status(user_id)
-
-
-@app.get("/api/data-sources/gscloud/status")
-def gscloud_account_status(request: Request):
-    return guard(lambda: _gscloud_public_status(_authenticated_request_user(request)))
-
-
-@app.post("/api/data-sources/gscloud/login/start")
-def gscloud_login_start(body: GSCloudLoginStartIn, request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        result = GSCloudAccountService(commercial_service).start_login(user_id, timeout_seconds=body.timeout_seconds)
-        _audit(request, user_id=user_id, action="data_source.login_start", resource_type="data_source", resource_id="gscloud")
-        return result
-
-    return guard(run)
-
-
-@app.post("/api/data-sources/gscloud/login/complete")
-def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        result = GSCloudAccountService(commercial_service).complete_login(user_id, body.login_session_id)
-        if result.get("logged_in"):
-            _audit(request, user_id=user_id, action="data_source.login_complete", resource_type="data_source", resource_id="gscloud")
-        return result
-
-    return guard(run)
-
-
-@app.delete("/api/data-sources/gscloud/logout")
-def gscloud_account_logout(request: Request):
-    def run():
-        user_id = _authenticated_request_user(request)
-        result = GSCloudAccountService(commercial_service).logout(user_id)
-        _audit(request, user_id=user_id, action="data_source.logout", resource_type="data_source", resource_id="gscloud")
-        return result
-
-    return guard(run)
 
 
 @app.post("/api/download-jobs/{job_id}/resume")
