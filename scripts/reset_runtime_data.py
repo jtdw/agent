@@ -39,6 +39,7 @@ WORKSPACE_TABLES = (
     "app_state",
 )
 COMMERCIAL_RESET_TABLES = ("download_jobs", "audit_events")
+TEST_ACCOUNT_PREFIXES = ("audit.", "e2e.", "playwright.")
 
 
 def _now() -> str:
@@ -61,8 +62,10 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _is_preserved_auth_file(path: Path) -> bool:
+def _is_preserved_auth_file(path: Path, excluded_user_ids: set[str] | None = None) -> bool:
     name = path.name.lower()
+    if any(user_id.lower() in name for user_id in excluded_user_ids or set()):
+        return False
     return path.is_file() and path.suffix.lower() == ".json" and ("storage_state" in name or "cookie" in name)
 
 
@@ -125,6 +128,24 @@ def _clear_tables(db_path: Path, tables: tuple[str, ...]) -> dict[str, int]:
     return counts
 
 
+def _delete_test_accounts(db_path: Path) -> tuple[list[str], int]:
+    if not db_path.exists():
+        return [], 0
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT user_id, email FROM commercial_users").fetchall()
+        user_ids = [
+            str(user_id)
+            for user_id, email in rows
+            if str(email or "").strip().lower().startswith(TEST_ACCOUNT_PREFIXES)
+        ]
+        for user_id in user_ids:
+            for table in ("source_credentials", "quota_ledger", "login_sessions", "payment_orders", "payment_records"):
+                conn.execute(f'DELETE FROM "{table}" WHERE user_id=?', [user_id])
+            conn.execute("DELETE FROM commercial_users WHERE user_id=?", [user_id])
+        conn.commit()
+    return user_ids, len(user_ids)
+
+
 def _move_runtime_path(source: Path, project: Path, backup: Path, moved: list[dict[str, Any]]) -> None:
     if not source.exists():
         return
@@ -139,13 +160,19 @@ def _move_runtime_path(source: Path, project: Path, backup: Path, moved: list[di
     moved.append({"path": str(relative), "backup": str(destination.relative_to(backup))})
 
 
-def _backup_and_clean_auth(project: Path, backup: Path, preserved: list[dict[str, Any]], moved: list[dict[str, Any]]) -> None:
+def _backup_and_clean_auth(
+    project: Path,
+    backup: Path,
+    preserved: list[dict[str, Any]],
+    moved: list[dict[str, Any]],
+    excluded_user_ids: set[str],
+) -> None:
     auth_root = project / "workspace" / "domestic_auth"
     if not auth_root.exists():
         return
     for path in sorted((item for item in auth_root.rglob("*") if item.is_file()), reverse=True):
         relative = path.relative_to(project)
-        if _is_preserved_auth_file(path):
+        if _is_preserved_auth_file(path, excluded_user_ids):
             backup_path = backup / "preserved_auth" / relative
             _backup_file(path, backup_path)
             preserved.append({"path": str(relative), "sha256": _sha256(path), "bytes": path.stat().st_size})
@@ -185,16 +212,18 @@ def execute_runtime_reset(project_root: Path, backup_root: Path) -> Path:
         _backup_file(workspace / "commercial_secret.key", backup / "commercial_secret.key")
 
         commercial_counts = _clear_tables(commercial_db, COMMERCIAL_RESET_TABLES)
+        deleted_test_user_ids, deleted_test_accounts = _delete_test_accounts(commercial_db)
         workspace_counts = _clear_tables(workspace_db, WORKSPACE_TABLES)
         for name in RUNTIME_PATHS:
             _move_runtime_path(workspace / name, project, backup, moved)
-        _backup_and_clean_auth(project, backup, preserved_auth, moved)
+        _backup_and_clean_auth(project, backup, preserved_auth, moved, set(deleted_test_user_ids))
 
         manifest.update(
             {
                 "status": "completed",
                 "completed_at": _now(),
                 "deleted_rows": {"commercial": commercial_counts, "workspace": workspace_counts},
+                "deleted_test_accounts": deleted_test_accounts,
                 "moved_paths": moved,
                 "preserved_auth": preserved_auth,
             }

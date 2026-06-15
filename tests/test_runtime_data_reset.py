@@ -19,6 +19,7 @@ class RuntimeDataResetTests(unittest.TestCase):
             backup = Path(temp_dir) / "backup"
             commercial = CommercialService(workspace)
             commercial.register_user("user@example.com", "password1", user_id="u_1")
+            commercial.register_user("audit.123@example.com", "password1", user_id="u_audit")
             commercial.submit_job(user_id="u_1", source_key="gscloud", resource_type="dem", region="成都")
             state = workspace / "domestic_auth" / "user_u_1_gscloud_storage_state.json"
             state.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,8 @@ class RuntimeDataResetTests(unittest.TestCase):
 
             preserved = CommercialService(workspace)
             self.assertEqual(preserved.get_user("u_1")["email"], "user@example.com")
+            with self.assertRaises(ValueError):
+                preserved.get_user("u_audit")
             self.assertEqual(preserved.list_jobs(user_id="u_1"), [])
             self.assertEqual(preserved.get_user_storage_state_path("u_1", "gscloud"), str(state))
             self.assertTrue(state.exists())
