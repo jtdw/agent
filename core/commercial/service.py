@@ -10,7 +10,8 @@ from typing import Any
 from uuid import uuid4
 
 from .database import CommercialDB, future_days, json_dumps, json_loads, now_str
-from core.download_status import DownloadJobStatus, decorate_job_record, failure_diagnostic
+from domain.downloads.models import decorate_job_record, failure_diagnostic
+from domain.downloads.status import DownloadJobStatus
 from .security import SecretBox, mask_secret, public_record
 
 
