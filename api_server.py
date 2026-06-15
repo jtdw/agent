@@ -14,6 +14,7 @@ from zipfile import ZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from infrastructure.storage.workspace_paths import workspace_root_for_user
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr, Field
 
@@ -125,10 +126,7 @@ app.add_middleware(
 
 
 def _user_workdir(user_id: str | None) -> Path:
-    key = _safe_key(user_id)
-    if key == "anonymous":
-        return base_settings.workdir / "anonymous"
-    return base_settings.workdir / "users" / key
+    return workspace_root_for_user(base_settings.workdir, user_id)
 
 
 def workspace_for(user_id: str | None = None) -> GISWorkspaceService:

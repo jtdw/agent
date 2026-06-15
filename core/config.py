@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+from infrastructure.storage.workspace_paths import WorkspacePaths
 
 from .llm_config import load_llm_provider_config, validate_llm_config
 
@@ -65,11 +66,7 @@ class Settings:
     desktop_theme: str = os.getenv("GIS_AGENT_THEME", "dark")
 
     def ensure_dirs(self) -> None:
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        (self.workdir / "uploads").mkdir(parents=True, exist_ok=True)
-        (self.workdir / "plots").mkdir(parents=True, exist_ok=True)
-        (self.workdir / "derived").mkdir(parents=True, exist_ok=True)
-        (self.workdir / "temp").mkdir(parents=True, exist_ok=True)
+        WorkspacePaths(self.workdir).ensure()
 
     def vision_models(self) -> tuple[str, ...]:
         return tuple(model for model in self.supported_models if is_vision_model(model))
