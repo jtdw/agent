@@ -71,9 +71,9 @@ class GSCloudAccountApiTests(unittest.TestCase):
         self.assertEqual(started.status_code, 200)
         self.assertEqual(started.json()["login_session_id"], "login_test")
 
-        with (
-            patch("api_server.read_gscloud_login_job", return_value={"login_job_id": "login_test", "subject_type": "customer", "subject_id": self.user_id, "state": "BROWSER_OPEN"}),
-            patch("api_server.request_gscloud_login_stop") as stop_login,
+        with patch(
+            "api_server.read_gscloud_login_job",
+            return_value={"login_job_id": "login_test", "subject_type": "customer", "subject_id": self.user_id, "state": "COMPLETED"},
         ):
             completed = self.client.post(
                 "/api/data-sources/gscloud/login/complete",
@@ -82,7 +82,28 @@ class GSCloudAccountApiTests(unittest.TestCase):
         self.assertEqual(completed.status_code, 200)
         self.assertTrue(completed.json()["logged_in"])
         self.assertEqual(self.commercial.get_user_storage_state_path(self.user_id, "gscloud"), str(state_path))
-        stop_login.assert_called_once_with(self.workdir, "login_test")
+
+    def test_cookie_file_does_not_complete_login_while_browser_is_open(self) -> None:
+        state_path = self.workdir / "domestic_auth" / f"user_{self.user_id}_gscloud_storage_state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps({"cookies": [{"name": "prelogin", "value": "masked", "domain": ".gscloud.cn", "expires": 4102444800}], "origins": []}),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("api_server.read_gscloud_login_job", return_value={"login_job_id": "login_test", "subject_type": "customer", "subject_id": self.user_id, "state": "BROWSER_OPEN"}),
+            patch("api_server.request_gscloud_login_stop") as stop_login,
+        ):
+            response = self.client.post(
+                "/api/data-sources/gscloud/login/complete",
+                json={"login_session_id": "login_test"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["pending"])
+        self.assertFalse(response.json()["logged_in"])
+        stop_login.assert_not_called()
 
     def test_logout_removes_state_and_marks_logged_out(self) -> None:
         state_path = self.workdir / "domestic_auth" / f"user_{self.user_id}_gscloud_storage_state.json"

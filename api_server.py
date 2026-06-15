@@ -2594,9 +2594,8 @@ def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
         state = str(login_job.get("state") or "")
         state_path = gscloud_user_state_path(commercial_service.workdir, user_id, "gscloud")
         health = inspect_storage_state(state_path)
-        if health.get("ok"):
+        if state == "COMPLETED" and health.get("ok"):
             commercial_service.set_user_credential_storage_state(user_id, "gscloud", str(state_path))
-            request_gscloud_login_stop(commercial_service.workdir, body.login_session_id)
             waiting_jobs = [
                 job for job in commercial_service.list_jobs(user_id=user_id, limit=100)
                 if job.get("source_key") == "gscloud" and job.get("status") == "waiting_login"
@@ -2609,8 +2608,14 @@ def gscloud_login_complete(body: GSCloudLoginCompleteIn, request: Request):
                 "pending": False,
                 "waiting_jobs": waiting_jobs,
             }
-        if state not in {"COMPLETED", "FAILED"}:
-            return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": True}
+        if state not in {"COMPLETED", "FAILED", "CANCELLED"}:
+            pending_status = _gscloud_public_status(user_id)
+            pending_status.update({
+                "logged_in": False,
+                "health_status": "login_in_progress",
+                "user_message": "请在地理空间数据云官方页面完成登录，系统检测到明确登录成功后会自动关闭窗口。",
+            })
+            return {**pending_status, "login_session_id": body.login_session_id, "login_state": state, "pending": True}
         if not health.get("ok"):
             return {**_gscloud_public_status(user_id), "login_session_id": body.login_session_id, "login_state": state, "pending": False}
         raise RuntimeError("unreachable")
