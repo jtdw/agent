@@ -10,7 +10,11 @@ import rasterio
 from rasterio.transform import from_origin
 
 from core.commercial.service import CommercialService
+from core.config import Settings
 from core.data_manager import DataManager
+from core.map_layers import MapLayerService
+from core.service import GISWorkspaceService
+from infrastructure.storage.workspace_paths import workspace_root_for_session
 
 
 class DownloadStatusMachineTests(unittest.TestCase):
@@ -96,6 +100,31 @@ class DownloadStatusMachineTests(unittest.TestCase):
         self.assertEqual(done["result"]["raster_standardization"]["action"], "mosaicked")
         self.assertTrue(Path(done["result"]["final_output_path"]).exists())
         self.assertEqual(done["output_path"], done["result"]["final_output_path"])
+
+    def test_completed_path_only_raster_download_becomes_session_map_layer(self) -> None:
+        session_id = "session_download_map"
+        session_root = workspace_root_for_session(self.workdir, "u_test", session_id)
+        raw_dir = session_root / "domestic_downloads" / "gscloud"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        left = self.write_raster(raw_dir / "left.tif", west=0.0, value=1)
+        right = self.write_raster(raw_dir / "right.tif", west=2.0, value=2)
+        job = self.service.submit_job(
+            user_id="u_test",
+            source_key="gscloud",
+            resource_type="dem",
+            output_name="session_downloaded_area",
+            chat_session_id=session_id,
+        )
+
+        done = self.service.run_job_with_result(job["job_id"], {"downloads": [str(left), str(right)]})
+
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["result"]["dataset_name"], "session_downloaded_area_mosaic")
+        session_service = GISWorkspaceService(Settings(api_key="", workdir=session_root))
+        layers = MapLayerService(session_service).workspace_layers(user_id="u_test", session_id=session_id)["layers"]
+        layer = next(item for item in layers if item["dataset_name"] == "session_downloaded_area_mosaic")
+        self.assertEqual(layer["type"], "raster")
+        self.assertTrue(layer["map_ready"])
 
     def test_waiting_parameters_is_preserved_and_not_running(self) -> None:
         job = self.service.submit_job(user_id="u_test", source_key="gscloud", resource_type="dem")

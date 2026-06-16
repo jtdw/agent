@@ -255,7 +255,7 @@ def find_loadable_file(path_or_dir: Path) -> Path | None:
         return None
     if path_or_dir.is_dir():
         # 优先 shp，其次 tif，再表格/GeoJSON。
-        priority = [".shp", ".tif", ".tiff", ".geojson", ".gpkg", ".csv", ".xlsx", ".xls", ".docx", ".txt", ".md"]
+        priority = [".shp", ".tif", ".tiff", ".img", ".geojson", ".gpkg", ".csv", ".xlsx", ".xls", ".docx", ".txt", ".md"]
         files = [p for p in path_or_dir.rglob("*") if p.is_file() and p.suffix.lower() in LOADABLE_EXTS]
         for ext in priority:
             for item in files:

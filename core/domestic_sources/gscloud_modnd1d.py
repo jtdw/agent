@@ -108,9 +108,17 @@ def _click_row_download(page, row, timeout_ms: int):
             loc = row.locator(selector)
             if loc.count() == 0:
                 continue
-            with page.expect_download(timeout=timeout_ms) as dl_info:
-                loc.first.click(timeout=5000)
-            return dl_info.value
+            for attempt in range(1, 3):
+                try:
+                    with page.expect_download(timeout=timeout_ms) as dl_info:
+                        loc.first.click(timeout=5000)
+                    return dl_info.value
+                except Exception as exc:
+                    last_error = exc
+                    try:
+                        page.wait_for_timeout(800 * attempt)
+                    except Exception:
+                        pass
         except Exception as exc:
             last_error = exc
             continue

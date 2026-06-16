@@ -9,11 +9,18 @@ from langchain.tools import tool
 from ..data_manager import DataManager
 from .auth import credential_status, open_manual_login_window, storage_state_path
 from .downloader import capture_browser_download, download_direct_url, postprocess_download
+from .raster_postprocess import standardize_raster_download_result
 from .registry import DOMESTIC_RESOURCE_CATALOG, DOMESTIC_SOURCES, get_source
 
 
 def _json(data: dict | list) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+def _standardized_download_json(manager: DataManager, result: Any, *, output_name: str) -> str:
+    payload = result.to_dict() if hasattr(result, "to_dict") else dict(result)
+    payload = standardize_raster_download_result(manager, payload, output_name=output_name or payload.get("dataset_name") or "downloaded_raster")
+    return _json(payload)
 
 
 def build_domestic_tools(manager: DataManager):
@@ -88,7 +95,7 @@ def build_domestic_tools(manager: DataManager):
             headless=headless,
             auto_load=auto_load,
         )
-        return _json(result.to_dict())
+        return _standardized_download_json(manager, result, output_name=output_name or "browser_download")
 
     @tool
     def download_domestic_url(
@@ -108,7 +115,7 @@ def build_domestic_tools(manager: DataManager):
             auto_load=auto_load,
             timeout_seconds=timeout_seconds,
         )
-        return _json(result.to_dict())
+        return _standardized_download_json(manager, result, output_name=output_name or "downloaded_raster")
 
     @tool
     def import_domestic_downloaded_file(file_path: str, output_name: str = "", auto_load: bool = True) -> str:
@@ -118,7 +125,7 @@ def build_domestic_tools(manager: DataManager):
             raise FileNotFoundError(f"文件不存在: {file_path}")
         manager._require_allowed_import_source(path)
         result = postprocess_download(manager, path, source_key="manual", output_name=output_name or path.stem, auto_load=auto_load)
-        return _json(result.to_dict())
+        return _standardized_download_json(manager, result, output_name=output_name or path.stem)
 
     return [
         list_domestic_data_sources,
