@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +65,39 @@ class CleanupProjectMigrationTests(unittest.TestCase):
             self.assertEqual((root / "requirements.txt").read_text(encoding="utf-8"), original_requirements)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["status"], "rolled_back")
+
+    def test_cli_only_moves_selected_generated_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "project"
+            archive = Path(temp_dir) / "archive"
+            (root / "artifacts").mkdir(parents=True)
+            (root / "artifacts" / "report.txt").write_text("generated", encoding="utf-8")
+            (root / ".superpowers").mkdir()
+            (root / ".superpowers" / "state.txt").write_text("scratch", encoding="utf-8")
+            (root / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(EXECUTE_SCRIPT),
+                    "--project-root",
+                    str(root),
+                    "--archive-root",
+                    str(archive),
+                    "--timestamp",
+                    "batch",
+                    "--only",
+                    "artifacts",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((root / "artifacts").exists())
+            self.assertTrue((archive / "project" / "batch" / "artifacts" / "report.txt").exists())
+            self.assertTrue((root / ".superpowers" / "state.txt").exists())
 
 
 if __name__ == "__main__":

@@ -68,6 +68,16 @@ def _remove_streamlit_requirement(project_root: Path, batch_root: Path) -> dict:
     return {"status": status, "source": str(requirements), "backup": str(backup)}
 
 
+def _existing_parent(path: Path) -> Path:
+    current = path.resolve(strict=False)
+    while not current.exists():
+        parent = current.parent
+        if parent == current:
+            raise FileNotFoundError(f"No existing parent found for {path}")
+        current = parent
+    return current
+
+
 def execute_migration(
     project_root: Path,
     batch_root: Path,
@@ -113,7 +123,7 @@ def execute_migration(
             }
         )
 
-    usage = shutil.disk_usage(batch_root.parent if batch_root.parent.exists() else batch_root.parent.parent)
+    usage = shutil.disk_usage(_existing_parent(batch_root.parent))
     required = sum(entry["bytes"] for entry in entries if entry["status"] == "planned")
     if usage.free < required:
         raise OSError(f"Insufficient archive disk space: required={required}, free={usage.free}")
@@ -163,9 +173,16 @@ def main() -> int:
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--archive-root", type=Path, default=Path(r"E:\agent\test"))
     parser.add_argument("--timestamp", default=datetime.now().strftime("%Y%m%d-%H%M%S"))
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="Move only this relative source path. Can be provided multiple times.",
+    )
     args = parser.parse_args()
     batch = args.archive_root / args.project_root.resolve().name / args.timestamp
-    manifest = execute_migration(args.project_root, batch)
+    only_sources = {Path(item) for item in args.only} if args.only else None
+    manifest = execute_migration(args.project_root, batch, only_sources=only_sources)
     print(f"Migration completed. Manifest: {manifest}")
     return 0
 
