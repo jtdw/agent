@@ -12,6 +12,7 @@ import { getOverlayVisibilityPlan, type LayerOpacity, type LayerVisibility } fro
 import type { MapCommand } from './mapCommands';
 import { drawGeoJson, type DrawPoint, type DrawTool, measurementLabel } from './mapGeometry';
 type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
+export type ResultLayerUiState = Record<string, { visible?: boolean; opacity?: number }>;
 
 const fallbackCenter: [number, number] = [116.18, 41.78];
 const fallbackBounds: [number, number, number, number] = [115.5, 41.5, 116.5, 42.5];
@@ -382,15 +383,16 @@ function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLaye
   (map as unknown as Record<string, unknown>)[key] = true;
 }
 
-function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, opacity: LayerOpacity, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
+function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, opacity: LayerOpacity, resultLayerState: ResultLayerUiState = {}, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
   if (!map.isStyleLoaded()) return;
   const activeIds = new Set<string>();
   layers.forEach((layer, index) => {
     const id = `result_${String(layer.id || index).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
     activeIds.add(id);
     const kind = (layer.kind || 'boundary') as keyof LayerVisibility;
-    const visible = visibility[kind] ?? true;
-    const layerOpacity = opacity[(layer.kind || 'boundary') as keyof LayerOpacity] ?? 1;
+    const itemState = resultLayerState[layer.id] || {};
+    const visible = (visibility[kind] ?? true) && (itemState.visible ?? true);
+    const layerOpacity = Math.max(0, Math.min(1, (opacity[(layer.kind || 'boundary') as keyof LayerOpacity] ?? 1) * (itemState.opacity ?? 1)));
     const color = layerColor(layer.kind || '', index);
 
     if (layer.type === 'raster' && layer.preview_url && layer.bounds?.length === 4) {
@@ -449,6 +451,11 @@ function fitToResultLayers(map: MapLibreMap, layers: ResultMapLayer[]) {
   return safeFitBounds(map, bounds, 11);
 }
 
+function fitToResultLayer(map: MapLibreMap, layers: ResultMapLayer[], layerId: string) {
+  const layer = layers.find((item) => item.id === layerId || item.artifact_id === layerId || item.dataset_name === layerId);
+  return safeFitBounds(map, layer?.bounds, 13);
+}
+
 export function MapStage({
   theme,
   basemap,
@@ -457,8 +464,11 @@ export function MapStage({
   setDrawMode,
   layerVisibility,
   layerOpacity,
+  resultLayerState = {},
+  refreshToken = 0,
   mapCommand,
-  onChatContextChange
+  onChatContextChange,
+  onResultLayersChange
 }: {
   theme: 'light' | 'dark';
   basemap: Basemap;
@@ -467,8 +477,11 @@ export function MapStage({
   setDrawMode: (value: boolean) => void;
   layerVisibility: LayerVisibility;
   layerOpacity: LayerOpacity;
+  resultLayerState?: ResultLayerUiState;
+  refreshToken?: number;
   mapCommand?: MapCommand | null;
   onChatContextChange?: (patch: Partial<ChatContextPayload>) => void;
+  onResultLayersChange?: (layers: ResultMapLayer[]) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -494,7 +507,7 @@ export function MapStage({
   const refreshMapOverlays = (map: MapLibreMap, collection: StationCollection | null, fit: boolean = false) => {
     if (!map.isStyleLoaded()) return;
     try {
-      setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+      setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, resultLayerState, onChatContextChange);
       setStationLayer(map, collection?.stations || [], onChatContextChange);
       setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
       raiseStationLayers(map);
@@ -577,6 +590,10 @@ export function MapStage({
   }, [userId]);
 
   useEffect(() => {
+    onResultLayersChange?.(resultLayers);
+  }, [resultLayers, onResultLayersChange]);
+
+  useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
@@ -626,7 +643,7 @@ export function MapStage({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [userId]);
+  }, [userId, refreshToken]);
 
   const style = useMemo(() => {
     if (tdtConfig?.enabled && tdtConfig.tile_url_templates) return buildTiandituStyle(tdtConfig, basemap, theme);
@@ -711,7 +728,7 @@ export function MapStage({
       refreshMapOverlaysWhenReady(false);
       return;
     }
-    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, resultLayerState, onChatContextChange);
     setStationLayer(map, stationCollection?.stations || [], onChatContextChange);
     raiseStationLayers(map);
     raiseDrawLayers(map);
@@ -720,7 +737,7 @@ export function MapStage({
     if (resultLayers.length && !hasFitRef.current && fitToResultLayers(map, resultLayers)) {
       hasFitRef.current = true;
     }
-  }, [resultLayers, layerVisibility, layerOpacity, stationCollection]);
+  }, [resultLayers, layerVisibility, layerOpacity, resultLayerState, stationCollection]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -747,9 +764,9 @@ export function MapStage({
     raiseStationLayers(map);
     raiseDrawLayers(map);
     applyOverlayVisibility(map);
-    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, resultLayerState, onChatContextChange);
     publishMapDebugState(map, stationCollection, resultLayers);
-  }, [layerVisibility, layerOpacity]);
+  }, [layerVisibility, layerOpacity, resultLayerState]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -799,10 +816,14 @@ export function MapStage({
       }
       return;
     }
+    if (mapCommand.type === 'fitLayer' && mapCommand.layerId) {
+      fitToResultLayer(map, resultLayers, mapCommand.layerId);
+      return;
+    }
     if (mapCommand.type === 'clearDraw') {
       setDrawPoints([]);
     }
-  }, [mapCommand]);
+  }, [mapCommand, resultLayers]);
 
   useEffect(() => {
     if (!containerRef.current || !mapRef.current) return;
@@ -818,7 +839,7 @@ export function MapStage({
   }, []);
 
   const stationCount = stationCollection?.count || 0;
-  const visibleResultLayers = resultLayers.filter((layer) => layerVisibility[(layer.kind || 'boundary') as keyof LayerVisibility] ?? true);
+  const visibleResultLayers = resultLayers.filter((layer) => (layerVisibility[(layer.kind || 'boundary') as keyof LayerVisibility] ?? true) && (resultLayerState[layer.id]?.visible ?? true));
   const drawSummary = measurementLabel(drawPoints, drawTool);
 
   const exportDrawGeoJson = () => {

@@ -18,6 +18,8 @@ const geometry = await loadTs('src/components/mapGeometry.ts');
 const commands = await loadTs('src/components/mapTextCommands.ts');
 const mapStageSource = await readFile('src/components/MapStage.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
+const artifactCardSource = await readFile('src/components/ArtifactDownloadCard.tsx', 'utf8');
+const apiSource = await readFile('src/lib/api.ts', 'utf8');
 
 assert.equal(Math.round(geometry.distanceMeters([0, 0], [0, 1])), 111195);
 assert.equal(geometry.drawGeoJson([[0, 0], [0, 1], [1, 1]], 'polygon').features.length, 5);
@@ -31,12 +33,18 @@ assert.match(mapStageSource, /function safeFitBounds/);
 assert.match(mapStageSource, /clientWidth|offsetWidth/);
 assert.match(mapStageSource, /Number\.isFinite/);
 assert.match(mapStageSource, /function mapLayerSignature/, 'MapStage must compute stable layer signatures before updating polled layers');
+assert.match(mapStageSource, /onResultLayersChange/, 'MapStage must publish result map layers to the surrounding UI');
+assert.match(mapStageSource, /fitToResultLayer/, 'MapStage must support fitting to one artifact-level result layer');
 assert.match(
   mapStageSource,
   /resultLayerSignatureRef\.current[\s\S]*?setResultLayers\(layers\);/,
   'MapStage must compare the polled layer signature before replacing result layers'
 );
 assert.equal(mapStageSource.includes('right: 430'), false);
+assert.match(layerPanelSource, /resultLayers/, 'LayerPanel must render artifact-level result layers');
+assert.match(layerPanelSource, /LayerMetadata/, 'LayerPanel must expose result layer metadata');
+assert.match(artifactCardSource, /onShowOnMap/, 'Artifact cards must expose a show-on-map action for map-ready artifacts');
+assert.match(apiSource, /refreshMapLayer/, 'Frontend API must expose map layer refresh');
 assert.equal(layerPanelSource.includes('图层透明度'), false);
 assert.equal(layerPanelSource.includes('图例'), false);
 assert.match(geometry.measurementLabel([[0, 0], [0, 1]], 'line'), /^长度/);

@@ -120,6 +120,7 @@ export type ChatArtifact = {
   preview_available?: boolean;
   download_url: string;
   metadata_url?: string;
+  meta?: Record<string, unknown>;
 };
 
 export type ChatSession = {
@@ -193,6 +194,9 @@ export type ResultMapLayer = {
   name: string;
   type: 'vector' | 'raster';
   kind: 'dem' | 'boundary' | 'soil' | string;
+  dataset_name?: string;
+  artifact_id?: string;
+  map_ready?: boolean;
   bounds?: [number, number, number, number];
   feature_count?: number;
   geojson?: GeoJSON.FeatureCollection;
@@ -428,7 +432,13 @@ export const api = {
   },
   async mapLayers(user_id?: string) {
     const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
-    return request<{ layers: ResultMapLayer[] }>(`/api/map/layers${q}`);
+    return request<{ layers: ResultMapLayer[]; diagnostics?: Array<Record<string, unknown>> }>(`/api/map/layers${q}`);
+  },
+  async refreshMapLayer(payload: { user_id?: string; artifact_id?: string; dataset_name?: string }) {
+    return request<{ map_ready: boolean; artifact_id?: string; dataset_name?: string; map_layer_id?: string; layer?: ResultMapLayer }>('/api/map/layers/refresh', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
   },
   async login(email: string, password: string) {
     return request<AuthSession>('/api/auth/login', {
@@ -602,7 +612,7 @@ export const api = {
     region?: string;
     start_date?: string;
     end_date?: string;
-    account_mode: 'own' | 'platform';
+    account_mode: 'own' | 'platform' | 'auto';
     request_text?: string;
     output_name?: string;
   }) {
@@ -618,7 +628,7 @@ export const api = {
     region?: string;
     start_date?: string;
     end_date?: string;
-    account_mode: 'own' | 'platform';
+    account_mode: 'own' | 'platform' | 'auto';
     request_text?: string;
     max_pages?: number;
   }) {
@@ -642,7 +652,7 @@ export const api = {
     const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
     return request<{ jobs: DownloadJob[] }>(`/api/downloads/jobs${q}`);
   },
-  async loginHealth(user_id: string, source_key = 'gscloud', account_mode: 'own' | 'platform' = 'platform') {
+  async loginHealth(user_id: string, source_key = 'gscloud', account_mode: 'own' | 'platform' | 'auto' = 'platform') {
     const q = `?user_id=${encodeURIComponent(user_id)}&source_key=${encodeURIComponent(source_key)}&account_mode=${encodeURIComponent(account_mode)}`;
     return request<LoginHealthResponse>(`/api/downloads/login-health${q}`);
   },

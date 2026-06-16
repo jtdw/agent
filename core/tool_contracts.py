@@ -31,6 +31,7 @@ class ArtifactInfo:
     description: str = ""
     quality_status: str = "unchecked"
     preview_available: bool = False
+    meta: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
 
     def to_dict(self) -> dict[str, Any]:

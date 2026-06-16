@@ -813,7 +813,12 @@ class GISAgent:
         if not user_id:
             return json.dumps({"ok": False, "error": "没有识别到用户邮箱或 user_id。示例：为 test@example.com 提交..."}, ensure_ascii=False, indent=2)
         region = "四川省" if "四川" in text else ""
-        account_mode = "platform" if "平台账号" in text else "own"
+        if "平台账号" in text or "账号池" in text:
+            account_mode = "platform"
+        elif "自己的账号" in text or "个人账号" in text or "自有账号" in text:
+            account_mode = "own"
+        else:
+            account_mode = "auto"
         output_name = self._extract_output_name(text, default=("sichuan_dem" if region == "四川省" else "gscloud_dem"))
         max_tiles = self._extract_max_tiles(text, default=0)
 

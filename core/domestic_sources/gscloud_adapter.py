@@ -453,6 +453,7 @@ def _postprocess_gscloud_files(
         ).to_dict()
         result["downloads"] = [str(p) for p in downloaded]
         result["download_count"] = 1
+        result["dataset_names"] = [result["dataset_name"]] if result.get("dataset_name") else []
         return result
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -480,7 +481,7 @@ def _postprocess_gscloud_files(
     zip_path = manager.derived_dir / f"{base}_gscloud_batch.zip"
     zip_result_folder(bundle_dir, zip_path)
     manager.log_operation("地理空间数据云批量下载完成", f"{len(downloaded)} 个文件 -> {zip_path}", "download")
-    return DomesticDownloadResult(
+    result = DomesticDownloadResult(
         source_key=source.key,
         downloaded_path=bundle_dir,
         dataset_name=imported[0].get("dataset_name") if imported else None,
@@ -490,6 +491,8 @@ def _postprocess_gscloud_files(
         message="已捕获多个地理空间数据云下载文件，并完成解压/入库/打包。",
         meta={"items": imported, "download_count": len(downloaded)},
     ).to_dict()
+    result["dataset_names"] = [str(item.get("dataset_name")) for item in imported if item.get("dataset_name")]
+    return result
 
 
 def _fill_data_id_filter(page, tile_id: str) -> bool:
@@ -633,6 +636,21 @@ REGION_BBOX_PRESETS: dict[str, tuple[float, float, float, float]] = {
 }
 
 
+REGION_BBOX_PRESETS.update(
+    {
+        "闪电河": (115.2, 41.1, 116.6, 42.4),
+        "闪电河流域": (115.2, 41.1, 116.6, 42.4),
+        "shandianhe": (115.2, 41.1, 116.6, 42.4),
+        "shandian river": (115.2, 41.1, 116.6, 42.4),
+    }
+)
+
+
+def _is_shandianhe_region(region: str) -> bool:
+    text = str(region or "").strip().lower()
+    return "闪电河" in str(region or "") or "shandian" in text
+
+
 def _format_astgtm_tile_id(lat_floor: int, lon_floor: int) -> str:
     lat_prefix = "N" if lat_floor >= 0 else "S"
     lon_prefix = "E" if lon_floor >= 0 else "W"
@@ -666,6 +684,9 @@ def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", regio
     # 常用默认名
     candidates.extend(["sichuan_boundary", "四川边界", "四川省边界"])
 
+    if _is_shandianhe_region(region):
+        candidates.extend(["shandianhe_basin_boundary", "shandianhe_boundary", "闪电河流域边界", "闪电河边界"])
+
     seen: set[str] = set()
     for name in candidates:
         if not name or name in seen:
@@ -682,6 +703,18 @@ def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", regio
             return gdf, name, "workspace_vector"
         except Exception:
             continue
+    if _is_shandianhe_region(region):
+        try:
+            dataset_name = manager.load_path("lib_shandianhe_basin_boundary_full", name="shandianhe_basin_boundary")
+            gdf = manager.get_vector(dataset_name)
+            if not gdf.empty:
+                if gdf.crs is None:
+                    gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+                else:
+                    gdf = gdf.to_crs("EPSG:4326")
+                return gdf, dataset_name, "local_library_boundary"
+        except Exception:
+            pass
     try:
         gdf, source_name, source_type = extract_local_admin_boundary(manager, region)
         if gdf is not None and not gdf.empty:

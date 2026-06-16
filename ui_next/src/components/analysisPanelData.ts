@@ -8,8 +8,15 @@ export type AnalysisMetricRow = {
   model?: string;
   predicted?: string;
   R?: number | string | null;
+  R2?: number | string | null;
   RMSE?: number | string | null;
+  MAE?: number | string | null;
   NSE?: number | string | null;
+  Accuracy?: number | string | null;
+  Precision?: number | string | null;
+  Recall?: number | string | null;
+  F1?: number | string | null;
+  AUC?: number | string | null;
   [key: string]: unknown;
 };
 
@@ -29,6 +36,7 @@ export type AnalysisPanelView = {
   cards: Array<{ label: string; value: string }>;
   chartData: ModelMetricDatum[];
   downloads: AnalysisDownload[];
+  featureImportance: Array<{ feature: string; importance: number | null }>;
   recommendations: string[];
   steps: Array<{ name: string; status: string; summary: string }>;
 };
@@ -94,9 +102,9 @@ function chartRows(rows: AnalysisMetricRow[]): ModelMetricDatum[] {
     .map((row) => ({
       name: modelName(row),
       modelResultId: String(row.model_result_id || ''),
-      r: num(row.R) ?? 0,
+      r: num(row.R2) ?? num(row.R) ?? num(row.Accuracy) ?? 0,
       rmse: num(row.RMSE) ?? 0,
-      nse: num(row.NSE)
+      nse: num(row.NSE) ?? num(row.F1)
     }))
     .filter((row) => row.r || row.rmse || row.nse !== null);
 }
@@ -156,20 +164,59 @@ function recommendations(dashboard: unknown, resultPanel?: ResultPanel | null): 
     .slice(0, 5);
 }
 
+function metricCards(row?: AnalysisMetricRow): Array<{ label: string; value: string }> {
+  if (!row) return [];
+  const classification = num(row.Accuracy) !== null || num(row.F1) !== null;
+  if (classification) {
+    return [
+      { label: 'Accuracy', value: fmt(num(row.Accuracy)) },
+      { label: 'F1', value: fmt(num(row.F1)) },
+      { label: 'AUC', value: fmt(num(row.AUC)) }
+    ];
+  }
+  if (num(row.R2) === null && num(row.MAE) === null && num(row.R) !== null) {
+    return [
+      { label: 'R', value: fmt(num(row.R)) },
+      { label: 'RMSE', value: fmt(num(row.RMSE)) },
+      { label: 'NSE', value: fmt(num(row.NSE)) }
+    ];
+  }
+  return [
+    { label: 'R2', value: fmt(num(row.R2) ?? num(row.R)) },
+    { label: 'RMSE', value: fmt(num(row.RMSE)) },
+    { label: 'MAE', value: fmt(num(row.MAE) ?? num(row.NSE)) }
+  ];
+}
+
+function featureImportance(dashboard: unknown): Array<{ feature: string; importance: number | null }> {
+  const modelResults = asArray(asRecord(dashboard).model_results);
+  const latest = modelResults[0];
+  const diagnostics = asRecord(latest?.diagnostics);
+  const rows = asArray(diagnostics.top_features);
+  return rows
+    .map((item) => ({
+      feature: String(item.feature || item.encoded_feature || ''),
+      importance: num(item.importance)
+    }))
+    .filter((item) => item.feature)
+    .slice(0, 8);
+}
+
 export function buildAnalysisPanelView(dashboard: unknown, resultPanel?: ResultPanel | null): AnalysisPanelView {
   const root = asRecord(dashboard);
   const latest = asRecord(root.latest_pipeline);
-  const rows = chartRows(metricRows(root));
+  const rawRows = metricRows(root);
+  const rows = chartRows(rawRows);
   const bestModel = rows.length ? bestByRmse(rows) : undefined;
-  const cards = bestModel ? [
-    { label: 'R', value: fmt(num(bestModel.r)) },
-    { label: 'RMSE', value: fmt(num(bestModel.rmse)) },
-    { label: 'NSE', value: fmt(num(bestModel.nse)) }
-  ] : [];
+  const bestRawRow = bestModel
+    ? rawRows.find((row) => (bestModel.modelResultId ? String(row.model_result_id || '') === bestModel.modelResultId : false) || modelName(row) === bestModel.name)
+    : rawRows[0];
+  const cards = metricCards(bestRawRow);
   const files = downloads(root, resultPanel);
   const steps = pipelineSteps(root);
   const advice = recommendations(root, resultPanel);
-  const hasResults = Boolean(resultPanel?.has_results || rows.length || files.length || steps.length || latest.run_id || advice.length);
+  const importance = featureImportance(root);
+  const hasResults = Boolean(resultPanel?.has_results || rows.length || files.length || steps.length || latest.run_id || advice.length || importance.length);
   if (resultPanel?.title) latest.pipeline_name = resultPanel.title;
 
   return {
@@ -181,6 +228,7 @@ export function buildAnalysisPanelView(dashboard: unknown, resultPanel?: ResultP
     cards,
     chartData: rows,
     downloads: files,
+    featureImportance: importance,
     recommendations: advice,
     steps
   };

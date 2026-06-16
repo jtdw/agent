@@ -1,13 +1,14 @@
 import { motion } from 'framer-motion';
-import { BarChart3, Database, Download, FileArchive, Layers3, Map, PanelRightClose, RotateCcw, ScanSearch, Trash2, XCircle } from 'lucide-react';
+import { BarChart3, Database, Download, FileArchive, Info, Layers3, Map, PanelRightClose, RotateCcw, ScanSearch, Trash2, XCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { GlassCard } from './GlassCard';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { ResearchWorkflowPanel } from './ResearchWorkflowPanel';
 import { SegmentedControl } from './SegmentedControl';
-import { CommercialUser, DownloadJob, WorkspaceDashboard, api } from '@/lib/api';
+import { CommercialUser, DownloadJob, ResultMapLayer, WorkspaceDashboard, api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import type { LayerOpacity, LayerVisibility } from './mapLayerPolicy';
+import type { ResultLayerUiState } from './MapStage';
 import type { WorkflowAction } from './researchWorkflow';
 
 type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
@@ -79,6 +80,47 @@ function hasLayerOpacity(id: string): id is keyof LayerOpacity {
   return id === 'stations' || id === 'boundary' || id === 'dem' || id === 'soil' || id === 'draw';
 }
 
+function formatBounds(bounds?: [number, number, number, number]) {
+  if (!bounds) return '未提供';
+  return bounds.map((value) => Number(value).toFixed(5)).join(', ');
+}
+
+function LayerMetadata({ layer, onClose }: { layer: ResultMapLayer; onClose: () => void }) {
+  const meta = layer.meta || {};
+  const rows = [
+    ['图层 ID', layer.id],
+    ['数据集', layer.dataset_name || String(meta.dataset_name || '')],
+    ['Artifact', layer.artifact_id || String(meta.artifact_id || '')],
+    ['类型', `${layer.type} / ${layer.kind || '--'}`],
+    ['CRS', String(meta.crs || '--')],
+    ['范围', formatBounds(layer.bounds)],
+    ['要素数', String(layer.feature_count || meta.feature_count || '--')],
+    ['波段数', String(meta.band_count || '--')],
+    ['尺寸', meta.width && meta.height ? `${meta.width} x ${meta.height}` : '--']
+  ].filter(([, value]) => value && value !== '--');
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/35 px-4 backdrop-blur-sm" onClick={onClose}>
+      <div className="w-full max-w-md rounded-[22px] border border-white/35 bg-white/90 p-4 shadow-glass dark:border-white/10 dark:bg-slate-950/90" onClick={(event) => event.stopPropagation()}>
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-black text-slate-800 dark:text-slate-100">{layer.name}</div>
+            <div className="mt-1 text-xs font-semibold text-slate-500 dark:text-slate-400">地图图层元信息</div>
+          </div>
+          <button type="button" onClick={onClose} className="glass-button h-9 w-9 shrink-0 rounded-full p-0" title="关闭"><XCircle size={16} /></button>
+        </div>
+        <div className="space-y-2 text-xs">
+          {rows.map(([label, value]) => (
+            <div key={label} className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 rounded-2xl bg-slate-100/70 px-3 py-2 dark:bg-white/5">
+              <span className="font-black text-slate-500 dark:text-slate-400">{label}</span>
+              <span className="break-words font-semibold text-slate-700 dark:text-slate-200">{value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LayerPanel({
   user,
   basemap,
@@ -87,6 +129,11 @@ export function LayerPanel({
   layerVisibility,
   onLayerToggle,
   onLayerLocate,
+  resultLayers = [],
+  resultLayerState = {},
+  onResultLayerToggle,
+  onResultLayerOpacityChange,
+  onResultLayerLocate,
   onRunWorkflowAction
 }: {
   user: CommercialUser | null;
@@ -96,6 +143,11 @@ export function LayerPanel({
   layerVisibility: LayerVisibility;
   onLayerToggle: (id: keyof LayerVisibility) => void;
   onLayerLocate: (id: keyof LayerOpacity) => void;
+  resultLayers?: ResultMapLayer[];
+  resultLayerState?: ResultLayerUiState;
+  onResultLayerToggle?: (layerId: string) => void;
+  onResultLayerOpacityChange?: (layerId: string, opacity: number) => void;
+  onResultLayerLocate?: (layerId: string) => void;
   onRunWorkflowAction: (action: WorkflowAction) => void;
 }) {
   const [side, setSide] = useState<'right' | 'left'>('right');
@@ -107,6 +159,7 @@ export function LayerPanel({
   const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const [layers, setLayers] = useState<LayerItem[]>(initialLayers);
+  const [metadataLayer, setMetadataLayer] = useState<ResultMapLayer | null>(null);
   const completedSeenRef = useRef<Set<string>>(new Set());
   const jobsInitializedRef = useRef(false);
   const userId = user?.user_id || '';
@@ -495,6 +548,49 @@ export function LayerPanel({
             })}
           </div>
 
+          {resultLayers.length > 0 && (
+            <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2 text-sm font-black"><Layers3 size={16} strokeWidth={1.5} /> 结果图层</div>
+                <span className="shrink-0 rounded-full bg-white/50 px-2 py-1 text-[11px] font-black text-slate-500 dark:bg-white/10 dark:text-slate-300">{resultLayers.length}</span>
+              </div>
+              <div className="space-y-2">
+                {resultLayers.map((layer) => {
+                  const state = resultLayerState[layer.id] || {};
+                  const active = state.visible ?? true;
+                  const opacity = state.opacity ?? 1;
+                  return (
+                    <div key={layer.id} className={cn('rounded-2xl border px-3 py-2 transition-colors', active ? 'border-cyan-glow/25 bg-cyan-glow/10' : 'border-white/25 bg-white/20 dark:border-white/10 dark:bg-white/5')}>
+                      <div className="flex items-center gap-2">
+                        <button type="button" onClick={() => onResultLayerToggle?.(layer.id)} className={cn('h-3 w-3 shrink-0 rounded-full border', active ? 'border-cyan-glow bg-cyan-glow' : 'border-slate-300 bg-transparent')} aria-label="切换结果图层" />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-xs font-black text-slate-700 dark:text-slate-100">{layer.name}</div>
+                          <div className="mt-0.5 truncate text-[11px] font-semibold text-slate-500 dark:text-slate-400">{layer.type} · {layer.kind || 'layer'}{layer.feature_count ? ` · ${layer.feature_count} 要素` : ''}</div>
+                        </div>
+                        <button type="button" onClick={() => onResultLayerLocate?.(layer.id)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition-colors hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="定位到图层">
+                          <Map size={14} strokeWidth={1.7} />
+                        </button>
+                        <button type="button" onClick={() => setMetadataLayer(layer)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition-colors hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="查看元信息">
+                          <Info size={14} strokeWidth={1.7} />
+                        </button>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.1}
+                        max={1}
+                        step={0.05}
+                        value={opacity}
+                        onChange={(event) => onResultLayerOpacityChange?.(layer.id, Number(event.target.value))}
+                        className="mt-2 w-full accent-cyan-500"
+                        aria-label="结果透明度"
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
             <div className="mb-2 flex items-center gap-2 text-sm font-black"><Database size={16} strokeWidth={1.5} /> 数据下载</div>
             <select
@@ -533,6 +629,7 @@ export function LayerPanel({
             </div>
           )}
         </div>
+        {metadataLayer && <LayerMetadata layer={metadataLayer} onClose={() => setMetadataLayer(null)} />}
       </GlassCard>
     </motion.aside>
   );

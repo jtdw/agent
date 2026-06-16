@@ -894,6 +894,15 @@ def _attach_tool_preconditions(plan: dict[str, Any]) -> None:
             required_geometry="Point when spatial_validation=True and dataset is vector",
             optional_inputs=["date_col", "split_date", "spatial_validation", "model hyperparameters"],
         ),
+        "generic_xgboost_workflow": ToolPrecondition(
+            name="generic_xgboost_workflow",
+            required_inputs=["dataset_name or sample_dataset_name/raster_names", "target_col or target_raster_name"],
+            required_dataset_type="table|vector|raster stack|sample+raster",
+            required_fields=["target_col", "feature_cols optional; inferred by default"],
+            required_crs="required for spatial sample/raster workflows",
+            required_geometry="Point/Polygon for sample+raster workflows",
+            optional_inputs=["mode", "task_type", "raster_names", "target_raster_name", "group_col", "split_method"],
+        ),
         "table_to_points": ToolPrecondition(
             name="table_to_points",
             required_inputs=["dataset_name", "x_col", "y_col", "crs", "output_name"],
@@ -958,6 +967,14 @@ def _attach_tool_preconditions(plan: dict[str, Any]) -> None:
             required_crs="required for both raster and vector",
             required_geometry="valid vector polygon or mask geometry",
             optional_inputs=[],
+        ),
+        "raster_mosaic": ToolPrecondition(
+            name="raster_mosaic",
+            required_inputs=["raster_names", "output_name"],
+            required_dataset_type="one or more rasters",
+            required_crs="required for all rasters; CRS must match unless reprojected first",
+            required_geometry="optional Polygon/MultiPolygon clip boundary",
+            optional_inputs=["vector_name", "method"],
         ),
         "raster_histogram": ToolPrecondition(
             name="raster_histogram",
@@ -1125,7 +1142,7 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     elif task_type == "modeling":
         plan.update(
             required_inputs=["dataset", "target column", "feature columns"],
-            recommended_tools=["profile_missing_values", "train_xgboost_fusion_model", "train_rf_fusion_model"],
+            recommended_tools=["profile_missing_values", "generic_xgboost_workflow", "train_xgboost_fusion_model", "train_rf_fusion_model"],
             execution_steps=[
                 f"检查 {dataset or '当前数据集'} 的缺失值和候选特征。",
                 "确认目标变量与特征列后训练模型。",
@@ -1154,6 +1171,8 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
                 "describe_dataset",
                 "vector_clip_by_vector",
                 "vector_overlay",
+                "raster_mosaic",
+                "clip_raster_by_vector",
                 "extract_raster_values_to_points",
                 "table_to_points",
             ],

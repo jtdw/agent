@@ -88,4 +88,40 @@ assert.equal(resultPanelView.downloads[0].label, 'metrics');
 assert.equal(resultPanelView.downloads[0].artifactId, 'artifact_metrics_001');
 assert.equal(resultPanelView.recommendations[0], 'check metrics');
 
+const genericRegressionView = analysis.buildAnalysisPanelView({
+  model_results: [
+    {
+      model_result_id: 'model_result_generic_xgb',
+      model: 'generic_xgboost',
+      output_prefix: 'generic_regression',
+      metrics_dataset: 'generic_regression_metrics',
+      metrics: { R2: 0.82, RMSE: 0.12, MAE: 0.08 },
+      diagnostics: {
+        top_features: [
+          { feature: 'ndvi', importance: 0.54 },
+          { feature: 'rainfall', importance: 0.31 }
+        ]
+      }
+    }
+  ],
+  artifacts: []
+});
+assert.deepEqual(genericRegressionView.cards.map((card) => [card.label, card.value]), [['R2', '0.820'], ['RMSE', '0.120'], ['MAE', '0.080']]);
+assert.equal(genericRegressionView.featureImportance.length, 2);
+assert.equal(genericRegressionView.featureImportance[0].feature, 'ndvi');
+
+const genericClassificationView = analysis.buildAnalysisPanelView({
+  model_results: [
+    {
+      model_result_id: 'model_result_generic_cls',
+      model: 'generic_xgboost',
+      output_prefix: 'generic_classification',
+      metrics_dataset: 'generic_classification_metrics',
+      metrics: { Accuracy: 0.9, Precision: 0.88, Recall: 0.86, F1: 0.87, AUC: 0.93 }
+    }
+  ],
+  artifacts: []
+});
+assert.deepEqual(genericClassificationView.cards.map((card) => [card.label, card.value]), [['Accuracy', '0.900'], ['F1', '0.870'], ['AUC', '0.930']]);
+
 console.log('analysis panel data tests passed');

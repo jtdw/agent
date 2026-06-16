@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from ..data_manager import DataManager
+from ..domestic_sources.raster_postprocess import standardize_raster_download_result
 from .service import CommercialService
 from ..domestic_sources.gscloud_adapter import (
     plan_aster_gdem_tiles,
@@ -56,6 +57,31 @@ def _resolve_storage_state_with_fallback(service: CommercialService, workdir: Pa
             if expected.exists():
                 return str(expected)
     return ""
+
+
+def _mosaic_loaded_tiles(
+    manager: DataManager,
+    result: dict[str, Any],
+    *,
+    output_name: str,
+    vector_name: str = "",
+) -> dict[str, Any]:
+    before_count = len([str(name) for name in result.get("dataset_names") or [] if str(name or "").strip()])
+    standardized = standardize_raster_download_result(
+        manager,
+        result,
+        output_name=output_name,
+        clip_vector=vector_name,
+        fail_on_mosaic_error=False,
+    )
+    action = (standardized.get("raster_standardization") or {}).get("action")
+    if action == "mosaicked":
+        standardized["message"] = (
+            f"已下载 {before_count} 个 DEM 分幅，并自动生成拼接"
+            + ("裁剪" if (standardized.get("raster_standardization") or {}).get("clip_vector") else "")
+            + "后的 GeoTIFF。"
+        )
+    return standardized
 
 
 def main() -> int:
@@ -135,12 +161,20 @@ def main() -> int:
             status_path=status_path,
         )
         result["tile_plan"] = {k: v for k, v in plan.items() if k != "records"}
+        result = _mosaic_loaded_tiles(
+            manager,
+            result,
+            output_name=output_name,
+            vector_name=str(plan.get("region_dataset") or ""),
+        )
+        if result.get("dataset_names") and result.get("mosaic_error"):
+            raise RuntimeError(f"DEM 分幅已下载，但自动拼接裁剪失败：{result.get('mosaic_error')}")
 
         service._update_job(job_id, status="running", progress=90, stage="packaging_result")
         done = service.run_job_with_result(job_id, result)
         current.update({
             "state": "COMPLETED",
-            "message": "已按数据标识精确搜索并自动下载目标分幅，完成解压、入库和打包。",
+            "message": "已按数据标识精确搜索并自动下载目标分幅，完成解压、入库、自动拼接裁剪和打包。",
             "result": result,
             "job": done,
             "updated_at": _now(),

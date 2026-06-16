@@ -47,7 +47,9 @@ class DownloadResumeService:
                 ),
             }
 
-        if not self.accounts.status(user_id).get("logged_in"):
+        account_mode = str(job.get("account_mode") or "").lower()
+        needs_customer_login = account_mode in {"own", "user", "user_account", "manual_cookie"}
+        if needs_customer_login and not self.accounts.status(user_id).get("logged_in"):
             self.commercial._update_job(job_id, status="waiting_login", stage="needs_gscloud_login_state")
             return {
                 "job": self.commercial.get_job(job_id),

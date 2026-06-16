@@ -41,6 +41,7 @@ from core.chat_response import attach_chat_state, build_chat_response
 from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 from core.api_utils import api_guard, resolve_child_path
 from core.local_library import LocalFileLibrary
+from core.map_layers import MapLayerService, dataset_map_kind
 from core.station_data import find_station_archives, parse_ismn_station_zip
 from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gscloud_download_intent
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
@@ -292,7 +293,7 @@ class DownloadIn(BaseModel):
     region: str = ""
     start_date: str = ""
     end_date: str = ""
-    account_mode: Literal["own", "platform"] = "own"
+    account_mode: Literal["own", "platform", "auto"] = "auto"
     request_text: str = ""
     output_name: str = ""
 
@@ -316,7 +317,7 @@ class DownloadPreflightIn(BaseModel):
     region: str = ""
     start_date: str = ""
     end_date: str = ""
-    account_mode: Literal["own", "platform"] = "own"
+    account_mode: Literal["own", "platform", "auto"] = "auto"
     request_text: str = ""
     max_pages: int = 1
     cloud_max: float = 30.0
@@ -331,6 +332,12 @@ class ExportIn(BaseModel):
 class WorkflowIn(BaseModel):
     user_id: str = ""
     run_now: bool = True
+
+
+class MapLayerRefreshIn(BaseModel):
+    user_id: str = ""
+    artifact_id: str = ""
+    dataset_name: str = ""
 
 
 class LocalLibraryImportIn(BaseModel):
@@ -672,9 +679,19 @@ def _gscloud_product_key_from_resource(value: str) -> str:
     return text
 
 
+def _gscloud_account_mode_from_prompt(prompt: str) -> str:
+    text = str(prompt or "")
+    if "平台账号" in text or "账号池" in text:
+        return "platform"
+    if "自己的账号" in text or "个人账号" in text or "自有账号" in text:
+        return "own"
+    return "auto"
+
+
 def _resolve_preflight_storage_state(body: DownloadPreflightIn) -> str:
-    mode = str(body.account_mode or "").lower()
     source_key = str(body.source_key or "gscloud").lower()
+    user = commercial_service.get_user(body.user_id)
+    mode = commercial_service.resolve_account_mode(user, body.account_mode, source_key)
     if mode == "own":
         return commercial_service.get_user_storage_state_path(body.user_id, source_key)
     check = commercial_service._select_platform_account(source_key)
@@ -685,103 +702,23 @@ def _resolve_preflight_storage_state(body: DownloadPreflightIn) -> str:
 
 
 def _dataset_map_kind(name: str, data_type: str) -> str:
-    text = f"{name} {data_type}".lower()
-    if any(token in text for token in ["soil", "moisture", "sm", "ndvi", "prediction", "result"]):
-        return "soil"
-    if any(token in text for token in ["dem", "elevation", "srtm", "aster", "terrain"]):
-        return "dem"
-    if any(token in text for token in ["boundary", "region", "aoi", "basin", "admin"]):
-        return "boundary"
-    return "boundary" if data_type == "vector" else "dem"
+    return dataset_map_kind(name, data_type)
 
 
 def _raster_preview_path(service: GISWorkspaceService, dataset_name: str) -> Path:
-    safe_name = _safe_layer_id(dataset_name)
-    return service.manager.temp_dir / "map_previews" / f"{safe_name}.png"
+    return MapLayerService(service).raster_preview_path(dataset_name)
 
 
 def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str, user_id: str = "") -> dict:
-    import numpy as np
-    import rasterio
-    from PIL import Image
-    from rasterio.warp import transform_bounds
-
-    raster_path = service.manager.get_raster_path(dataset_name)
-    preview_path = _raster_preview_path(service, dataset_name)
-    preview_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not preview_path.exists() or preview_path.stat().st_mtime < raster_path.stat().st_mtime:
-        with rasterio.open(raster_path) as src:
-            max_size = 1200
-            scale = max(src.width / max_size, src.height / max_size, 1)
-            out_width = max(1, int(src.width / scale))
-            out_height = max(1, int(src.height / scale))
-            data = src.read(1, out_shape=(out_height, out_width), masked=True)
-            masked = np.ma.asarray(data)
-            arr = np.asarray(masked.data, dtype="float32")
-            mask = np.ma.getmaskarray(masked)
-            if mask.any():
-                arr[mask] = np.nan
-            valid = np.isfinite(arr)
-            rgba = np.zeros((out_height, out_width, 4), dtype=np.uint8)
-            if valid.any():
-                lo, hi = np.nanpercentile(arr[valid], [2, 98])
-                if hi <= lo:
-                    hi = lo + 1
-                norm = np.clip((arr - lo) / (hi - lo), 0, 1)
-                norm = np.where(valid, norm, 0)
-                rgba[..., 0] = (32 + 210 * norm).astype(np.uint8)
-                rgba[..., 1] = (96 + 120 * norm).astype(np.uint8)
-                rgba[..., 2] = (180 - 140 * norm).astype(np.uint8)
-                rgba[..., 3] = np.where(valid, 190, 0).astype(np.uint8)
-            Image.fromarray(rgba, mode="RGBA").save(preview_path)
-
-    with rasterio.open(raster_path) as src:
-        bounds = tuple(src.bounds)
-        if src.crs:
-            bounds = transform_bounds(src.crs, "EPSG:4326", *bounds, densify_pts=21)
-    params = {"dataset_name": dataset_name}
-    if str(user_id or "").strip():
-        params["user_id"] = _safe_key(user_id)
-    return {
-        "preview_path": str(preview_path),
-        "preview_url": f"/api/map/raster-preview?{urlencode(params)}",
-        "bounds": [float(v) for v in bounds],
-    }
+    return MapLayerService(service).ensure_raster_preview(dataset_name, user_id=user_id)
 
 
 def _read_vector_for_map(path: Path):
-    import geopandas as gpd
-
-    if path.suffix.lower() == ".zip":
-        with ZipFile(path) as archive:
-            shp_names = [name for name in archive.namelist() if name.lower().endswith(".shp")]
-            if not shp_names:
-                raise FileNotFoundError(f"zip archive has no shapefile: {path}")
-            shp_name = sorted(shp_names, key=lambda item: ("/" in item, item))[0]
-            with tempfile.TemporaryDirectory(prefix="gis-agent-map-vector-") as temp_dir:
-                safe_extract_zip(archive, Path(temp_dir))
-                return gpd.read_file(Path(temp_dir) / shp_name)
-    return gpd.read_file(path)
+    return MapLayerService(workspace_for("anonymous")).read_vector_for_map(path)
 
 
 def _vector_map_layer(name: str, gdf, *, layer_id: str = "", kind: str = "", meta: dict | None = None) -> dict | None:
-    if gdf.empty:
-        return None
-    if gdf.crs:
-        gdf = gdf.to_crs("EPSG:4326")
-    if len(gdf) > 2000:
-        gdf = gdf.head(2000)
-    return {
-        "id": layer_id or _safe_layer_id(name),
-        "name": name,
-        "type": "vector",
-        "kind": kind or _dataset_map_kind(name, "vector"),
-        "bounds": [float(v) for v in gdf.total_bounds.tolist()],
-        "feature_count": int(len(gdf)),
-        "geojson": json.loads(gdf.to_json()),
-        "meta": meta or {},
-    }
+    return MapLayerService(workspace_for("anonymous")).vector_map_layer(name, gdf, layer_id=layer_id, kind=kind, meta=meta)
 
 
 def _local_library_boundary_layer() -> dict | None:
@@ -826,36 +763,16 @@ def _dedupe_boundary_layers(layers: list[dict]) -> list[dict]:
 
 
 def _workspace_map_layers(service: GISWorkspaceService, user_id: str = "") -> dict:
-    layers: list[dict] = []
-    has_boundary = False
-    for item in service.manager.list_datasets():
-        name = str(item.get("name") or "")
-        data_type = str(item.get("type") or "")
-        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-        if data_type == "vector":
-            gdf = service.manager.get_vector(name)
-            layer = _vector_map_layer(name, gdf, kind=_dataset_map_kind(name, data_type), meta=meta)
-            if not layer:
-                continue
-            layers.append(layer)
-            has_boundary = has_boundary or layer.get("kind") == "boundary"
-        elif data_type == "raster":
-            preview = _ensure_raster_preview(service, name, user_id=user_id)
-            layers.append({
-                "id": _safe_layer_id(name),
-                "name": name,
-                "type": "raster",
-                "kind": _dataset_map_kind(name, data_type),
-                "bounds": preview["bounds"],
-                "preview_url": preview["preview_url"],
-                "meta": meta,
-            })
+    payload = MapLayerService(service).workspace_layers(user_id=user_id)
+    layers: list[dict] = list(payload.get("layers") or [])
+    has_boundary = any(layer.get("kind") == "boundary" for layer in layers)
     if not has_boundary:
         fallback = _local_library_boundary_layer()
         if fallback:
             layers.insert(0, fallback)
     layers = _dedupe_boundary_layers(layers)
-    return {"layers": layers}
+    payload["layers"] = layers
+    return payload
 
 
 app.include_router(
@@ -965,6 +882,23 @@ def map_layers(request: Request, user_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
         return _workspace_map_layers(workspace_for(authorized_user_id), user_id=authorized_user_id)
+
+    return guard(run)
+
+
+@app.post("/api/map/layers/refresh")
+def refresh_map_layer(body: MapLayerRefreshIn, request: Request):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, body.user_id)
+        service = workspace_for(authorized_user_id)
+        if body.artifact_id:
+            return MapLayerService(service).refresh_artifact(body.artifact_id, user_id=authorized_user_id)
+        if body.dataset_name:
+            layer = MapLayerService(service).dataset_layer({"name": body.dataset_name, "type": service.manager.get(body.dataset_name).data_type, "meta": service.manager.get(body.dataset_name).meta}, user_id=authorized_user_id)
+            if not layer:
+                raise FileNotFoundError(f"map layer not found: {body.dataset_name}")
+            return {"dataset_name": body.dataset_name, "map_layer_id": layer["id"], "map_ready": True, "layer": layer}
+        raise ValueError("artifact_id or dataset_name is required")
 
     return guard(run)
 
@@ -1308,7 +1242,7 @@ def _submit_direct_gscloud_modev1f_from_chat(user_id: str, prompt: str) -> dict:
         }
 
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "modev1f_evi")
     year = _extract_year_from_prompt(prompt)
     max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
@@ -1321,6 +1255,7 @@ def _submit_direct_gscloud_modev1f_from_chat(user_id: str, prompt: str) -> dict:
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     state_path = ""
     try:
@@ -1403,7 +1338,7 @@ def _submit_direct_gscloud_mod021km_from_chat(user_id: str, prompt: str) -> dict
         }
 
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "mod021km_reflectance")
     year = _extract_year_from_prompt(prompt)
     max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
@@ -1416,6 +1351,7 @@ def _submit_direct_gscloud_mod021km_from_chat(user_id: str, prompt: str) -> dict
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     state_path = ""
     try:
@@ -1507,7 +1443,7 @@ def _submit_direct_gscloud_sentinel2_from_chat(user_id: str, prompt: str) -> dic
         }
 
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "sentinel2_msi")
     year = _extract_year_from_prompt(prompt)
     max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
@@ -1521,6 +1457,7 @@ def _submit_direct_gscloud_sentinel2_from_chat(user_id: str, prompt: str) -> dic
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     state_path = ""
     try:
@@ -1586,7 +1523,7 @@ def _submit_direct_gscloud_modl1d_from_chat(user_id: str, prompt: str) -> dict:
         }
 
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "modl1d_lst")
     year = _extract_year_from_prompt(prompt)
     max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
@@ -1600,6 +1537,7 @@ def _submit_direct_gscloud_modl1d_from_chat(user_id: str, prompt: str) -> dict:
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     state_path = ""
     try:
@@ -1665,7 +1603,7 @@ def _submit_direct_gscloud_modnd1d_from_chat(user_id: str, prompt: str) -> dict:
         }
 
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "modnd1d_ndvi")
     year = _extract_year_from_prompt(prompt)
     max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
@@ -1679,6 +1617,7 @@ def _submit_direct_gscloud_modnd1d_from_chat(user_id: str, prompt: str) -> dict:
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     state_path = ""
     try:
@@ -1744,7 +1683,7 @@ def _submit_direct_gscloud_landsat8_from_chat(user_id: str, prompt: str) -> dict
         }
 
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "landsat8")
     year = _extract_year_from_prompt(prompt)
     cloud_max = _extract_cloud_max_from_prompt(prompt, default=30.0)
@@ -1758,6 +1697,7 @@ def _submit_direct_gscloud_landsat8_from_chat(user_id: str, prompt: str) -> dict
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     state_path = ""
     try:
@@ -1817,7 +1757,7 @@ def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str) -> dict:
             "reason": "download_requires_login",
         }
     region = _extract_region_from_prompt(prompt)
-    account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
+    account_mode = _gscloud_account_mode_from_prompt(prompt)
     output_name = _extract_output_name_from_prompt(prompt, region, "dem")
     job = commercial_service.submit_job(
         user_id=user_id,
@@ -1828,6 +1768,7 @@ def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str) -> dict:
         request_text=prompt,
         output_name=output_name,
     )
+    account_mode = str(job.get("account_mode") or account_mode)
 
     # Do not let the LLM invent a job id. The real job_id below is the only valid one.
     state_path = ""

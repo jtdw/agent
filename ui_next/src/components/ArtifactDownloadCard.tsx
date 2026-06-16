@@ -44,19 +44,23 @@ function formatTime(value?: string) {
 export function ArtifactDownloadCard({
   artifact,
   userId,
-  onDeleted
+  onDeleted,
+  onShowOnMap
 }: {
   artifact: ChatArtifact;
   userId?: string;
   onDeleted?: (artifactId: string) => void;
+  onShowOnMap?: (artifact: ChatArtifact) => void;
 }) {
   const [error, setError] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [mapping, setMapping] = useState(false);
   const [deleted, setDeleted] = useState(false);
   const filename = artifact.filename || artifact.name || artifact.title || 'artifact';
   const Icon = artifactIcon(artifact.kind || artifact.type, filename);
   const source = artifact.source?.tool_name || artifact.source?.workflow_id || 'GIS 处理结果';
+  const mapReady = Boolean(artifact.meta?.map_ready || artifact.meta?.map_layer_id || artifact.meta?.dataset_name);
 
   const download = async () => {
     if (!artifact.download_url || downloading || deleted) return;
@@ -92,6 +96,24 @@ export function ArtifactDownloadCard({
     }
   };
 
+  const showOnMap = async () => {
+    if (deleted || mapping) return;
+    if (onShowOnMap) {
+      onShowOnMap(artifact);
+      return;
+    }
+    setMapping(true);
+    setError('');
+    try {
+      const result = await api.refreshMapLayer({ user_id: userId, artifact_id: artifact.artifact_id });
+      window.dispatchEvent(new CustomEvent('gis:show-artifact-on-map', { detail: { artifact, result } }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '无法显示到地图');
+    } finally {
+      setMapping(false);
+    }
+  };
+
   return (
     <div data-testid="artifact-download-card" className={cn('artifact-download-card', deleted && 'opacity-65')}>
       <div className="artifact-file-icon"><Icon size={18} strokeWidth={1.8} /></div>
@@ -109,6 +131,11 @@ export function ArtifactDownloadCard({
         {error && <div className="mt-2 inline-flex items-center gap-1 rounded-lg bg-rose-50 px-2 py-1 text-[11px] font-semibold text-rose-600 dark:bg-rose-950/40 dark:text-rose-300"><AlertTriangle size={12} /> {error}</div>}
       </div>
       <div className="flex shrink-0 items-center gap-2">
+        {(mapReady || onShowOnMap) && (
+          <button type="button" onClick={showOnMap} className="artifact-card-action" title="显示到地图" aria-label="显示到地图" disabled={deleted || mapping}>
+            {mapping ? <Loader2 size={15} className="animate-spin" /> : <Eye size={15} />}
+          </button>
+        )}
         {artifact.preview_available && (
           <button type="button" className="artifact-card-action" title="预览" aria-label="预览" disabled={deleted}>
             <Eye size={15} />

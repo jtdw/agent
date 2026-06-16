@@ -47,6 +47,23 @@ class ToolContractTests(unittest.TestCase):
             dst.write(data, 1)
         return path
 
+    def write_int16_dem_tile(self, path: Path, *, west: float, values: np.ndarray) -> Path:
+        transform = from_origin(west, 2.0, 1.0, 1.0)
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=values.shape[0],
+            width=values.shape[1],
+            count=1,
+            dtype="int16",
+            crs="EPSG:4326",
+            transform=transform,
+            nodata=-9999,
+        ) as dst:
+            dst.write(values.astype("int16"), 1)
+        return path
+
     def test_map_request_without_uploaded_data_plans_clarification_before_tools(self) -> None:
         context = {"workspace": {"dataset_count": 0}, "active_dataset": None}
         intent = classify_user_intent("画一张地图", {}, {"dataset_count": 0}, enable_llm=False)
@@ -454,8 +471,53 @@ class ToolContractTests(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertTrue(result["ok"])
             self.assertEqual(result["tool_name"], "clip_raster_by_vector")
+            self.assertEqual(result["outputs"]["result_dataset"], "clipped_raster")
+            self.assertTrue(result["outputs"]["map_ready"])
+            self.assertEqual(result["outputs"]["map_layer_id"], "dataset_clipped_raster")
             self.assertEqual(result["artifacts"][0]["type"], "raster")
+            self.assertEqual(result["artifacts"][0]["meta"]["dataset_name"], "clipped_raster")
+            self.assertTrue(result["artifacts"][0]["meta"]["map_ready"])
             self.assertTrue(Path(result["artifacts"][0]["path"]).exists())
+
+    def test_raster_mosaic_merges_int16_dem_tiles_and_clips_boundary_without_nan(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            left = self.write_int16_dem_tile(
+                Path(tmp) / "left.tif",
+                west=0.0,
+                values=np.array([[10, 11], [12, -9999]], dtype="int16"),
+            )
+            right = self.write_int16_dem_tile(
+                Path(tmp) / "right.tif",
+                west=2.0,
+                values=np.array([[20, 21], [22, 23]], dtype="int16"),
+            )
+            service.manager.put_raster_path("dem_left", left, meta={"crs": "EPSG:4326"})
+            service.manager.put_raster_path("dem_right", right, meta={"crs": "EPSG:4326"})
+            boundary = gpd.GeoDataFrame({"id": [1], "geometry": [box(0.5, 0.2, 3.5, 1.8)]}, crs="EPSG:4326")
+            service.manager.put_vector("boundary", boundary)
+
+            raw = self.tool_map(service)["raster_mosaic"].invoke(
+                {
+                    "raster_names": "dem_left,dem_right",
+                    "output_name": "dem_mosaic_clipped",
+                    "vector_name": "boundary",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["tool_name"], "raster_mosaic")
+            self.assertEqual(result["outputs"]["result_dataset"], "dem_mosaic_clipped")
+            with rasterio.open(result["outputs"]["path"]) as src:
+                data = src.read(1, masked=True)
+                self.assertEqual(src.dtypes[0], "int16")
+                self.assertEqual(src.nodata, -9999)
+                self.assertFalse(np.isnan(data.filled(src.nodata)).any())
+                self.assertGreaterEqual(src.bounds.left, 0.0)
+                self.assertLessEqual(src.bounds.right, 4.0)
+                self.assertIn(20, data.compressed().tolist())
 
     def test_rf_missing_target_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -1027,6 +1089,23 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(result["tool_name"], "raster_basic_stats")
             self.assertEqual(result["outputs"]["valid_count"], 9)
             self.assertIn("mean", result["outputs"])
+
+    def test_dem_terrain_derivatives_returns_map_ready_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = self.write_test_raster(Path(tmp) / "dem.tif")
+            service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:4326"})
+            tools = self.tool_map(service)
+
+            raw = tools["dem_terrain_derivatives"].invoke({"dem_name": "dem", "output_prefix": "terrain_demo", "derivatives": "slope,aspect"})
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["tool_name"], "dem_terrain_derivatives")
+            self.assertEqual(result["outputs"]["datasets"], ["terrain_demo_slope", "terrain_demo_aspect"])
+            self.assertTrue(all(item["meta"]["map_ready"] for item in result["artifacts"]))
+            self.assertEqual(result["artifacts"][0]["meta"]["map_layer_id"], "dataset_terrain_demo_slope")
 
     def test_batch_register_invalid_mode_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

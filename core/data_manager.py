@@ -305,6 +305,7 @@ class DataManager:
         if local_library:
             roots.append(Path(local_library).expanduser())
         roots.append(self.workdir.parent / "local_library")
+        roots.append(Path.cwd() / "local_library")
         return [root.resolve() for root in roots]
 
     def _require_allowed_import_source(self, source: Path) -> None:

@@ -4,10 +4,11 @@ import { Database, MessageCircle, PanelRightOpen, Sparkles } from 'lucide-react'
 import { MapControls } from './components/MapControls';
 import { SplashScreen } from './components/SplashScreen';
 import { useTheme } from './hooks/useTheme';
-import type { CommercialUser, ResultPanel } from './lib/api';
+import type { CommercialUser, ResultMapLayer, ResultPanel } from './lib/api';
 import { mergeChatContext, type ChatContextPayload } from './lib/chatContext';
 import type { MapCommand, MapCommandType } from './components/mapCommands';
 import type { LayerOpacity } from './components/mapLayerPolicy';
+import type { ResultLayerUiState } from './components/MapStage';
 import type { ParsedMapTextCommand } from './components/mapTextCommands';
 import type { WorkflowAction } from './components/researchWorkflow';
 
@@ -52,14 +53,31 @@ export default function App() {
   const [drawMode, setDrawMode] = useState(false);
   const [layerVisibility, setLayerVisibility] = useState({ dem: true, boundary: true, stations: true, soil: true });
   const [layerOpacity, setLayerOpacity] = useState<LayerOpacity>({ dem: 1, boundary: 1, stations: 1, soil: 1, draw: 1 });
+  const [resultLayers, setResultLayers] = useState<ResultMapLayer[]>([]);
+  const [resultLayerState, setResultLayerState] = useState<ResultLayerUiState>({});
   const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
+  const [mapRefreshToken, setMapRefreshToken] = useState(0);
   const [externalPrompt, setExternalPrompt] = useState<{ id: number; prompt: string } | null>(null);
   const [latestResultPanel, setLatestResultPanel] = useState<ResultPanel | null>(null);
   const [chatContext, setChatContext] = useState<ChatContextPayload>({});
   const updateChatContext = (patch: Partial<ChatContextPayload>) => setChatContext((current) => mergeChatContext(current, patch));
 
-  const dispatchMapCommand = (type: MapCommandType) => {
-    setMapCommand({ type, id: Date.now() });
+  const resultLayerStorageKey = `gis-result-layer-state-${user?.user_id || 'anonymous'}`;
+
+  const dispatchMapCommand = (type: MapCommandType, layerId?: string) => {
+    setMapCommand({ type, layerId, id: Date.now() });
+  };
+
+  const updateResultLayerState = (updater: (current: ResultLayerUiState) => ResultLayerUiState) => {
+    setResultLayerState((current) => {
+      const next = updater(current);
+      try {
+        window.localStorage.setItem(resultLayerStorageKey, JSON.stringify(next));
+      } catch {
+        // localStorage may be unavailable in privacy-restricted contexts.
+      }
+      return next;
+    });
   };
 
   const handleTextMapCommand = (command: ParsedMapTextCommand) => {
@@ -101,17 +119,40 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(resultLayerStorageKey);
+      setResultLayerState(raw ? JSON.parse(raw) : {});
+    } catch {
+      setResultLayerState({});
+    }
+  }, [resultLayerStorageKey]);
+
+  useEffect(() => {
     if (!chatOpen || !toolsOpen) return;
     if (window.matchMedia('(max-width: 639px)').matches) {
       setToolsOpen(false);
     }
   }, [chatOpen, toolsOpen]);
 
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ result?: { map_layer_id?: string; layer?: ResultMapLayer } }>).detail || {};
+      const layerId = detail.result?.map_layer_id || detail.result?.layer?.id || '';
+      setConsoleOpen(false);
+      setChatOpen(true);
+      setToolsOpen(window.matchMedia('(min-width: 640px)').matches);
+      setMapRefreshToken(Date.now());
+      if (layerId) window.setTimeout(() => dispatchMapCommand('fitLayer', layerId), 700);
+    };
+    window.addEventListener('gis:show-artifact-on-map', handler);
+    return () => window.removeEventListener('gis:show-artifact-on-map', handler);
+  }, []);
+
   return (
     <div className="relative isolate h-screen w-screen overflow-hidden text-slate-950 transition-colors duration-500 dark:text-slate-50">
       <SplashScreen visible={splash} />
       <Suspense fallback={<MapFallback />}>
-        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} mapCommand={mapCommand} onChatContextChange={updateChatContext} />
+        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} resultLayerState={resultLayerState} refreshToken={mapRefreshToken} mapCommand={mapCommand} onChatContextChange={updateChatContext} onResultLayersChange={setResultLayers} />
       </Suspense>
       <Suspense fallback={chatOpen ? <PanelFallback side="left" /> : null}>
         <AnimatePresence>
@@ -129,6 +170,11 @@ export default function App() {
               layerVisibility={layerVisibility}
               onLayerToggle={(id) => setLayerVisibility((v) => ({ ...v, [id]: !v[id as keyof typeof v] }))}
               onLayerLocate={() => dispatchMapCommand('locate')}
+              resultLayers={resultLayers}
+              resultLayerState={resultLayerState}
+              onResultLayerToggle={(layerId) => updateResultLayerState((current) => ({ ...current, [layerId]: { ...current[layerId], visible: !(current[layerId]?.visible ?? true) } }))}
+              onResultLayerOpacityChange={(layerId, opacity) => updateResultLayerState((current) => ({ ...current, [layerId]: { ...current[layerId], opacity } }))}
+              onResultLayerLocate={(layerId) => dispatchMapCommand('fitLayer', layerId)}
               onRunWorkflowAction={runWorkflowAction}
             />
           )}

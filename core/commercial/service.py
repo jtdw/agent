@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from core.data_manager import DataManager
+from core.domestic_sources.raster_postprocess import standardize_raster_download_result
 from .database import CommercialDB, future_days, json_dumps, json_loads, now_str
 from domain.downloads.models import decorate_job_record, failure_diagnostic
 from domain.downloads.status import DownloadJobStatus
@@ -631,6 +633,15 @@ class CommercialService:
             return QuotaCheck(False, "没有可用的平台账号，或平台账号已达到限额。")
         return QuotaCheck(True, account_id=row["account_id"])
 
+    def resolve_account_mode(self, user: dict[str, Any], account_mode: str, source_key: str) -> str:
+        mode = str(account_mode or "").strip().lower()
+        if mode not in {"", "auto", "default"}:
+            return mode
+        if int(user.get("platform_monthly_quota") or 0) <= int(user.get("platform_monthly_used") or 0):
+            return "own"
+        platform = self._select_platform_account(source_key)
+        return "platform" if platform.ok and platform.account_id else "own"
+
     def _check_user_quota(self, user: dict[str, Any], account_mode: str, source_key: str) -> QuotaCheck:
         if account_mode in {"own", "user", "user_account", "manual_cookie"}:
             return QuotaCheck(True)
@@ -650,7 +661,7 @@ class CommercialService:
         region: str = "",
         start_date: str = "",
         end_date: str = "",
-        account_mode: str = "own",
+        account_mode: str = "auto",
         request_text: str = "",
         direct_url: str = "",
         local_file_path: str = "",
@@ -658,7 +669,7 @@ class CommercialService:
     ) -> dict[str, Any]:
         user = self.get_user(user_id)
         source_key = source_key.strip().lower()
-        account_mode = account_mode.strip().lower()
+        account_mode = self.resolve_account_mode(user, account_mode, source_key)
         check = self._check_user_quota(user, account_mode, source_key)
         if not check.ok:
             raise PermissionError(check.reason)
@@ -873,7 +884,7 @@ class CommercialService:
     def _artifact_quality_for_result(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         from core.domestic_sources.gscloud_reliability import validate_map_ready_artifact
 
-        keys = ("zip_path", "package_path", "downloaded_path", "output_path", "path")
+        keys = ("final_output_path", "output_path", "path", "zip_path", "package_path", "downloaded_path")
         candidates: list[str] = []
         for key in keys:
             value = result.get(key)
@@ -888,8 +899,33 @@ class CommercialService:
         return quality
 
     def run_job_with_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        job = self.db.fetch_one("SELECT * FROM download_jobs WHERE job_id=?", [job_id]) or {}
+        try:
+            tile_plan = result.get("tile_plan") if isinstance(result.get("tile_plan"), dict) else {}
+            clip_vector = str(result.get("clip_vector") or tile_plan.get("region_dataset") or result.get("region_dataset") or "")
+            result = standardize_raster_download_result(
+                DataManager(self.workdir),
+                result,
+                output_name=str(job.get("output_name") or result.get("output_name") or "downloaded_raster"),
+                clip_vector=clip_vector,
+                fail_on_mosaic_error=bool(result.get("requested_tile_ids") or result.get("tile_validation")),
+            )
+        except Exception as exc:
+            diagnostic = failure_diagnostic(f"Raster post-processing failed: {exc}")
+            self._release_platform_reservation(job_id, "release_raster_postprocess_failed_platform_download")
+            self._update_job(
+                job_id,
+                status="failed",
+                progress=100,
+                stage="raster_postprocess_failed",
+                result_json=json_dumps(result),
+                failure_diagnostic_json=json_dumps(diagnostic),
+                error_message=diagnostic["user_message"],
+                finished_at=now_str(),
+            )
+            return self.get_job(job_id)
         zip_path = result.get("zip_path") or result.get("package_path") or ""
-        output_path = result.get("downloaded_path") or result.get("path") or result.get("dataset_name") or ""
+        output_path = result.get("final_output_path") or result.get("output_path") or result.get("path") or result.get("downloaded_path") or result.get("dataset_name") or ""
         artifact_quality = result.get("artifact_quality") if isinstance(result.get("artifact_quality"), list) else self._artifact_quality_for_result(result)
         result["artifact_quality"] = artifact_quality
         if artifact_quality and any(item.get("ok") is False for item in artifact_quality if isinstance(item, dict)):

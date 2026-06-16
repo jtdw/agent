@@ -28,7 +28,9 @@ from matplotlib import font_manager as fm
 from matplotlib import pyplot as plt
 from pyproj import CRS
 from scipy.optimize import minimize
+from rasterio.io import MemoryFile
 from rasterio.mask import mask
+from rasterio.merge import merge as raster_merge
 from rasterio.plot import show as raster_show
 from sklearn.cluster import KMeans
 from sklearn.ensemble import RandomForestRegressor
@@ -77,6 +79,72 @@ VISUAL_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 LON_NAMES = {"lon", "lng", "long", "longitude", "经度", "x", "coord_x", "point_x"}
 LAT_NAMES = {"lat", "latitude", "纬度", "y", "coord_y", "point_y"}
 SEASON_MAP = {12: "DJF", 1: "DJF", 2: "DJF", 3: "MAM", 4: "MAM", 5: "MAM", 6: "JJA", 7: "JJA", 8: "JJA", 9: "SON", 10: "SON", 11: "SON"}
+
+
+def _map_layer_id(dataset_name: str) -> str:
+    clean = re.sub(r"[^0-9A-Za-z_]+", "_", str(dataset_name or "").strip()).strip("_").lower()
+    return f"dataset_{clean or 'layer'}"
+
+
+def _dataset_map_kind(name: str, data_type: str) -> str:
+    text = str(name or "").lower()
+    if any(token in text for token in ["ndvi", "evi", "vegetation", "植被"]):
+        return "vegetation"
+    if any(token in text for token in ["soil", "moisture", "sm", "prediction", "result"]):
+        return "soil"
+    if any(token in text for token in ["dem", "elevation", "srtm", "aster", "terrain", "slope", "aspect"]):
+        return "dem"
+    if any(token in text for token in ["boundary", "region", "aoi", "basin", "admin"]):
+        return "boundary"
+    return "boundary" if data_type == "vector" else "dem"
+
+
+def _spatial_meta_for_record(manager: DataManager, dataset_name: str, *, artifact_id: str = "", source_tool: str = "") -> dict[str, Any]:
+    record = manager.get(dataset_name)
+    meta = dict(record.meta or {})
+    if record.data_type == "vector":
+        try:
+            gdf = manager.get_vector(dataset_name)
+            meta.setdefault("crs", str(gdf.crs) if gdf.crs else "")
+            meta.setdefault("geometry_type", str(gdf.geometry.geom_type.dropna().iloc[0]) if len(gdf) else "")
+            meta.setdefault("feature_count", int(len(gdf)))
+            if len(gdf):
+                meta.setdefault("bounds", [float(v) for v in gdf.to_crs("EPSG:4326").total_bounds.tolist()] if gdf.crs else [float(v) for v in gdf.total_bounds.tolist()])
+        except Exception:
+            pass
+    elif record.data_type == "raster":
+        try:
+            with rasterio.open(manager.get_raster_path(dataset_name)) as src:
+                meta.setdefault("crs", str(src.crs) if src.crs else "")
+                meta.setdefault("width", int(src.width))
+                meta.setdefault("height", int(src.height))
+                meta.setdefault("band_count", int(src.count))
+                meta.setdefault("dtype", str(src.dtypes[0]) if src.dtypes else "")
+                meta.setdefault("nodata", src.nodata)
+        except Exception:
+            pass
+    meta.update(
+        {
+            "map_ready": record.data_type in {"vector", "raster"},
+            "dataset_name": dataset_name,
+            "map_layer_id": _map_layer_id(dataset_name),
+            "layer_kind": _dataset_map_kind(dataset_name, record.data_type),
+            "artifact_id": artifact_id,
+            "source_tool": source_tool,
+        }
+    )
+    return meta
+
+
+def _map_ready_outputs(manager: DataManager, dataset_name: str, *, source_tool: str = "") -> dict[str, Any]:
+    meta = _spatial_meta_for_record(manager, dataset_name, source_tool=source_tool)
+    return {
+        "result_dataset": dataset_name,
+        "dataset_name": dataset_name,
+        "map_ready": bool(meta.get("map_ready")),
+        "map_layer_id": meta.get("map_layer_id"),
+        "spatial_meta": meta,
+    }
 
 
 def _configure_matplotlib_fonts() -> str | None:
@@ -1646,6 +1714,57 @@ def build_tools(manager: DataManager):
             return _tool_internal_error("describe_dataset", inputs, exc)
 
     @tool
+    def generic_xgboost_workflow(
+        dataset_name: str = "",
+        target_col: str = "",
+        feature_cols: str = "",
+        output_name: str = "",
+        mode: str = "auto",
+        task_type: str = "auto",
+        raster_names: str = "",
+        target_raster_name: str = "",
+        sample_dataset_name: str = "",
+        x_col: str = "",
+        y_col: str = "",
+        date_col: str = "",
+        group_col: str = "",
+        split_method: str = "auto",
+        test_size: float = 0.2,
+        random_state: int = 42,
+        max_training_samples: int = 200000,
+        max_prediction_pixels: int = 5000000,
+        raster_resampling: str = "bilinear",
+        categorical_strategy: str = "onehot",
+    ) -> str:
+        """Run generic XGBoost regression/classification for table, vector, sample+raster, or raster stack data."""
+        from .ml.generic_xgboost import run_generic_xgboost_workflow
+
+        result = run_generic_xgboost_workflow(
+            manager,
+            dataset_name=dataset_name,
+            target_col=target_col,
+            feature_cols=feature_cols,
+            output_name=output_name,
+            mode=mode,
+            task_type=task_type,
+            raster_names=raster_names,
+            target_raster_name=target_raster_name,
+            sample_dataset_name=sample_dataset_name,
+            x_col=x_col,
+            y_col=y_col,
+            date_col=date_col,
+            group_col=group_col,
+            split_method=split_method,
+            test_size=test_size,
+            random_state=random_state,
+            max_training_samples=max_training_samples,
+            max_prediction_pixels=max_prediction_pixels,
+            raster_resampling=raster_resampling,
+            categorical_strategy=categorical_strategy,
+        )
+        return _json(result.to_dict())
+
+    @tool
     def preview_table(dataset_name: str, rows: int = 8) -> str:
         """预览表格或矢量属性数据前几行，便于识别坐标字段、分类字段和数值字段。"""
         return _json(manager.preview_table_rows(dataset_name, rows=rows))
@@ -1897,21 +2016,24 @@ def build_tools(manager: DataManager):
             clipped = gpd.clip(source, clipper)
             saved_name = manager.put_vector(output_name, clipped)
             output_path = manager.get(saved_name).path
+            artifact_id = f"dataset_{uuid4().hex[:10]}"
+            spatial_meta = _spatial_meta_for_record(manager, saved_name, artifact_id=artifact_id, source_tool="vector_clip_by_vector")
             manager.log_operation("鐭㈤噺瑁佸壀", f"{dataset_name} by {clip_name} -> {saved_name}", "analysis")
             warnings_list = ["裁剪结果为空，请检查两个图层是否相交。"] if clipped.empty else []
             return tool_result_ok(
                 "vector_clip_by_vector",
                 inputs=inputs,
-                outputs={"result_dataset": saved_name, "feature_count": int(len(clipped)), "path": str(output_path)},
+                outputs={**_map_ready_outputs(manager, saved_name, source_tool="vector_clip_by_vector"), "feature_count": int(len(clipped)), "path": str(output_path)},
                 artifacts=[
                     ArtifactInfo(
-                        artifact_id=f"dataset_{uuid4().hex[:10]}",
+                        artifact_id=artifact_id,
                         path=str(output_path),
                         type="dataset",
                         title=f"{saved_name} clipped vector",
                         description=f"{dataset_name} 被 {clip_name} 裁剪后的矢量结果。",
                         quality_status="empty" if clipped.empty else "created",
                         preview_available=False,
+                        meta=spatial_meta,
                     )
                 ],
                 summary=f"矢量裁剪完成，结果数据集 {saved_name}，要素数 {len(clipped)}。",
@@ -2841,17 +2963,20 @@ def build_tools(manager: DataManager):
                 "transform": tuple(out_meta.get("transform")) if out_meta.get("transform") is not None else None,
             }
             stored_name = manager.put_raster_path(output_stem, output_path, meta=serializable_meta)
+            artifact_id = f"raster_{uuid4().hex[:10]}"
+            spatial_meta = _spatial_meta_for_record(manager, stored_name, artifact_id=artifact_id, source_tool="clip_raster_by_vector")
             manager.log_operation("鏍呮牸瑁佸壀", f"{raster_name} by {vector_name} -> {stored_name}", "analysis")
             return tool_result_ok(
                 "clip_raster_by_vector",
                 inputs=inputs,
-                outputs={"result_dataset": stored_name, "path": str(output_path), "width": int(serializable_meta.get("width") or 0), "height": int(serializable_meta.get("height") or 0)},
+                outputs={**_map_ready_outputs(manager, stored_name, source_tool="clip_raster_by_vector"), "path": str(output_path), "width": int(serializable_meta.get("width") or 0), "height": int(serializable_meta.get("height") or 0)},
                 artifacts=[
                     ArtifactInfo(
-                        artifact_id=f"raster_{uuid4().hex[:10]}",
+                        artifact_id=artifact_id,
                         path=str(output_path),
                         type="raster",
                         title=f"{stored_name} clipped raster",
+                        meta=spatial_meta,
                         description=f"{raster_name} 按 {vector_name} 裁剪后的栅格。",
                         quality_status="created",
                         preview_available=False,
@@ -5987,6 +6112,339 @@ def build_tools(manager: DataManager):
         manager.log_operation("栅格直方图", f"{dataset_name} band {band} -> {output_path.name}", "plot")
         return f"直方图已生成: {output_path}"
 
+    def _write_raster_dataset_like(source_path: Path, output_name: str, data: np.ndarray, *, source_tool: str, meta_updates: dict[str, Any] | None = None) -> tuple[str, Path, dict[str, Any]]:
+        output_stem = Path(output_name).stem if Path(output_name).suffix else output_name
+        output_path = manager.derived_dir / f"{_artifact_safe_name(output_stem)}.tif"
+        with rasterio.open(source_path) as src:
+            profile = src.profile.copy()
+            profile.update(count=1, dtype="float32", nodata=-9999.0)
+            with rasterio.open(output_path, "w", **profile) as dst:
+                arr = np.asarray(data, dtype="float32")
+                arr = np.where(np.isfinite(arr), arr, -9999.0).astype("float32")
+                dst.write(arr, 1)
+        serializable_meta = {
+            **(meta_updates or {}),
+            "crs": str(profile.get("crs")) if profile.get("crs") else None,
+            "width": int(profile.get("width") or 0),
+            "height": int(profile.get("height") or 0),
+            "count": 1,
+            "dtype": "float32",
+            "nodata": -9999.0,
+        }
+        stored_name = manager.put_raster_path(output_stem, output_path, meta=serializable_meta)
+        artifact_id = f"raster_{uuid4().hex[:10]}"
+        spatial_meta = _spatial_meta_for_record(manager, stored_name, artifact_id=artifact_id, source_tool=source_tool)
+        return stored_name, output_path, spatial_meta
+
+    def _default_nodata_for_dtype(dtype: str) -> float | int:
+        raster_dtype = np.dtype(dtype)
+        if np.issubdtype(raster_dtype, np.floating):
+            return np.nan
+        if np.issubdtype(raster_dtype, np.unsignedinteger):
+            return 0
+        return -9999
+
+    @tool
+    def raster_mosaic(raster_names: str, output_name: str, vector_name: str = "", method: str = "first") -> str:
+        """Merge multiple raster tiles into one GeoTIFF, optionally clipping the mosaic by a vector boundary."""
+        inputs = {"raster_names": raster_names, "output_name": output_name, "vector_name": vector_name, "method": method}
+        raster_list = [item.strip() for item in re.split(r"[,;\s]+", str(raster_names or "")) if item.strip()]
+        errors: list[dict[str, Any]] = []
+        if not raster_list:
+            errors.append(
+                {
+                    "error_code": "RASTER_INPUTS_REQUIRED",
+                    "error_title": "Raster inputs required",
+                    "user_message": "Provide at least one raster dataset name to mosaic.",
+                    "diagnostics": {},
+                    "next_actions": ["Use raster_names such as dem_tile_1,dem_tile_2."],
+                }
+            )
+        for dataset_name in raster_list:
+            errors.extend(validate_dataset_exists(manager, dataset_name))
+            errors.extend(validate_raster_readable(manager, dataset_name))
+            errors.extend(validate_crs(manager, dataset_name))
+        if str(vector_name or "").strip():
+            errors.extend(validate_dataset_exists(manager, vector_name))
+            if not errors:
+                errors.extend(validate_vector_readable(manager, vector_name))
+                errors.extend(validate_crs(manager, vector_name))
+                errors.extend(validate_geometry_type(manager, vector_name, ["Polygon", "MultiPolygon"]))
+        errors.extend(validate_output_path(manager.derived_dir, output_name, allowed_suffixes={".tif", ".tiff"}))
+        allowed_methods = {"first", "last", "min", "max", "sum", "count"}
+        if method not in allowed_methods:
+            errors.append(
+                {
+                    "error_code": "RASTER_MOSAIC_METHOD_UNSUPPORTED",
+                    "error_title": "Unsupported mosaic method",
+                    "user_message": f"method must be one of {', '.join(sorted(allowed_methods))}.",
+                    "diagnostics": {"allowed": sorted(allowed_methods), "received": method},
+                    "next_actions": ["Use method='first' for DEM tiles unless overlap priority must be changed."],
+                }
+            )
+        if errors:
+            return _tool_error_from_validation("raster_mosaic", inputs, errors)
+        try:
+            output_stem = Path(output_name).stem if Path(output_name).suffix.lower() in {".tif", ".tiff"} else output_name
+            output_path = manager.derived_dir / f"{_artifact_safe_name(output_stem)}.tif"
+            with contextlib.ExitStack() as stack:
+                sources = [stack.enter_context(rasterio.open(manager.get_raster_path(name))) for name in raster_list]
+                reference = sources[0]
+                reference_crs = reference.crs
+                reference_count = reference.count
+                reference_dtype = reference.dtypes[0]
+                for source, dataset_name in zip(sources[1:], raster_list[1:]):
+                    if source.crs != reference_crs:
+                        raise ValueError(f"Raster {dataset_name} CRS {source.crs} does not match {raster_list[0]} CRS {reference_crs}. Reproject before mosaicking.")
+                    if source.count != reference_count:
+                        raise ValueError(f"Raster {dataset_name} has {source.count} band(s), expected {reference_count}.")
+                nodata = reference.nodata if reference.nodata is not None else _default_nodata_for_dtype(reference_dtype)
+                mosaic, mosaic_transform = raster_merge(sources, nodata=nodata, method=method)
+                profile = reference.profile.copy()
+                profile.update(
+                    height=int(mosaic.shape[1]),
+                    width=int(mosaic.shape[2]),
+                    count=int(mosaic.shape[0]),
+                    transform=mosaic_transform,
+                    nodata=nodata,
+                    dtype=str(reference_dtype),
+                )
+
+                output_data = mosaic
+                if str(vector_name or "").strip():
+                    gdf = manager.get_vector(vector_name)
+                    if gdf.crs and reference_crs and gdf.crs != reference_crs:
+                        gdf = gdf.to_crs(reference_crs)
+                    geoms = [geom.__geo_interface__ for geom in gdf.geometry if geom is not None and not geom.is_empty]
+                    if not geoms:
+                        return tool_result_error(
+                            "raster_mosaic",
+                            inputs=inputs,
+                            error_code="GEOMETRY_REQUIRED",
+                            error_title="Clip geometry required",
+                            user_message=f"Vector dataset {vector_name} has no usable geometry for clipping.",
+                            diagnostics={"vector_name": vector_name},
+                            next_actions=["Check that the boundary layer is not empty and has valid polygon geometry."],
+                        ).to_json()
+                    with MemoryFile() as memfile:
+                        with memfile.open(**profile) as dataset:
+                            dataset.write(mosaic)
+                            output_data, clipped_transform = mask(dataset, geoms, crop=True, nodata=nodata)
+                    profile.update(height=int(output_data.shape[1]), width=int(output_data.shape[2]), transform=clipped_transform)
+
+                with rasterio.open(output_path, "w", **profile) as dst:
+                    dst.write(output_data.astype(reference_dtype, copy=False))
+
+            serializable_meta = {
+                **{k: v for k, v in profile.items() if k not in {"crs", "transform"}},
+                "crs": str(profile.get("crs")) if profile.get("crs") else None,
+                "transform": tuple(profile.get("transform")) if profile.get("transform") is not None else None,
+                "source_rasters": raster_list,
+                "clip_vector": vector_name or "",
+            }
+            stored_name = manager.put_raster_path(output_stem, output_path, meta=serializable_meta)
+            artifact_id = f"raster_{uuid4().hex[:10]}"
+            spatial_meta = _spatial_meta_for_record(manager, stored_name, artifact_id=artifact_id, source_tool="raster_mosaic")
+            manager.log_operation("Raster mosaic", f"{', '.join(raster_list)} -> {stored_name}", "analysis")
+            return tool_result_ok(
+                "raster_mosaic",
+                inputs=inputs,
+                outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_mosaic"), "path": str(output_path), "width": int(profile.get("width") or 0), "height": int(profile.get("height") or 0)},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=artifact_id,
+                        path=str(output_path),
+                        type="raster",
+                        title=f"{stored_name} raster mosaic",
+                        description=f"Mosaic generated from {len(raster_list)} raster tile(s).",
+                        quality_status="created",
+                        preview_available=False,
+                        meta=spatial_meta,
+                    )
+                ],
+                summary=f"Merged {len(raster_list)} raster tile(s) into {stored_name}.",
+                diagnostics={"source_rasters": raster_list, "clip_vector": vector_name or "", "dtype": str(profile.get("dtype")), "nodata": profile.get("nodata"), "method": method},
+                next_actions=["Inspect the mosaic on the map, export it, or continue with terrain/statistical analysis."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_mosaic", inputs, exc)
+
+    @tool
+    def dem_terrain_derivatives(dem_name: str, output_prefix: str, derivatives: str = "slope,aspect,terrain") -> str:
+        """Create DEM derivatives such as slope, aspect, and terrain factor rasters as map-ready GeoTIFF outputs."""
+        inputs = {"dem_name": dem_name, "output_prefix": output_prefix, "derivatives": derivatives}
+        errors = []
+        errors.extend(validate_dataset_exists(manager, dem_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_prefix))
+        if not errors:
+            errors.extend(validate_raster_readable(manager, dem_name))
+            errors.extend(validate_crs(manager, dem_name))
+        requested = [item.strip().lower() for item in str(derivatives or "").split(",") if item.strip()]
+        allowed = {"slope", "aspect", "terrain", "tpi", "tri"}
+        if not requested:
+            requested = ["slope", "aspect", "terrain"]
+        invalid = [item for item in requested if item not in allowed]
+        if invalid:
+            return tool_result_error(
+                "dem_terrain_derivatives",
+                inputs=inputs,
+                error_code="DEM_DERIVATIVE_UNSUPPORTED",
+                error_title="Unsupported DEM derivative",
+                user_message=f"Unsupported derivatives: {', '.join(invalid)}.",
+                diagnostics={"allowed": sorted(allowed), "received": requested},
+                next_actions=["Use slope, aspect, terrain, tpi, or tri."],
+            ).to_json()
+        if errors:
+            return _tool_error_from_validation("dem_terrain_derivatives", inputs, errors)
+        try:
+            raster_path = manager.get_raster_path(dem_name)
+            with rasterio.open(raster_path) as src:
+                band = src.read(1, masked=True).astype("float32")
+                arr = np.asarray(band.filled(np.nan), dtype="float32")
+                xres = abs(float(src.transform.a)) or 1.0
+                yres = abs(float(src.transform.e)) or 1.0
+            gy, gx = np.gradient(arr, yres, xres)
+            slope = np.degrees(np.arctan(np.sqrt(gx * gx + gy * gy)))
+            aspect = (np.degrees(np.arctan2(-gx, gy)) + 360.0) % 360.0
+            padded = np.pad(arr, 1, mode="edge")
+            neighborhood_mean = sum(padded[y:y + arr.shape[0], x:x + arr.shape[1]] for y in range(3) for x in range(3)) / 9.0
+            tpi = arr - neighborhood_mean
+            tri = np.sqrt((gx * gx) + (gy * gy))
+            arrays = {"slope": slope, "aspect": aspect, "terrain": tpi, "tpi": tpi, "tri": tri}
+            datasets: list[str] = []
+            artifacts: list[ArtifactInfo] = []
+            for derivative in requested:
+                suffix = "terrain" if derivative == "tpi" else derivative
+                stored_name, output_path, spatial_meta = _write_raster_dataset_like(
+                    raster_path,
+                    f"{output_prefix}_{suffix}",
+                    arrays[derivative],
+                    source_tool="dem_terrain_derivatives",
+                    meta_updates={"source_dem": dem_name, "derivative": derivative},
+                )
+                datasets.append(stored_name)
+                artifacts.append(
+                    ArtifactInfo(
+                        artifact_id=str(spatial_meta.get("artifact_id") or f"raster_{uuid4().hex[:10]}"),
+                        path=str(output_path),
+                        type="raster",
+                        title=f"{stored_name} DEM derivative",
+                        description=f"{derivative} derived from DEM {dem_name}.",
+                        quality_status="created",
+                        preview_available=False,
+                        meta=spatial_meta,
+                    )
+                )
+            manager.log_operation("DEM terrain derivatives", f"{dem_name} -> {', '.join(datasets)}", "analysis")
+            return tool_result_ok(
+                "dem_terrain_derivatives",
+                inputs=inputs,
+                outputs={"datasets": datasets, "map_ready": True, "map_layer_ids": [_map_layer_id(name) for name in datasets]},
+                artifacts=artifacts,
+                summary=f"Created DEM derivative datasets: {', '.join(datasets)}.",
+                diagnostics={"source_dem": dem_name, "derivatives": requested},
+                next_actions=["Inspect the generated layers on the map or use them in downstream raster/vector analysis."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("dem_terrain_derivatives", inputs, exc)
+
+    @tool
+    def raster_reproject(raster_name: str, target_crs: str, output_name: str, resampling: str = "bilinear") -> str:
+        """Reproject a raster dataset and register the output as a map-ready GeoTIFF."""
+        from rasterio.enums import Resampling
+        from rasterio.warp import calculate_default_transform, reproject
+
+        inputs = {"raster_name": raster_name, "target_crs": target_crs, "output_name": output_name, "resampling": resampling}
+        errors = []
+        errors.extend(validate_dataset_exists(manager, raster_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name, allowed_suffixes={".tif", ".tiff"}))
+        if not errors:
+            errors.extend(validate_raster_readable(manager, raster_name))
+            errors.extend(validate_crs(manager, raster_name))
+        if errors:
+            return _tool_error_from_validation("raster_reproject", inputs, errors)
+        try:
+            source_path = manager.get_raster_path(raster_name)
+            output_stem = Path(output_name).stem if Path(output_name).suffix else output_name
+            output_path = manager.derived_dir / f"{_artifact_safe_name(output_stem)}.tif"
+            mode = getattr(Resampling, str(resampling or "bilinear"), Resampling.bilinear)
+            with rasterio.open(source_path) as src:
+                transform, width, height = calculate_default_transform(src.crs, target_crs, src.width, src.height, *src.bounds)
+                profile = src.profile.copy()
+                profile.update(crs=target_crs, transform=transform, width=width, height=height)
+                with rasterio.open(output_path, "w", **profile) as dst:
+                    for index in range(1, src.count + 1):
+                        reproject(
+                            source=rasterio.band(src, index),
+                            destination=rasterio.band(dst, index),
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=target_crs,
+                            resampling=mode,
+                        )
+            stored_name = manager.put_raster_path(output_stem, output_path, meta={"crs": target_crs, "source_raster": raster_name, "resampling": str(resampling)})
+            artifact_id = f"raster_{uuid4().hex[:10]}"
+            spatial_meta = _spatial_meta_for_record(manager, stored_name, artifact_id=artifact_id, source_tool="raster_reproject")
+            return tool_result_ok(
+                "raster_reproject",
+                inputs=inputs,
+                outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_reproject"), "path": str(output_path), "target_crs": target_crs},
+                artifacts=[ArtifactInfo(artifact_id=artifact_id, path=str(output_path), type="raster", title=f"{stored_name} reprojected raster", quality_status="created", preview_available=False, meta=spatial_meta)],
+                summary=f"Reprojected raster {raster_name} to {target_crs} as {stored_name}.",
+                next_actions=["Inspect the reprojected raster on the map or use it in downstream processing."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_reproject", inputs, exc)
+
+    @tool
+    def raster_algebra(expression: str, input_rasters: str, output_name: str) -> str:
+        """Evaluate a restricted NumPy expression over aligned raster bands, e.g. expression='(nir-red)/(nir+red)' and input_rasters='nir=nir_ds,red=red_ds'."""
+        import ast
+
+        inputs = {"expression": expression, "input_rasters": input_rasters, "output_name": output_name}
+        mapping: dict[str, str] = {}
+        for item in str(input_rasters or "").split(","):
+            if "=" in item:
+                key, value = item.split("=", 1)
+                if key.strip() and value.strip():
+                    mapping[key.strip()] = value.strip()
+        errors = []
+        if not mapping:
+            errors.append({"error_code": "RASTER_INPUTS_REQUIRED", "error_title": "Raster inputs required", "user_message": "Provide input_rasters such as ndvi=ndvi_dataset.", "diagnostics": {}, "next_actions": ["Map expression variables to raster dataset names."]})
+        for dataset_name in mapping.values():
+            errors.extend(validate_dataset_exists(manager, dataset_name))
+            errors.extend(validate_raster_readable(manager, dataset_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name, allowed_suffixes={".tif", ".tiff"}))
+        if errors:
+            return _tool_error_from_validation("raster_algebra", inputs, errors)
+        try:
+            parsed = ast.parse(expression, mode="eval")
+            first_dataset = next(iter(mapping.values()))
+            first_path = manager.get_raster_path(first_dataset)
+            with rasterio.open(first_path) as reference:
+                shape = (reference.height, reference.width)
+            arrays: dict[str, np.ndarray] = {}
+            for variable, dataset_name in mapping.items():
+                with rasterio.open(manager.get_raster_path(dataset_name)) as src:
+                    if (src.height, src.width) != shape:
+                        raise ValueError("All input rasters must have the same width and height in raster_algebra v1.")
+                    arrays[variable] = np.asarray(src.read(1, masked=True).filled(np.nan), dtype="float32")
+            safe_np = type("SafeNumpy", (), {name: getattr(np, name) for name in ["where", "clip", "log", "log1p", "sqrt", "abs", "minimum", "maximum", "sin", "cos", "tan"]})
+            result = eval(compile(parsed, "<raster_algebra>", "eval"), {"__builtins__": {}, "np": safe_np}, arrays)
+            stored_name, output_path, spatial_meta = _write_raster_dataset_like(first_path, output_name, np.asarray(result, dtype="float32"), source_tool="raster_algebra", meta_updates={"expression": expression, "input_rasters": mapping})
+            artifact_id = str(spatial_meta.get("artifact_id") or f"raster_{uuid4().hex[:10]}")
+            return tool_result_ok(
+                "raster_algebra",
+                inputs=inputs,
+                outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_algebra"), "path": str(output_path), "expression": expression},
+                artifacts=[ArtifactInfo(artifact_id=artifact_id, path=str(output_path), type="raster", title=f"{stored_name} raster algebra", quality_status="created", preview_available=False, meta=spatial_meta)],
+                summary=f"Created raster algebra output {stored_name}.",
+                next_actions=["Inspect the generated raster layer on the map or continue with clipping, statistics, or export."],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_algebra", inputs, exc)
+
     @tool
     def export_dataset(dataset_name: str, output_path: str) -> str:
         """将已有结果导出到指定路径。矢量默认导出为 GeoJSON，表格导出为 CSV，栅格直接复制，文档导出为文本。"""
@@ -6098,19 +6556,22 @@ def build_tools(manager: DataManager):
                 ).to_json()
 
             manager.log_operation("导出结果", f"{dataset_name} -> {target}", "export")
+            artifact_id = f"file:{target.name}"
+            export_spatial_meta = _spatial_meta_for_record(manager, dataset_name, artifact_id=artifact_id, source_tool="export_dataset") if record.data_type in {"vector", "raster"} else {}
             return tool_result_ok(
                 "export_dataset",
                 inputs=inputs,
-                outputs={"path": str(target), "dataset_name": dataset_name, "dataset_type": record.data_type, **export_details},
+                outputs={"path": str(target), "dataset_name": dataset_name, "dataset_type": record.data_type, **({"map_ready": True, "map_layer_id": _map_layer_id(dataset_name), "spatial_meta": export_spatial_meta} if export_spatial_meta else {}), **export_details},
                 artifacts=[
                     ArtifactInfo(
-                        artifact_id=f"file:{target.name}",
+                        artifact_id=artifact_id,
                         path=str(target),
                         type="file",
                         title=target.name,
                         description=f"Exported {record.data_type} dataset {dataset_name}",
                         quality_status="ok",
                         preview_available=target.suffix.lower() in {".csv", ".txt", ".json", ".geojson"},
+                        meta=export_spatial_meta,
                     )
                 ],
                 summary=f"已导出 {dataset_name} 到 {target}。",
@@ -6190,6 +6651,10 @@ def build_tools(manager: DataManager):
         raster_basic_stats,
         raster_zonal_stats,
         clip_raster_by_vector,
+        raster_mosaic,
+        dem_terrain_derivatives,
+        raster_reproject,
+        raster_algebra,
         extract_raster_values_to_points,
         batch_register_points_to_rasters,
         build_time_features,
@@ -6198,6 +6663,7 @@ def build_tools(manager: DataManager):
         geographical_conformal_prediction,
         btch_fusion_model,
         train_rf_fusion_model,
+        generic_xgboost_workflow,
         train_xgboost_fusion_model,
         train_lstm_fusion_model,
         generate_thesis_charts,

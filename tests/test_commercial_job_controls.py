@@ -110,6 +110,47 @@ class CommercialJobControlTests(unittest.TestCase):
         result = self.service.delete_job(job["job_id"], user_id=self.user["user_id"])
         self.assertTrue(result["ok"])
 
+    def test_paid_user_defaults_to_platform_account_when_mode_is_omitted(self):
+        job = self.service.submit_job(
+            user_id=self.user["user_id"],
+            source_key="gscloud",
+            resource_type="dem",
+            region="Chengdu",
+        )
+
+        self.assertEqual(job["account_mode"], "platform")
+        self.assertTrue(job["account_id"])
+        self.assertEqual(job["quota_reserved"], 1)
+        self.assertEqual(self.service.get_user(self.user["user_id"])["platform_monthly_used"], 1)
+
+    def test_paid_user_can_explicitly_choose_own_account(self):
+        job = self.service.submit_job(
+            user_id=self.user["user_id"],
+            source_key="gscloud",
+            resource_type="dem",
+            region="Chengdu",
+            account_mode="own",
+        )
+
+        self.assertEqual(job["account_mode"], "own")
+        self.assertFalse(job["account_id"])
+        self.assertEqual(job["quota_reserved"], 0)
+        self.assertEqual(self.service.get_user(self.user["user_id"])["platform_monthly_used"], 0)
+
+    def test_basic_user_defaults_to_own_account(self):
+        basic = self.service.create_user("basic@example.com", plan="basic", user_id="u_basic")
+
+        job = self.service.submit_job(
+            user_id=basic["user_id"],
+            source_key="gscloud",
+            resource_type="dem",
+            region="Chengdu",
+        )
+
+        self.assertEqual(job["account_mode"], "own")
+        self.assertFalse(job["account_id"])
+        self.assertEqual(job["quota_reserved"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

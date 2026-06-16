@@ -116,6 +116,23 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                         </div>
                       )}
 
+                      {view.featureImportance.length > 0 && (
+                        <div className="rounded-[22px] border border-white/30 bg-white/35 p-4 dark:border-white/10 dark:bg-slate-950/20">
+                          <div className="mb-3 text-sm font-black">Feature importance</div>
+                          <div className="space-y-2">
+                            {view.featureImportance.map((item) => (
+                              <div key={item.feature} className="grid grid-cols-[minmax(0,1fr)_64px] items-center gap-3 text-xs">
+                                <div className="truncate font-bold text-slate-600 dark:text-slate-300">{item.feature}</div>
+                                <div className="text-right tabular-nums text-slate-500 dark:text-slate-400">{item.importance === null ? '--' : item.importance.toFixed(3)}</div>
+                                <div className="col-span-2 h-1.5 overflow-hidden rounded-full bg-white/50 dark:bg-white/10">
+                                  <div className="h-full rounded-full bg-cyan-glow" style={{ width: `${Math.max(4, Math.min(100, (item.importance ?? 0) * 100))}%` }} />
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {view.steps.length > 0 && (
                         <div className="rounded-[22px] border border-white/30 bg-white/35 p-4 dark:border-white/10 dark:bg-slate-950/20">
                           <div className="mb-3 text-sm font-black">流水线步骤</div>

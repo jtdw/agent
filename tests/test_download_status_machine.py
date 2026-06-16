@@ -5,18 +5,40 @@ import unittest
 import zipfile
 from pathlib import Path
 
+import numpy as np
+import rasterio
+from rasterio.transform import from_origin
+
 from core.commercial.service import CommercialService
+from core.data_manager import DataManager
 
 
 class DownloadStatusMachineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.workdir = Path(self.tmp.name)
         self.service = CommercialService(self.workdir)
         self.service.register_user("user@example.com", "password1", user_id="u_test")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def write_raster(self, path: Path, *, west: float, value: int) -> Path:
+        data = np.full((2, 2), value, dtype="int16")
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=2,
+            width=2,
+            count=1,
+            dtype="int16",
+            crs="EPSG:4326",
+            transform=from_origin(west, 2.0, 1.0, 1.0),
+            nodata=-9999,
+        ) as dst:
+            dst.write(data, 1)
+        return path
 
     def test_failed_job_includes_failure_diagnostic(self) -> None:
         job = self.service.submit_job(user_id="u_test", source_key="gscloud", resource_type="sentinel2_msi")
@@ -53,6 +75,27 @@ class DownloadStatusMachineTests(unittest.TestCase):
         self.assertEqual(failed["state"], "failed")
         self.assertEqual(failed["artifact_quality"][0]["ok"], False)
         self.assertIn("failure_diagnostic", failed)
+
+    def test_completed_job_standardizes_multiple_raster_datasets_to_final_mosaic(self) -> None:
+        manager = DataManager(self.workdir)
+        left = self.write_raster(self.workdir / "left.tif", west=0.0, value=1)
+        right = self.write_raster(self.workdir / "right.tif", west=2.0, value=2)
+        left_name = manager.put_raster_path("download_left", left, meta={"crs": "EPSG:4326"})
+        right_name = manager.put_raster_path("download_right", right, meta={"crs": "EPSG:4326"})
+        job = self.service.submit_job(
+            user_id="u_test",
+            source_key="gscloud",
+            resource_type="dem",
+            output_name="downloaded_area",
+        )
+
+        done = self.service.run_job_with_result(job["job_id"], {"dataset_names": [left_name, right_name]})
+
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(done["result"]["dataset_name"], "downloaded_area_mosaic")
+        self.assertEqual(done["result"]["raster_standardization"]["action"], "mosaicked")
+        self.assertTrue(Path(done["result"]["final_output_path"]).exists())
+        self.assertEqual(done["output_path"], done["result"]["final_output_path"])
 
     def test_waiting_parameters_is_preserved_and_not_running(self) -> None:
         job = self.service.submit_job(user_id="u_test", source_key="gscloud", resource_type="dem")

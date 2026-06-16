@@ -162,6 +162,32 @@ class GSCloudAccountApiTests(unittest.TestCase):
         assistant = payload["messages"][-1]
         self.assertEqual(assistant["meta"]["action_required"]["job_id"], payload["job"]["job_id"])
 
+    def test_download_submit_defaults_paid_user_to_platform_but_allows_own(self) -> None:
+        self.commercial.grant_plan(self.user_id, plan="pro")
+        self.commercial.add_platform_account("gscloud", label="pool", daily_limit=10, monthly_limit=10)
+
+        auto = self.client.post(
+            "/api/downloads/submit",
+            json={"user_id": self.user_id, "source_key": "gscloud", "resource_type": "dem", "region": "Chengdu"},
+        )
+        self.assertEqual(auto.status_code, 200)
+        self.assertEqual(auto.json()["job"]["account_mode"], "platform")
+        self.assertTrue(auto.json()["job"]["account_id"])
+
+        own = self.client.post(
+            "/api/downloads/submit",
+            json={
+                "user_id": self.user_id,
+                "source_key": "gscloud",
+                "resource_type": "dem",
+                "region": "Chengdu",
+                "account_mode": "own",
+            },
+        )
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(own.json()["job"]["account_mode"], "own")
+        self.assertFalse(own.json()["job"]["account_id"])
+
     def test_legacy_dem_login_copy_points_to_existing_login_ui(self) -> None:
         source = inspect.getsource(api_server._submit_direct_gscloud_dem_from_chat)
 
