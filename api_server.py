@@ -2299,10 +2299,7 @@ def ask(body: AskIn, request: Request):
         if imported:
             prompt += "\n\n系统已根据你的指令从本地文件库预加载以下数据：\n" + "\n".join(f"- {m}" for m in imported)
         prompt += "\n\n【本地文件库上下文】\n" + library_hint + "\n如用户需要内置基础数据，请优先建议或调用本地文件库中已有条目；不要虚构不存在的数据。"
-        try:
-            return finalize(attach_chat_state(service, service.ask(prompt, visible_prompt=body.prompt, frontend_context=body.frontend_context, task_id=body.task_id)))
-        finally:
-            finish_chat_task(body.task_id)
+        return finalize(attach_chat_state(service, service.ask(prompt, visible_prompt=body.prompt, frontend_context=body.frontend_context, task_id=body.task_id)))
 
     return guard(run)
 
