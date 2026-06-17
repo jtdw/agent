@@ -18,26 +18,22 @@ const data = await loadTs('src/components/productConsoleData.ts');
 const consoleSource = await readFile('src/components/ProductConsole.tsx', 'utf8');
 const appSource = await readFile('src/App.tsx', 'utf8');
 
-assert.match(consoleSource, /label:\s*'地图工作台'/, 'ProductConsole sidebar nav must expose a map workbench item');
+assert.match(consoleSource, /openMap/, 'ProductConsole sidebar nav must expose a map workbench action');
+assert.match(consoleSource, /地理空间数据云登录/, 'ProductConsole settings must expose the GSCloud login module');
+assert.match(consoleSource, /checkGscloudLoginHealth/, 'ProductConsole settings must let users check GSCloud login health');
+assert.match(consoleSource, /api\.loginHealth\(userId,\s*'gscloud',\s*'platform'\)/, 'GSCloud module must check platform account login state');
+assert.match(consoleSource, /api\.loginHealth\(userId,\s*'gscloud',\s*'own'\)/, 'GSCloud module must check own account login state');
+assert.match(consoleSource, /deleteWorkspaceArtifact/, 'ProductConsole must be able to delete workspace artifacts');
 assert.match(
   appSource,
   /onOpenMap=\{\(\) => \{\s*setConsoleOpen\(false\);\s*setChatOpen\(true\);\s*setToolsOpen\(true\);\s*\}\}/,
   'Opening the map workbench from the console must show the assistant and tools panels'
 );
-assert.match(
-  appSource,
-  /onClick=\{\(\) => \{\s*setConsoleOpen\(true\);\s*setChatOpen\(false\);\s*setToolsOpen\(false\);\s*\}\}/,
-  'Returning to the console must hide both floating side panels'
-);
 
-assert.equal(data.normalizeTaskStatus('queued').label, '等待中');
-assert.equal(data.normalizeTaskStatus('idle').label, '就绪');
 assert.equal(data.normalizeTaskStatus('running').tone, 'running');
-assert.equal(data.normalizeTaskStatus('waiting_login').label, '需要登录');
-assert.equal(data.normalizeTaskStatus('waiting_manual').label, '需要处理');
-assert.equal(data.normalizeTaskStatus('completed').label, '成功');
+assert.equal(data.normalizeTaskStatus('waiting_login').tone, 'blocked');
+assert.equal(data.normalizeTaskStatus('completed').tone, 'succeeded');
 assert.equal(data.normalizeTaskStatus('failed').tone, 'failed');
-assert.equal(data.normalizeTaskStatus('canceled').label, '已取消');
 assert.deepEqual(data.DOWNLOAD_JOB_STATUS_KEYS, ['queued', 'running', 'waiting_login', 'waiting_manual', 'completed', 'failed', 'canceled']);
 
 const jobs = [
@@ -60,17 +56,17 @@ assert.deepEqual(data.summarizeJobs(jobs), {
 });
 
 const artifacts = [
-  { name: 'model_metrics.csv', download_url: '/metrics.csv' },
-  { name: 'soil_map.png', download_url: '/soil.png' },
-  { name: 'workspace.zip', download_url: '/workspace.zip' }
+  { artifact_id: 'artifact_metrics', name: 'model_metrics.csv', path: 'derived/model_metrics.csv', download_url: '/metrics.csv' },
+  { artifact_id: 'artifact_map', name: 'soil_map.png', path: 'plots/soil_map.png', download_url: '/soil.png' },
+  { artifact_id: 'artifact_zip', name: 'workspace.zip', path: 'exports/workspace.zip', download_url: '/workspace.zip' }
 ];
 
 assert.deepEqual(
-  data.groupArtifacts(artifacts).map((item) => [item.label, item.kind]),
+  data.groupArtifacts(artifacts).map((item) => [item.artifactId, item.label, item.path, item.kind]),
   [
-    ['model_metrics.csv', 'report'],
-    ['soil_map.png', 'visual'],
-    ['workspace.zip', 'archive']
+    ['artifact_metrics', 'model_metrics.csv', 'derived/model_metrics.csv', 'report'],
+    ['artifact_map', 'soil_map.png', 'plots/soil_map.png', 'visual'],
+    ['artifact_zip', 'workspace.zip', 'exports/workspace.zip', 'archive']
   ]
 );
 

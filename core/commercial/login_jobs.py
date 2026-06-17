@@ -46,6 +46,22 @@ def read_gscloud_login_job(workdir: str | Path, login_job_id: str) -> dict[str, 
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def request_gscloud_login_job_close(workdir: str | Path, login_job_id: str, *, reason: str = "login_completed") -> dict[str, Any]:
+    path = gscloud_login_jobs_dir(workdir) / f"{login_job_id}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"login job not found: {login_job_id}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(
+        {
+            "close_requested": True,
+            "close_reason": reason,
+            "updated_at": _now(),
+        }
+    )
+    _safe_write_json(path, data)
+    return data
+
+
 def start_gscloud_login_process(
     *,
     workdir: str | Path,

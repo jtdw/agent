@@ -20,9 +20,14 @@ SUPPORTED_WORKFLOW_TOOLS = {
     "table_to_points",
     "extract_raster_values_to_points",
     "raster_zonal_stats",
+    "raster_mosaic",
+    "raster_reproject",
+    "raster_algebra",
+    "dem_terrain_derivatives",
     "plot_dataset",
     "train_xgboost_fusion_model",
     "train_rf_fusion_model",
+    "geographical_conformal_prediction",
     "export_dataset",
 }
 VIRTUAL_WORKFLOW_TOOLS = {"field_match", "interpret_result", "export_artifact"}
@@ -189,8 +194,20 @@ def _path_inside(root: Path, path: str) -> bool:
 
 def _validate_step_objects(manager: Any, step: WorkflowStep) -> dict[str, Any] | None:
     args = step.validated_tool_args
-    for key in ("dataset_name", "clip_name", "raster_name", "vector_name", "point_name", "polygon_name", "target_name", "join_name"):
-        if key in args and not _manager_has_dataset(manager, str(args.get(key) or "")):
+    for key in (
+        "dataset_name",
+        "clip_name",
+        "raster_name",
+        "vector_name",
+        "point_name",
+        "polygon_name",
+        "target_name",
+        "join_name",
+        "calibration_dataset",
+        "target_dataset_name",
+    ):
+        value = str(args.get(key) or "").strip()
+        if key in args and value and not _manager_has_dataset(manager, value):
             return _error_result(
                 step.tool_name,
                 args,

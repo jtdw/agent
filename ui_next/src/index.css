@@ -221,6 +221,145 @@ body {
   opacity: 0.16;
 }
 
+.chat-message-renderer {
+  min-width: 0;
+}
+.chat-markdown :where(p, ul, ol, pre, table) {
+  margin: 0;
+}
+.chat-markdown :where(ul, ol) {
+  padding-left: 1.15rem;
+}
+.chat-markdown :where(li + li) {
+  margin-top: 0.15rem;
+}
+.chat-inline-code {
+  border-radius: 0.35rem;
+  background: rgba(15, 23, 42, 0.08);
+  padding: 0.05rem 0.32rem;
+  font-size: 0.88em;
+  font-weight: 700;
+}
+.chat-code-block {
+  margin-top: 0.55rem;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  background: rgba(15, 23, 42, 0.92);
+  color: rgb(226, 232, 240);
+}
+.chat-code-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 0.4rem 0.55rem;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.75);
+}
+.chat-code-block pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 0.75rem;
+  white-space: pre;
+}
+.chat-table-wrap {
+  margin-top: 0.5rem;
+  overflow-x: auto;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+}
+.chat-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.chat-table-wrap :where(th, td) {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.22);
+  padding: 0.38rem 0.5rem;
+  text-align: left;
+}
+.chat-message-actions {
+  margin-top: 0.55rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+.chat-copy-button,
+.artifact-card-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.25rem;
+  min-height: 2rem;
+  border-radius: 0.65rem;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(255, 255, 255, 0.58);
+  padding: 0 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: rgb(51, 65, 85);
+  transition: background 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+}
+.chat-copy-button:hover,
+.artifact-card-action:hover {
+  background: rgba(255, 255, 255, 0.82);
+}
+.chat-copy-button.is-copied,
+.artifact-card-action.is-primary {
+  border-color: rgba(8, 145, 178, 0.35);
+  background: rgba(6, 182, 212, 0.14);
+  color: rgb(14, 116, 144);
+}
+.artifact-download-list {
+  margin-top: 0.75rem;
+  display: grid;
+  gap: 0.55rem;
+}
+.artifact-download-card,
+.upload-result-card {
+  border-radius: 0.9rem;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  background: rgba(255, 255, 255, 0.62);
+  padding: 0.75rem;
+  backdrop-filter: blur(14px);
+}
+.artifact-download-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.artifact-file-icon,
+.upload-result-icon {
+  display: inline-flex;
+  height: 2rem;
+  width: 2rem;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  background: rgba(8, 145, 178, 0.1);
+  color: rgb(14, 116, 144);
+}
+.artifact-file-name {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-result-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  border-radius: 0.75rem;
+  background: rgba(248, 250, 252, 0.78);
+  padding: 0.55rem;
+}
+
 
 /* Full-screen map fix: keep the real Tianditu/MapLibre canvas above the decorative app background. */
 .map-stage-root {

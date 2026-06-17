@@ -16,10 +16,11 @@ import zipfile
 from .config import AUTO_ROUTE_LABEL, Settings, is_vision_model, load_settings, pick_preferred_model
 from .context_builder import build_conversation_context, format_context_for_agent
 from .conversation_intent import classify_user_intent
-from .conversation_state import ConversationState, recover_conversation_state, save_conversation_state
+from .conversation_state import ConversationState, load_conversation_state, recover_conversation_state, save_conversation_state
 from .followup_resolver import resolve_followup
 from .frontend_context import apply_frontend_context_to_state, sanitize_frontend_context
 from .model_results import generate_model_result_id
+from .response_postprocess import clean_assistant_reply
 from .result_interpreter import interpret_result
 from .task_planner import build_task_plan
 from .task_outcome_advisor import build_task_outcome
@@ -328,6 +329,9 @@ class GISWorkspaceService:
             agent = self._get_agent(model_name)
             reply, _ = agent.ask(text, history=self._history_for_agent()[:-1], image_paths=image_paths)
             self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
+            route_state = load_conversation_state(self.manager, self.current_session_id)
+            route_state.last_active_chat_model = model_name
+            save_conversation_state(self.manager, self.current_session_id, route_state)
             assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "regenerated_from": int(message_id)}
             self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
             self.manager.log_operation("重新生成回复", f"message_id={message_id} | {model_name}", "chat")
@@ -383,6 +387,7 @@ class GISWorkspaceService:
         return candidates, f"检测到图件/图片解读需求，自动附带 {len(candidates)} 张最近图件"
 
     def _decide_model(self, prompt: str) -> tuple[str, list[str], str]:
+        self._load_chat_model_route(self.current_session_id)
         if self.route_mode == "manual":
             image_paths, image_reason = self._resolve_visual_context(prompt)
             if not is_vision_model(self.selected_model):
@@ -1086,6 +1091,9 @@ class GISWorkspaceService:
         apply_frontend_context_to_state(state, clean_frontend_context)
         save_conversation_state(self.manager, self.current_session_id, state)
 
+    def _clean_assistant_reply(self, reply: str) -> str:
+        return clean_assistant_reply(str(reply or ""))
+
     def ask(self, prompt: str, visible_prompt: str | None = None, frontend_context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.current_session_id:
             self.current_session_id = self._ensure_session()
@@ -1115,6 +1123,7 @@ class GISWorkspaceService:
 
             if plan.get("should_ask_clarification") and builtin_reply is None:
                 reply = interpret_result(user_message, intent, plan, str(plan.get("clarification_question") or ""), context, dashboard_data)
+                reply = self._clean_assistant_reply(reply)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
                 assistant_meta = {"model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "intent": intent, "plan": plan}
                 self._update_conversation_state_after_turn(
@@ -1138,6 +1147,7 @@ class GISWorkspaceService:
                 dashboard_data = self.dashboard()
                 context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
                 reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                reply = self._clean_assistant_reply(reply)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
                 images: list[str] = []
                 workflow_result = workflow_execution.get("workflow_result") if isinstance(workflow_execution.get("workflow_result"), dict) else {}
@@ -1194,6 +1204,7 @@ class GISWorkspaceService:
                 dashboard_data = self.dashboard()
                 context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
                 reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                reply = self._clean_assistant_reply(reply)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
                 images: list[str] = []
                 for tool_result in deterministic_execution.get("tool_results", []):
@@ -1250,6 +1261,7 @@ class GISWorkspaceService:
                 dashboard_data = self.dashboard()
                 task_outcome = build_task_outcome("analysis", {"reply": builtin_reply}, dashboard=dashboard_data)
                 builtin_reply = interpret_result(user_message, intent, plan, builtin_reply, context, dashboard_data)
+                builtin_reply = self._clean_assistant_reply(builtin_reply)
                 assistant_meta = {"model": "builtin-workspace", "mode": "builtin", "reason": "builtin_workspace_prompt", "intent": intent, "plan": plan}
                 self._update_conversation_state_after_turn(
                     state,
@@ -1283,6 +1295,7 @@ class GISWorkspaceService:
                 raw_parts.append("本轮基于当前工作区记录和前端选中对象进行解释，没有重新生成或编造新的指标。")
                 raw_reply = "\n".join(raw_parts)
                 reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                reply = self._clean_assistant_reply(reply)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
                 assistant_meta = {
                     "model": "conversation-coordinator",
@@ -1330,8 +1343,10 @@ class GISWorkspaceService:
             dashboard_data = self.dashboard()
             context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
             reply = interpret_result(user_message, intent, plan, reply, context, dashboard_data)
+            reply = self._clean_assistant_reply(reply)
             task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
             self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
+            state.last_active_chat_model = model_name
             assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "intent": intent, "plan": plan}
             self._update_conversation_state_after_turn(
                 state,
@@ -1359,6 +1374,60 @@ class GISWorkspaceService:
 
     def available_models(self) -> list[str]:
         return list(self.settings.supported_models)
+
+    def _load_chat_model_route(self, session_id: str | None = None) -> ConversationState:
+        target = str(session_id or self.current_session_id or "").strip()
+        if not target:
+            target = self._ensure_session()
+        state = load_conversation_state(self.manager, target)
+        selected = str(state.selected_chat_model or "").strip()
+        if state.model_route_mode == "manual" and selected in self.settings.supported_models:
+            self.route_mode = "manual"
+            self.selected_model = selected
+            return state
+        if state.model_route_mode != "auto" or selected:
+            state.model_route_mode = "auto"
+            state.selected_chat_model = ""
+            save_conversation_state(self.manager, target, state)
+        self.route_mode = "auto"
+        self.selected_model = self.settings.model
+        return state
+
+    def chat_model_state(self, session_id: str | None = None) -> dict[str, Any]:
+        target = str(session_id or self.current_session_id or "").strip()
+        if not target:
+            target = self._ensure_session()
+        existing = {str(item.get("session_id") or "") for item in self.manager.database.list_conversations()}
+        if target not in existing:
+            raise ValueError(f"未找到会话：{target}")
+        state = self._load_chat_model_route(target)
+        return {
+            "session_id": target,
+            "route_mode": self.route_mode,
+            "selected_model": self.selected_model if self.route_mode == "manual" else "auto",
+            "active_model": state.last_active_chat_model or self.active_model(),
+            "models": [
+                {"id": model, "capability": "vision" if is_vision_model(model) else "text"}
+                for model in self.available_models()
+            ],
+        }
+
+    def select_chat_model(self, model_name: str, session_id: str | None = None) -> dict[str, Any]:
+        target = str(session_id or self.current_session_id or "").strip()
+        if not target:
+            target = self._ensure_session()
+        existing = {str(item.get("session_id") or "") for item in self.manager.database.list_conversations()}
+        if target not in existing:
+            raise ValueError(f"未找到会话：{target}")
+        clean = str(model_name or "").strip()
+        if clean != "auto" and clean not in self.settings.supported_models:
+            raise ValueError(f"不支持的模型：{clean}")
+        state = load_conversation_state(self.manager, target)
+        state.model_route_mode = "auto" if clean == "auto" else "manual"
+        state.selected_chat_model = "" if clean == "auto" else clean
+        save_conversation_state(self.manager, target, state)
+        self.manager.log_operation("切换会话模型", clean or "auto", "config")
+        return self.chat_model_state(target)
 
     def route_options(self) -> list[str]:
         return [AUTO_ROUTE_LABEL, *self.available_models()]

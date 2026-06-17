@@ -9,6 +9,8 @@ from typing import Any
 
 import pandas as pd
 
+from .response_postprocess import clean_assistant_reply, repair_mojibake_text
+
 
 class WorkspaceDatabase:
     """Lightweight SQLite workspace database for datasets, chats, and derived results."""
@@ -303,6 +305,14 @@ class WorkspaceDatabase:
             ).fetchone()
         return self._decode_artifact(row) if row else None
 
+    def delete_artifact(self, artifact_id: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM artifacts WHERE artifact_id = ?",
+                (str(artifact_id or ""),),
+            )
+            return int(cursor.rowcount or 0)
+
     def list_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
         params: list[Any] = []
         where = ""
@@ -398,7 +408,10 @@ class WorkspaceDatabase:
             if info and info.get("sql_table"):
                 conn.execute(f'DROP TABLE IF EXISTS "{info["sql_table"]}"')
             conn.execute("DELETE FROM dataset_catalog WHERE dataset_name = ?", (dataset_name,))
-            conn.execute("DELETE FROM document_store WHERE dataset_name = ?", (dataset_name,))
+            try:
+                conn.execute("DELETE FROM document_store WHERE dataset_name = ?", (dataset_name,))
+            except sqlite3.OperationalError:
+                pass
 
     def sync_table(
         self,
@@ -567,14 +580,19 @@ class WorkspaceDatabase:
         self._set_state("current_conversation_id", session_id)
         self.touch_conversation(session_id)
 
-    def add_message(self, session_id: str, role: str, content: str, meta: dict[str, Any] | None = None) -> None:
+    def add_message(self, session_id: str, role: str, content: str, meta: dict[str, Any] | None = None) -> int:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        clean_content = repair_mojibake_text(str(content or ""))
+        if role == "assistant":
+            clean_content = clean_assistant_reply(clean_content)
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO conversation_messages (session_id, role, content, meta_json, created_at) VALUES (?, ?, ?, ?, ?)",
-                (session_id, role, content, json.dumps(meta or {}, ensure_ascii=False), now),
+                (session_id, role, clean_content, json.dumps(meta or {}, ensure_ascii=False), now),
             )
+            message_id = int(cursor.lastrowid)
         self.touch_conversation(session_id)
+        return message_id
 
     def get_conversation_state(self, session_id: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -614,9 +632,12 @@ class WorkspaceDatabase:
             ).fetchone()
             if not row:
                 raise ValueError(f"未找到消息：{message_id}")
+            clean_content = repair_mojibake_text(str(content or ""))
+            if row["role"] == "assistant":
+                clean_content = clean_assistant_reply(clean_content)
             conn.execute(
                 "UPDATE conversation_messages SET content = ?, meta_json = ?, created_at = ? WHERE message_id = ?",
-                (content, json.dumps(meta or {}, ensure_ascii=False), now, int(message_id)),
+                (clean_content, json.dumps(meta or {}, ensure_ascii=False), now, int(message_id)),
             )
         self.touch_conversation(row["session_id"])
         return {"message_id": row["message_id"], "session_id": row["session_id"], "role": row["role"]}

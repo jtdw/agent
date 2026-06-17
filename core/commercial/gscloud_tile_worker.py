@@ -13,6 +13,7 @@ from ..domestic_sources.gscloud_adapter import (
     gscloud_platform_state_path,
     gscloud_user_state_path,
 )
+from ..domestic_sources.raster_postprocess import standardize_raster_download_result
 from ..domestic_sources.gscloud_stable_downloader import download_gscloud_tiles_by_identifier_search
 
 
@@ -136,11 +137,25 @@ def main() -> int:
         )
         result["tile_plan"] = {k: v for k, v in plan.items() if k != "records"}
 
-        service._update_job(job_id, status="running", progress=90, stage="packaging_result")
+        service._update_job(job_id, status="running", progress=86, stage="mosaicking_and_clipping_dem")
+        current.update({
+            "state": "STANDARDIZING_RASTER",
+            "message": "分幅下载完成，正在执行标准栅格流程：解压、拼接、按区域边界裁剪、注册和打包。",
+            "updated_at": _now(),
+        })
+        _safe_write_json(status_path, current)
+        result = standardize_raster_download_result(
+            manager=manager,
+            result=result,
+            output_name=output_name,
+            clip_vector=str(plan.get("region_dataset") or ""),
+        )
+
+        service._update_job(job_id, status="running", progress=94, stage="packaging_result")
         done = service.run_job_with_result(job_id, result)
         current.update({
             "state": "COMPLETED",
-            "message": "已按数据标识精确搜索并自动下载目标分幅，完成解压、入库和打包。",
+            "message": "已按数据标识精确搜索并自动下载目标分幅，完成解压、自动拼接、按边界裁剪、入库和打包。",
             "result": result,
             "job": done,
             "updated_at": _now(),

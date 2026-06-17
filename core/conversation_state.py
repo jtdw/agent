@@ -23,6 +23,9 @@ class ConversationState:
     selected_model_result: dict[str, Any] | None = None
     active_task: dict[str, Any] | None = None
     frontend_context: dict[str, Any] = field(default_factory=dict)
+    model_route_mode: str = "auto"
+    selected_chat_model: str = ""
+    last_active_chat_model: str = ""
 
     @classmethod
     def from_dict(cls, data: Any) -> "ConversationState":
@@ -48,6 +51,9 @@ class ConversationState:
             selected_model_result=data.get("selected_model_result") if isinstance(data.get("selected_model_result"), dict) else None,
             active_task=data.get("active_task") if isinstance(data.get("active_task"), dict) else None,
             frontend_context=data.get("frontend_context") if isinstance(data.get("frontend_context"), dict) else {},
+            model_route_mode=str(data.get("model_route_mode") or "auto"),
+            selected_chat_model=str(data.get("selected_chat_model") or ""),
+            last_active_chat_model=str(data.get("last_active_chat_model") or ""),
         )
 
     def to_dict(self) -> dict[str, Any]:

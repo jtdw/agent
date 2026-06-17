@@ -29,9 +29,13 @@ import {
   XCircle
 } from 'lucide-react';
 import { AuthPanel } from './AuthPanel';
+import { ChatWorkspace, type ExternalPromptCommand } from './ChatPanel';
+import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { api, CommercialUser, DownloadJob, ResultPanel, WorkspaceDashboard } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import type { ChatContextPayload } from '@/lib/chatContext';
+import type { ParsedMapTextCommand } from './mapTextCommands';
 import {
   ConsoleArtifact,
   ProductTaskTone,
@@ -41,7 +45,7 @@ import {
   summarizeJobs
 } from './productConsoleData';
 
-type ConsoleTab = 'overview' | 'create' | 'tasks' | 'logs' | 'results' | 'data' | 'settings';
+type ConsoleTab = 'overview' | 'chat' | 'create' | 'tasks' | 'logs' | 'results' | 'data' | 'settings';
 type ConsoleNavItem = {
   id: ConsoleTab | 'map-workbench';
   label: string;
@@ -55,6 +59,11 @@ type ProductConsoleProps = {
   resultPanel?: ResultPanel | null;
   onOpenChat?: () => void;
   onOpenMap?: () => void;
+  onMapTextCommand?: (command: ParsedMapTextCommand) => string;
+  externalPrompt?: ExternalPromptCommand | null;
+  onResultPanel?: (panel: ResultPanel) => void;
+  onSessionChange?: (sessionId: string) => void;
+  chatContext?: ChatContextPayload;
 };
 
 type DownloadProduct = {
@@ -72,6 +81,7 @@ type JobLogData = {
 };
 
 const navItems: ConsoleNavItem[] = [
+  { id: 'chat', label: '智能聊天', icon: MessageSquare },
   { id: 'overview', label: '总览', icon: Home },
   { id: 'map-workbench', label: '地图工作台', icon: Map, action: 'openMap' },
   { id: 'create', label: '新建任务', icon: Play },
@@ -221,7 +231,18 @@ function artifactIcon(kind: ConsoleArtifact['kind']) {
   return FileArchive;
 }
 
-export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenMap }: ProductConsoleProps) {
+export function ProductConsole({
+  user,
+  setUser,
+  resultPanel,
+  onOpenChat,
+  onOpenMap,
+  onMapTextCommand,
+  externalPrompt,
+  onResultPanel,
+  onSessionChange,
+  chatContext
+}: ProductConsoleProps) {
   const [activeTab, setActiveTab] = useState<ConsoleTab>('overview');
   const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
@@ -245,6 +266,8 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
   const [preflightMessage, setPreflightMessage] = useState('');
   const [preflightOk, setPreflightOk] = useState<boolean | null>(null);
   const [submitLoading, setSubmitLoading] = useState(false);
+  const [gscloudLoginMessage, setGscloudLoginMessage] = useState('');
+  const [gscloudLoginLoading, setGscloudLoginLoading] = useState(false);
   const userId = user?.user_id || '';
 
   const refresh = useCallback(async () => {
@@ -291,6 +314,10 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
   const product = downloadProducts.find((item) => item.value === downloadResourceType) || downloadProducts[0];
   const region = downloadRegion.trim() || '成都市';
   const defaultOutputName = `${region}_${product.outputSuffix}`;
+  const openChatWorkspace = () => {
+    setActiveTab('chat');
+    onOpenChat?.();
+  };
 
   const runPreflight = async () => {
     if (!user) {
@@ -464,6 +491,45 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
     }
   };
 
+  const deleteArtifact = async (artifact: ConsoleArtifact) => {
+    setNotice('');
+    try {
+      const result = await api.deleteWorkspaceArtifact({
+        user_id: userId,
+        artifact_id: artifact.artifactId,
+        path: artifact.path
+      });
+      setDashboard(result.dashboard);
+      setNotice(`已删除结果文件：${artifact.label}`);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '删除结果文件失败');
+    }
+  };
+
+  const checkGscloudLoginHealth = async () => {
+    if (!userId) {
+      setGscloudLoginMessage('请先登录智能体账号，再检查地理空间数据云登录态。');
+      return;
+    }
+    setGscloudLoginLoading(true);
+    setGscloudLoginMessage('');
+    try {
+      const [platform, own] = await Promise.all([
+        api.loginHealth(userId, 'gscloud', 'platform'),
+        api.loginHealth(userId, 'gscloud', 'own')
+      ]);
+      const platformHealth = platform.login_health || {};
+      const ownHealth = own.login_health || {};
+      const platformText = platformHealth.ok ? '平台账号可用' : `平台账号不可用：${String(platformHealth.reason || platformHealth.detail || '需要重新登录')}`;
+      const ownText = ownHealth.ok ? '用户自有账号可用' : `用户自有账号不可用：${String(ownHealth.reason || ownHealth.detail || '需要重新登录')}`;
+      setGscloudLoginMessage(`${platformText}；${ownText}`);
+    } catch (e) {
+      setGscloudLoginMessage(e instanceof Error ? e.message : '检查地理空间数据云登录态失败');
+    } finally {
+      setGscloudLoginLoading(false);
+    }
+  };
+
   const renderJobActions = (job: DownloadJob) => {
     const tone = normalizeTaskStatus(job.status).tone;
     const active = tone === 'running' || tone === 'waiting' || tone === 'blocked';
@@ -511,7 +577,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
               <button className="console-primary-button" onClick={() => setActiveTab('create')}>
                 <Play size={16} /> 新建任务
               </button>
-              <button className="console-secondary-button" onClick={onOpenChat}>
+              <button className="console-secondary-button" onClick={openChatWorkspace}>
                 <MessageSquare size={16} /> 打开智能助手
               </button>
               <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}>
@@ -571,7 +637,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
           {artifacts.length === 0 ? (
             <EmptyState icon={FileText} title="暂无结果文件" description="任务完成后，报告、图表、数据和打包文件会出现在这里。" />
           ) : (
-            <ArtifactList artifacts={artifacts.slice(0, 5)} onDownload={downloadArtifact} />
+            <ArtifactList artifacts={artifacts.slice(0, 5)} onDownload={downloadArtifact} onDelete={deleteArtifact} />
           )}
         </Panel>
       </div>
@@ -822,7 +888,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
             <EmptyState icon={FileText} title="暂无结果文件" description="任务成功后，文件会自动出现在这里；也可以从任务中心打开成功任务查看下载入口。" />
           ) : (
             <div className="grid gap-4 lg:grid-cols-2">
-              <ArtifactList artifacts={artifacts} onDownload={downloadArtifact} />
+              <ArtifactList artifacts={artifacts} onDownload={downloadArtifact} onDelete={deleteArtifact} />
               {panelFiles.length > 0 && (
                 <div className="space-y-2">
                   {panelFiles.map((file) => (
@@ -866,12 +932,61 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
       </div>
       <div className="mt-5 flex flex-wrap gap-3">
         <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}><Map size={15} /> 打开原地图工作台</button>
-        <button className="console-secondary-button" onClick={onOpenChat}><Bot size={15} /> 打开智能助手</button>
+        <button className="console-secondary-button" onClick={openChatWorkspace}><Bot size={15} /> 打开智能助手</button>
       </div>
     </Panel>
   );
 
+  const renderSettingsV2 = () => (
+    <div className="space-y-5">
+      <Panel className="p-5">
+        <SectionHeader title="设置与运行环境" description="当前保留原有设置能力，这里补充后台化的信息入口。" />
+        <div className="grid gap-4 md:grid-cols-2">
+          <InfoItem label="账号状态" value={user ? user.email : '未登录'} />
+          <InfoItem label="当前套餐" value={user?.plan || '--'} />
+          <InfoItem label="平台额度" value={user ? `${Number(user.platform_monthly_used || 0)} / ${Number(user.platform_monthly_quota || 0)}` : '--'} />
+          <InfoItem label="工作区" value={dashboard?.workdir || '默认工作区'} />
+        </div>
+        <div className="mt-5 flex flex-wrap gap-3">
+          <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}><Map size={15} /> 打开原地图工作台</button>
+          <button className="console-secondary-button" onClick={openChatWorkspace}><Bot size={15} /> 打开智能助手</button>
+        </div>
+      </Panel>
+
+      <Panel className="p-5">
+        <SectionHeader title="地理空间数据云登录" description="检查平台账号和用户自有账号的登录态；需要重新登录时请回到地图工作台打开下载工具。" />
+        <GSCloudAccountPanel enabled={Boolean(user)} />
+        <div className="grid gap-4 md:grid-cols-2">
+          <InfoItem label="平台账号模式" value="由后台账号池提供，按套餐额度使用。" />
+          <InfoItem label="用户自有账号模式" value="使用当前用户保存的 GSCloud 登录态，不占用平台额度。" />
+        </div>
+        {gscloudLoginMessage && <div className="mt-4"><StateMessage tone={gscloudLoginMessage.includes('不可用') || gscloudLoginMessage.includes('失败') ? 'error' : 'success'}>{gscloudLoginMessage}</StateMessage></div>}
+        <div className="mt-5 flex flex-wrap gap-3">
+          <button className="console-secondary-button" onClick={checkGscloudLoginHealth} disabled={gscloudLoginLoading}>
+            {gscloudLoginLoading ? <Loader2 className="animate-spin" size={15} /> : <ShieldCheck size={15} />} 检查 GSCloud 登录态
+          </button>
+          <button data-testid="open-map-workspace" className="console-primary-button" onClick={onOpenMap}><Map size={15} /> 打开地图工作台登录入口</button>
+        </div>
+      </Panel>
+    </div>
+  );
+
+  const renderChat = () => (
+    <ChatWorkspace
+      mode="page"
+      user={user}
+      setUser={setUser}
+      onMapTextCommand={onMapTextCommand}
+      externalPrompt={externalPrompt}
+      onResultPanel={onResultPanel}
+      onSessionChange={onSessionChange}
+      chatContext={chatContext}
+      mentionDatasets={dashboard?.datasets || []}
+    />
+  );
+
   const renderContent = () => {
+    if (activeTab === 'chat') return renderChat();
     if (loading) return <LoadingState label="正在加载控制台数据" />;
     if (error) return <StateMessage tone="error">{error}</StateMessage>;
     if (activeTab === 'overview') return renderOverview();
@@ -880,7 +995,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
     if (activeTab === 'logs') return renderLogs();
     if (activeTab === 'results') return renderResults();
     if (activeTab === 'data') return renderDataAssets();
-    return renderSettings();
+    return renderSettingsV2();
   };
 
   const activateNavItem = (item: ConsoleNavItem) => {
@@ -933,7 +1048,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
               <button className="console-secondary-button" onClick={refresh} disabled={loading}>
                 <RefreshCcw size={15} className={loading ? 'animate-spin' : ''} /> 刷新
               </button>
-              <button className="console-secondary-button" onClick={onOpenChat}>
+              <button className="console-secondary-button" onClick={openChatWorkspace}>
                 <MessageSquare size={15} /> 智能助手
               </button>
               <div className="min-w-0 sm:w-[360px]">
@@ -957,7 +1072,7 @@ export function ProductConsole({ user, setUser, resultPanel, onOpenChat, onOpenM
           </div>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto p-4 sm:p-6">
+        <main className={cn('min-h-0 flex-1 p-4 sm:p-6', activeTab === 'chat' ? 'overflow-hidden' : 'overflow-y-auto')}>
           {renderContent()}
         </main>
       </div>
@@ -1020,19 +1135,26 @@ function InfoItem({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function ArtifactList({ artifacts, onDownload }: { artifacts: ConsoleArtifact[]; onDownload: (url: string, name: string) => void }) {
+function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleArtifact[]; onDownload: (url: string, name: string) => void; onDelete: (artifact: ConsoleArtifact) => void }) {
   return (
     <div className="space-y-2">
       {artifacts.map((artifact) => {
         const Icon = artifactIcon(artifact.kind);
         return (
-          <button key={artifact.url} onClick={() => onDownload(artifact.url, artifact.label)} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+          <div key={artifact.artifactId || artifact.path || artifact.url} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
             <span className="flex min-w-0 items-center gap-3">
               <Icon className="shrink-0 text-slate-400" size={17} />
               <span className="min-w-0 truncate font-semibold">{artifact.label}</span>
             </span>
-            <Download className="shrink-0 text-slate-400" size={16} />
-          </button>
+            <span className="flex shrink-0 items-center gap-2">
+              <button type="button" onClick={() => onDownload(artifact.url, artifact.label)} className="console-icon-button" title="下载结果文件">
+                <Download className="shrink-0 text-slate-400" size={16} />
+              </button>
+              <button type="button" onClick={() => onDelete(artifact)} className="console-icon-button text-rose-600 dark:text-rose-300" title="删除结果文件">
+                <Trash2 size={16} />
+              </button>
+            </span>
+          </div>
         );
       })}
     </div>

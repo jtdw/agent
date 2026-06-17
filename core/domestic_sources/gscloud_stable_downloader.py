@@ -25,6 +25,99 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def per_tile_download_timeout_ms(timeout_seconds: int) -> int:
+    return min(120, max(30, int(timeout_seconds or 30))) * 1000
+
+
+def normalize_gscloud_tile_id(tile_id: str, *, tile_scheme: str = "astgtm_1deg") -> str:
+    text = str(tile_id or "").strip()
+    if str(tile_scheme or "").lower() == "srtm_utm_5deg":
+        return text.lower()
+    return text.upper()
+
+
+def extract_gscloud_tile_id_from_name(name: str | Path, *, tile_scheme: str = "astgtm_1deg") -> str:
+    text = Path(str(name)).name
+    if str(tile_scheme or "").lower() == "srtm_utm_5deg":
+        match = re.search(r"utm_srtm_\d{2}_\d{2}", text, flags=re.IGNORECASE)
+        return match.group(0).lower() if match else ""
+    return extract_astgtm_tile_id_from_name(text)
+
+
+def _tile_search_terms(tile_id: str, *, tile_scheme: str = "astgtm_1deg") -> list[str]:
+    normalized = normalize_gscloud_tile_id(tile_id, tile_scheme=tile_scheme)
+    if not normalized:
+        return []
+    if str(tile_scheme or "").lower() == "srtm_utm_5deg":
+        coordinate = normalized.removeprefix("utm_srtm_")
+        return list(dict.fromkeys([normalized, coordinate]))
+    coordinate = normalized.removeprefix("ASTGTM_")
+    return list(dict.fromkeys([normalized, coordinate]))
+
+
+def existing_gscloud_tile_downloads(target_dir: Path, tile_ids: list[str], *, tile_scheme: str = "astgtm_1deg") -> dict[str, Path]:
+    expected = {normalize_gscloud_tile_id(str(tile_id), tile_scheme=tile_scheme) for tile_id in tile_ids if str(tile_id).strip()}
+    found: dict[str, Path] = {}
+    if not target_dir.exists():
+        return found
+    for path in target_dir.iterdir():
+        if not path.is_file() or path.stat().st_size <= 0:
+            continue
+        tile_id = extract_gscloud_tile_id_from_name(path.name, tile_scheme=tile_scheme)
+        if tile_id in expected:
+            found[tile_id] = path
+    return found
+
+
+def validate_gscloud_tile_downloads_for_scheme(
+    downloaded: list[Path],
+    expected_tile_ids: list[str],
+    *,
+    tile_scheme: str = "astgtm_1deg",
+) -> dict[str, Any]:
+    if str(tile_scheme or "").lower() != "srtm_utm_5deg":
+        return assert_valid_gscloud_tile_downloads(downloaded, expected_tile_ids=expected_tile_ids, require_all=True)
+
+    expected = [normalize_gscloud_tile_id(x, tile_scheme=tile_scheme) for x in expected_tile_ids if str(x or "").strip()]
+    expected_set = set(expected)
+    downloaded_items: list[dict[str, Any]] = []
+    downloaded_tile_ids: list[str] = []
+    unknown_files: list[str] = []
+    unexpected: list[str] = []
+    for path in downloaded:
+        tile_id = extract_gscloud_tile_id_from_name(path.name, tile_scheme=tile_scheme)
+        downloaded_items.append({"file": str(path), "filename": path.name, "tile_id": tile_id})
+        if tile_id:
+            downloaded_tile_ids.append(tile_id)
+            if tile_id not in expected_set:
+                unexpected.append(tile_id)
+        else:
+            unknown_files.append(path.name)
+    missing = [tile_id for tile_id in expected if tile_id not in set(downloaded_tile_ids)]
+    valid = not unexpected and not unknown_files and not missing
+    if not valid:
+        raise RuntimeError(
+            "下载文件未通过 GSCloud 分幅校验。"
+            + (f" 缺少: {', '.join(missing[:20])}." if missing else "")
+            + (f" 非目标分幅: {', '.join(sorted(set(unexpected))[:20])}." if unexpected else "")
+            + (f" 无法识别: {', '.join(unknown_files[:10])}." if unknown_files else "")
+        )
+    return {
+        "valid": True,
+        "expected_tile_ids": expected,
+        "expected_count": len(expected),
+        "downloaded_items": downloaded_items,
+        "downloaded_tile_ids": downloaded_tile_ids,
+        "downloaded_count": len(downloaded_tile_ids),
+        "unexpected_tile_ids": [],
+        "unexpected_count": 0,
+        "unknown_files": [],
+        "missing_tile_ids": [],
+        "missing_count": 0,
+        "require_all": True,
+    }
+
+
 def _safe_read_json(path: str | Path | None) -> dict[str, Any]:
     if not path:
         return {}
@@ -177,8 +270,8 @@ def _click_search_button(page) -> bool:
     return False
 
 
-def _search_tile_id(page, tile_id: str) -> dict[str, Any]:
-    tile_id = str(tile_id or "").strip().upper()
+def _search_tile_id(page, tile_id: str, *, tile_scheme: str = "astgtm_1deg") -> dict[str, Any]:
+    tile_id = normalize_gscloud_tile_id(tile_id, tile_scheme=tile_scheme)
     if not tile_id:
         return {"ok": False, "error": "空分幅编号"}
 
@@ -189,37 +282,42 @@ def _search_tile_id(page, tile_id: str) -> dict[str, Any]:
             "error": "未找到‘数据标识/标识’筛选输入框。为防止下载错误分幅，已停止自动点击。",
         }
 
-    try:
-        inp.click(timeout=3000)
+    attempted: list[str] = []
+    for search_term in _tile_search_terms(tile_id, tile_scheme=tile_scheme):
+        attempted.append(search_term)
         try:
-            inp.press("Control+A")
-            inp.press("Backspace")
-        except Exception:
-            pass
-        inp.fill(tile_id, timeout=5000)
-        try:
-            inp.press("Enter")
-        except Exception:
-            pass
-        clicked = _click_search_button(page)
-        if not clicked:
-            page.wait_for_timeout(2500)
-    except Exception as exc:
-        return {"ok": False, "error": f"填写数据标识失败：{exc}"}
+            inp.click(timeout=3000)
+            inp.fill("", timeout=3000)
+            inp.fill(search_term, timeout=5000)
+            clicked = _click_search_button(page)
+            if not clicked:
+                inp.press("Enter")
+                page.wait_for_timeout(1800)
+        except Exception as exc:
+            return {"ok": False, "error": f"填写数据标识失败：{exc}", "attempted_terms": attempted}
 
-    for _ in range(10):
-        rows = _get_table_rows(page)
-        exact = []
-        for row in rows:
-            text = _row_text(row)
-            if tile_id in text.upper():
-                found = re.findall(r"ASTGTM_[NS]\d{2}[EW]\d{3}", text.upper())
+        for _ in range(10):
+            rows = _get_table_rows(page)
+            for row in rows:
+                text = _row_text(row)
+                if str(tile_scheme or "").lower() == "srtm_utm_5deg":
+                    found = [x.lower() for x in re.findall(r"utm_srtm_\d{2}_\d{2}", text, flags=re.IGNORECASE)]
+                else:
+                    found = re.findall(r"ASTGTM_[NS]\d{2}[EW]\d{3}", text.upper())
                 if tile_id in found:
-                    exact.append((row, text))
-        if exact:
-            return {"ok": True, "row": exact[0][0], "row_text": exact[0][1], "search_clicked": clicked}
-        page.wait_for_timeout(1000)
-    return {"ok": False, "error": f"搜索结果中没有找到目标分幅 {tile_id}。"}
+                    return {
+                        "ok": True,
+                        "row": row,
+                        "row_text": text,
+                        "search_clicked": clicked,
+                        "search_term": search_term,
+                    }
+            page.wait_for_timeout(800)
+    return {
+        "ok": False,
+        "error": f"搜索结果中没有找到目标分幅 {tile_id}。已尝试：{', '.join(attempted)}",
+        "attempted_terms": attempted,
+    }
 
 
 def _click_download_in_exact_row(row) -> bool:
@@ -254,6 +352,8 @@ def download_gscloud_tiles_by_identifier_search(
     manager: DataManager,
     tile_ids: list[str],
     dataset_id: str = "310",
+    pid: str = "1",
+    tile_scheme: str = "astgtm_1deg",
     storage_state_path: str | Path = "",
     output_name: str = "",
     timeout_seconds: int = 1800,
@@ -262,16 +362,17 @@ def download_gscloud_tiles_by_identifier_search(
     status_path: str | Path | None = None,
 ) -> dict[str, Any]:
     sync_playwright, PlaywrightTimeoutError = _ensure_playwright()
-    expected = [str(x).strip().upper() for x in tile_ids if str(x or "").strip()]
+    expected = [normalize_gscloud_tile_id(str(x), tile_scheme=tile_scheme) for x in tile_ids if str(x or "").strip()]
     if not expected:
         raise ValueError("没有目标分幅，无法下载。")
 
-    start_url = f"https://www.gscloud.cn/sources/accessdata/{dataset_id}?pid=1"
+    start_url = f"https://www.gscloud.cn/sources/accessdata/{dataset_id}?pid={str(pid or '1').strip() or '1'}"
     target_dir = Path(manager.workdir) / "domestic_downloads" / "gscloud"
     target_dir.mkdir(parents=True, exist_ok=True)
-    timeout_ms = max(30, int(timeout_seconds or 1800)) * 1000
-    downloaded: list[Path] = []
-    downloaded_tiles: set[str] = set()
+    timeout_ms = per_tile_download_timeout_ms(timeout_seconds)
+    existing = existing_gscloud_tile_downloads(target_dir, expected, tile_scheme=tile_scheme)
+    downloaded: list[Path] = list(existing.values())
+    downloaded_tiles: set[str] = set(existing)
     not_found: list[str] = []
     errors: list[str] = []
     step_records: list[dict[str, Any]] = []
@@ -298,6 +399,7 @@ def download_gscloud_tiles_by_identifier_search(
 
         for idx, tile_id in enumerate(expected, start=1):
             if tile_id in downloaded_tiles:
+                step_records.append({"tile_id": tile_id, "status": "reused", "file": str(existing[tile_id])})
                 continue
             _update_status(
                 status_path,
@@ -307,41 +409,50 @@ def download_gscloud_tiles_by_identifier_search(
                 downloaded_count=len(downloaded_tiles),
                 remaining_count=len(expected) - len(downloaded_tiles),
             )
-            search_result = _search_tile_id(page, tile_id)
-            if not search_result.get("ok"):
+            tile_errors: list[str] = []
+            for attempt in range(1, 4):
+                if attempt > 1:
+                    try:
+                        page.goto(start_url, wait_until="domcontentloaded", timeout=60_000)
+                    except Exception:
+                        pass
+                search_result = _search_tile_id(page, tile_id, tile_scheme=tile_scheme)
+                if not search_result.get("ok"):
+                    tile_errors.append(str(search_result.get("error") or "not found"))
+                    step_records.append({"tile_id": tile_id, "status": "search_retry", "attempt": attempt, "error": search_result.get("error")})
+                    continue
+                try:
+                    with page.expect_download(timeout=timeout_ms) as dl_info:
+                        clicked = _click_download_in_exact_row(search_result["row"])
+                        if not clicked:
+                            raise RuntimeError("找到目标行，但未找到可点击下载按钮。")
+                    download = dl_info.value
+                    saved = _save_download(download, target_dir, tile_id)
+                    detected = extract_gscloud_tile_id_from_name(saved.name, tile_scheme=tile_scheme)
+                    if detected != tile_id:
+                        raise RuntimeError(f"下载文件校验失败：目标 {tile_id}，实际 {saved.name}，识别为 {detected or '无法识别'}。")
+                    downloaded.append(saved)
+                    downloaded_tiles.add(tile_id)
+                    step_records.append({"tile_id": tile_id, "status": "downloaded", "attempt": attempt, "file": str(saved)})
+                    _update_status(
+                        status_path,
+                        state="IDENTIFIER_SEARCH_DOWNLOADING",
+                        message=f"已下载 {len(downloaded_tiles)}/{len(expected)}：{tile_id}",
+                        current_tile=tile_id,
+                        downloaded_count=len(downloaded_tiles),
+                        remaining_count=len(expected) - len(downloaded_tiles),
+                        last_download=str(saved),
+                    )
+                    break
+                except PlaywrightTimeoutError:
+                    tile_errors.append(f"第 {attempt} 次等待下载超时")
+                    step_records.append({"tile_id": tile_id, "status": "download_timeout", "attempt": attempt})
+                except Exception as exc:
+                    tile_errors.append(str(exc))
+                    step_records.append({"tile_id": tile_id, "status": "error", "attempt": attempt, "error": str(exc)})
+            if tile_id not in downloaded_tiles:
                 not_found.append(tile_id)
-                errors.append(f"{tile_id}: {search_result.get('error')}")
-                step_records.append({"tile_id": tile_id, "status": "not_found", "error": search_result.get("error")})
-                continue
-
-            try:
-                with page.expect_download(timeout=timeout_ms) as dl_info:
-                    clicked = _click_download_in_exact_row(search_result["row"])
-                    if not clicked:
-                        raise RuntimeError("找到目标行，但未找到可点击下载按钮。")
-                download = dl_info.value
-                saved = _save_download(download, target_dir, tile_id)
-                detected = extract_astgtm_tile_id_from_name(saved.name)
-                if detected != tile_id:
-                    raise RuntimeError(f"下载文件校验失败：目标 {tile_id}，实际 {saved.name}，识别为 {detected or '无法识别'}。")
-                downloaded.append(saved)
-                downloaded_tiles.add(tile_id)
-                step_records.append({"tile_id": tile_id, "status": "downloaded", "file": str(saved)})
-                _update_status(
-                    status_path,
-                    state="IDENTIFIER_SEARCH_DOWNLOADING",
-                    message=f"已下载 {len(downloaded_tiles)}/{len(expected)}：{tile_id}",
-                    current_tile=tile_id,
-                    downloaded_count=len(downloaded_tiles),
-                    remaining_count=len(expected) - len(downloaded_tiles),
-                    last_download=str(saved),
-                )
-            except PlaywrightTimeoutError:
-                errors.append(f"{tile_id}: 等待下载超时")
-                step_records.append({"tile_id": tile_id, "status": "download_timeout"})
-            except Exception as exc:
-                errors.append(f"{tile_id}: {exc}")
-                step_records.append({"tile_id": tile_id, "status": "error", "error": str(exc)})
+                errors.append(f"{tile_id}: {'; '.join(tile_errors[-3:])}")
 
         if storage_state_path:
             try:
@@ -357,7 +468,8 @@ def download_gscloud_tiles_by_identifier_search(
             + " 系统没有打开给用户随便选择；请检查登录态、数据标识输入框或网站权限。"
         )
 
-    validation = assert_valid_gscloud_tile_downloads(downloaded, expected_tile_ids=expected, require_all=True)
+    _update_status(status_path, download_steps=step_records, auto_tile_errors=errors, not_found_tile_ids=not_found)
+    validation = validate_gscloud_tile_downloads_for_scheme(downloaded, expected, tile_scheme=tile_scheme)
     result = _postprocess_gscloud_files(manager, downloaded, get_source("gscloud"), output_name=output_name, auto_load=auto_load)
     result["tile_validation"] = validation
     result["requested_tile_ids"] = expected

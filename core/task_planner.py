@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from core.field_semantics import match_user_field_concept
@@ -396,6 +397,119 @@ def _export_path(manager: Any | None, stem: str, suffix: str) -> str:
     return f"exports/{filename}"
 
 
+def _prompt_requests_gcp(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(
+        token in text
+        for token in (
+            "gcp",
+            "conformal",
+            "uncertainty",
+            "prediction interval",
+            "prediction intervals",
+            "不确定性",
+            "共形预测",
+            "预测区间",
+        )
+    )
+
+
+def _recent_model_for_gcp(context: dict[str, Any], resolved_objects: dict[str, Any]) -> dict[str, Any]:
+    resolved = _as_dict(_as_dict(resolved_objects.get("model_result")).get("data"))
+    if resolved:
+        return resolved
+    return _as_dict(context.get("recent_model_result"))
+
+
+def _model_value(model: dict[str, Any], key: str) -> str:
+    summary = _as_dict(model.get("summary"))
+    diagnostics = _as_dict(model.get("diagnostics"))
+    outputs = _as_dict(model.get("outputs"))
+    value = model.get(key) or summary.get(key) or diagnostics.get(key) or outputs.get(key) or ""
+    return str(value)
+
+
+def _build_gcp_args_from_recent_model(model: dict[str, Any]) -> dict[str, Any]:
+    output_prefix = str(model.get("output_prefix") or _model_value(model, "output_name") or "model")
+    result_dataset = _model_value(model, "result_dataset") or output_prefix
+    observed_col = _model_value(model, "target_col")
+    predicted_col = (
+        _model_value(model, "prediction_column")
+        or _model_value(model, "cv_prediction_column")
+        or (f"{output_prefix}_xgb" if output_prefix else "")
+    )
+    args = {
+        "calibration_dataset": result_dataset,
+        "observed_col": observed_col,
+        "predicted_cols": predicted_col,
+        "output_name": _safe_output_prefix(output_prefix, "gcp"),
+        "calibration_ratio": 0.3,
+        "alpha": 0.1,
+    }
+    date_col = _model_value(model, "date_col")
+    if date_col:
+        args["date_col"] = date_col
+    return args
+
+
+def _infer_date_field(context: dict[str, Any]) -> str:
+    fields = [str(field) for field in context.get("available_fields", []) if str(field or "").strip()]
+    for candidate in ("date", "time", "datetime", "日期", "时间"):
+        for field in fields:
+            if field.lower() == candidate.lower():
+                return field
+    for field in fields:
+        lowered = field.lower()
+        if "date" in lowered or "time" in lowered:
+            return field
+    return ""
+
+
+def _build_gcp_workflow(plan: dict[str, Any], gcp_args: dict[str, Any]) -> bool:
+    required = ["calibration_dataset", "observed_col", "predicted_cols", "output_name"]
+    missing = [key for key in required if not str(gcp_args.get(key) or "").strip()]
+    if missing:
+        _add_missing_inputs(
+            plan,
+            missing,
+            "请先完成一次模型预测，或明确提供 GCP 所需的结果数据集、观测列和预测列。",
+        )
+        return False
+
+    plan["should_ask_clarification"] = False
+    plan["missing_inputs"] = []
+    plan["clarification_question"] = ""
+    plan["recommended_tools"] = ["geographical_conformal_prediction"]
+    plan["required_inputs"] = ["model prediction result", "observed column", "prediction column"]
+    plan["execution_steps"] = [
+        "读取最近一次模型预测结果。",
+        "使用观测列与预测列执行 GCP 不确定性分析。",
+        "输出预测区间、覆盖率、区间宽度和 GCP 指标表。",
+    ]
+    plan["expected_outputs"] = ["GCP interval dataset", "GCP metrics dataset", "GCP summary"]
+    plan["validated_tool_args"]["geographical_conformal_prediction"] = gcp_args
+    plan["tool_plan"].append({"tool_name": "geographical_conformal_prediction", "args": gcp_args})
+    plan["workflow_plan"] = [
+        {
+            "step_id": "run_gcp",
+            "tool_name": "geographical_conformal_prediction",
+            "step_type": "uncertainty_analysis",
+            "validated_tool_args": gcp_args,
+            "expected_outputs": ["model_result_id", "result_dataset", "metrics_dataset"],
+            "stop_on_failure": True,
+        },
+        {
+            "step_id": "interpret_gcp_result",
+            "tool_name": "interpret_result",
+            "validated_tool_args": {"referenced_step": "run_gcp"},
+            "depends_on": ["run_gcp"],
+            "expected_outputs": ["GCP result explanation"],
+            "stop_on_failure": False,
+        },
+    ]
+    return True
+
+
 def _build_modeling_workflow(plan: dict[str, Any], prompt: str, secondary_intents: list[str], manager: Any | None = None) -> bool:
     validated = _as_dict(plan.get("validated_tool_args"))
     model_tool = "train_rf_fusion_model" if "train_rf_fusion_model" in validated else "train_xgboost_fusion_model" if "train_xgboost_fusion_model" in validated else ""
@@ -499,6 +613,146 @@ def _first_dataset_by_type(context: dict[str, Any], dataset_type: str) -> str:
         if str(item.get("type") or item.get("data_type") or "").lower() == dataset_type:
             return str(item.get("name") or item.get("dataset_id") or "")
     return ""
+
+
+def _available_dataset_names_by_type(context: dict[str, Any], dataset_type: str) -> list[str]:
+    names: list[str] = []
+    active = context.get("active_dataset")
+    if isinstance(active, dict) and str(active.get("type") or active.get("data_type") or "").lower() == dataset_type:
+        name = str(active.get("name") or active.get("dataset_id") or "")
+        if name:
+            names.append(name)
+    for item in context.get("available_datasets") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or item.get("data_type") or "").lower() != dataset_type:
+            continue
+        name = str(item.get("name") or item.get("dataset_id") or "")
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _active_or_first_raster(context: dict[str, Any]) -> str:
+    if _dataset_type(context) == "raster":
+        dataset = _dataset_name(context)
+        if dataset:
+            return dataset
+    return _first_dataset_by_type(context, "raster")
+
+
+def _prompt_requests_dem_derivatives(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("slope", "aspect", "terrain", "坡度", "坡向", "地形因子", "地形"))
+
+
+def _prompt_requests_raster_reproject(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("reproject", "projection", "crs", "epsg", "重投影", "投影转换", "坐标系转换"))
+
+
+def _prompt_requests_raster_algebra(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("ndvi", "raster algebra", "map algebra", "栅格代数", "波段计算", "归一化植被指数"))
+
+
+def _target_crs_from_prompt(prompt: str) -> str:
+    match = re.search(r"epsg\s*[:：]?\s*(\d{3,6})", str(prompt or ""), flags=re.IGNORECASE)
+    return f"EPSG:{match.group(1)}" if match else ""
+
+
+def _dem_derivatives_from_prompt(prompt: str) -> str:
+    text = str(prompt or "").lower()
+    derivatives: list[str] = []
+    if "slope" in text or "坡度" in text:
+        derivatives.append("slope")
+    if "aspect" in text or "坡向" in text:
+        derivatives.append("aspect")
+    if "terrain" in text or "地形" in text:
+        for item in ("slope", "aspect", "terrain"):
+            if item not in derivatives:
+                derivatives.append(item)
+    return ",".join(derivatives or ["slope", "aspect"])
+
+
+def _raster_dataset_for_variable(variable: str, raster_names: list[str]) -> str:
+    key = re.sub(r"[^0-9a-z]+", "", str(variable or "").lower())
+    for name in raster_names:
+        normalized = re.sub(r"[^0-9a-z]+", "", name.lower())
+        if key and key in normalized:
+            return name
+    return ""
+
+
+def _raster_algebra_args_from_prompt(prompt: str, context: dict[str, Any]) -> dict[str, str]:
+    raw = str(prompt or "")
+    text = raw.lower()
+    output_name = "ndvi" if "ndvi" in text or "归一化植被指数" in raw else "raster_algebra"
+    expression = ""
+    if "=" in raw:
+        expression = raw.split("=", 1)[1].strip()
+    if not expression and output_name == "ndvi":
+        expression = "(nir - red) / (nir + red)"
+    expression = expression.lower()
+    variables = sorted({item for item in re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", expression) if item not in {"np", "where", "clip", "log", "sqrt", "abs", "minimum", "maximum"}})
+    raster_names = _available_dataset_names_by_type(context, "raster")
+    mapping: list[str] = []
+    for variable in variables:
+        dataset_name = _raster_dataset_for_variable(variable, raster_names)
+        if dataset_name:
+            mapping.append(f"{variable}={dataset_name}")
+    return {"expression": expression, "input_rasters": ",".join(mapping), "output_name": output_name}
+
+
+def _prompt_requests_dem_derivatives(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(
+        token in text
+        for token in (
+            "slope",
+            "aspect",
+            "terrain",
+            "dem",
+            "\u5761\u5ea6",
+            "\u5761\u5411",
+            "\u5730\u5f62\u56e0\u5b50",
+            "\u5730\u5f62",
+        )
+    )
+
+
+def _prompt_requests_raster_mosaic(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("mosaic", "merge raster", "\u62fc\u63a5", "\u5408\u5e76", "\u9576\u5d4c", "\u5206\u5e45"))
+
+
+def _prompt_requests_raster_reproject(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("reproject", "projection", "crs", "epsg", "\u91cd\u6295\u5f71", "\u6295\u5f71\u8f6c\u6362", "\u5750\u6807\u7cfb\u8f6c\u6362"))
+
+
+def _prompt_requests_raster_algebra(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("ndvi", "raster algebra", "map algebra", "\u6805\u683c\u4ee3\u6570", "\u6ce2\u6bb5\u8ba1\u7b97", "\u5f52\u4e00\u5316\u690d\u88ab\u6307\u6570"))
+
+
+def _target_crs_from_prompt(prompt: str) -> str:
+    match = re.search(r"epsg\s*[:\uff1a]?\s*(\d{3,6})", str(prompt or ""), flags=re.IGNORECASE)
+    return f"EPSG:{match.group(1)}" if match else ""
+
+
+def _dem_derivatives_from_prompt(prompt: str) -> str:
+    text = str(prompt or "").lower()
+    derivatives: list[str] = []
+    if "slope" in text or "\u5761\u5ea6" in text:
+        derivatives.append("slope")
+    if "aspect" in text or "\u5761\u5411" in text:
+        derivatives.append("aspect")
+    if "terrain" in text or "\u5730\u5f62" in text:
+        for item in ("slope", "aspect", "terrain"):
+            if item not in derivatives:
+                derivatives.append(item)
+    return ",".join(derivatives or ["slope", "aspect"])
 
 
 def _prompt_requests_table_to_points_and_raster_extract(prompt: str) -> bool:
@@ -662,6 +916,94 @@ def _build_table_raster_extraction_workflow(plan: dict[str, Any], prompt: str, c
     return True
 
 
+def _build_raster_processing_workflow(plan: dict[str, Any], prompt: str, context: dict[str, Any], manager: Any | None = None) -> bool:
+    if str(plan.get("task_type") or "") != "data_processing":
+        return False
+
+    raster_name = _active_or_first_raster(context)
+    workflow_tool = ""
+    args: dict[str, Any] = {}
+    step_id = ""
+    expected_outputs: list[str] = []
+
+    if _prompt_requests_raster_mosaic(prompt):
+        raster_names = _available_dataset_names_by_type(context, "raster")
+        if len(raster_names) < 2:
+            _add_missing_inputs(plan, ["two or more raster datasets"])
+            return True
+        workflow_tool = "raster_mosaic"
+        step_id = "mosaic_rasters"
+        args = {
+            "raster_names": ",".join(raster_names),
+            "output_name": "dem_mosaic" if any("dem" in name.lower() for name in raster_names) else _safe_output_prefix(raster_names[0], "mosaic"),
+            "vector_name": "",
+            "method": "first",
+        }
+        expected_outputs = ["mosaic raster"]
+    elif _prompt_requests_dem_derivatives(prompt):
+        if not raster_name:
+            _add_missing_inputs(plan, ["raster dataset"])
+            return True
+        workflow_tool = "dem_terrain_derivatives"
+        step_id = "derive_dem_terrain"
+        args = {
+            "dem_name": raster_name,
+            "output_prefix": raster_name,
+            "derivatives": _dem_derivatives_from_prompt(prompt),
+        }
+        expected_outputs = ["slope raster", "aspect raster"]
+    elif _prompt_requests_raster_reproject(prompt):
+        target_crs = _target_crs_from_prompt(prompt)
+        if not raster_name or not target_crs:
+            missing = []
+            if not raster_name:
+                missing.append("raster dataset")
+            if not target_crs:
+                missing.append("target CRS")
+            _add_missing_inputs(plan, missing)
+            return True
+        workflow_tool = "raster_reproject"
+        step_id = "reproject_raster"
+        epsg_suffix = target_crs.split(":", 1)[-1]
+        args = {
+            "raster_name": raster_name,
+            "target_crs": target_crs,
+            "output_name": _safe_output_prefix(raster_name, epsg_suffix),
+            "resampling": "bilinear",
+        }
+        expected_outputs = ["reprojected raster"]
+    elif _prompt_requests_raster_algebra(prompt):
+        args = _raster_algebra_args_from_prompt(prompt, context)
+        if not args.get("expression") or not args.get("input_rasters"):
+            missing = []
+            if not args.get("expression"):
+                missing.append("raster algebra expression")
+            if not args.get("input_rasters"):
+                missing.append("input rasters")
+            _add_missing_inputs(plan, missing)
+            return True
+        workflow_tool = "raster_algebra"
+        step_id = "calculate_raster_algebra"
+        expected_outputs = ["derived raster"]
+    else:
+        return False
+
+    _accept_tool_args(plan, manager, workflow_tool, args)
+    if plan.get("should_ask_clarification"):
+        return True
+    plan["workflow_plan"] = [
+        {
+            "step_id": step_id,
+            "tool_name": workflow_tool,
+            "step_type": "data_processing",
+            "validated_tool_args": args,
+            "expected_outputs": expected_outputs,
+            "stop_on_failure": True,
+        }
+    ]
+    return True
+
+
 def _build_workflow_plan(plan: dict[str, Any], prompt: str, context: dict[str, Any], secondary_intents: list[str], manager: Any | None = None) -> None:
     if plan.get("should_ask_clarification"):
         return
@@ -670,6 +1012,8 @@ def _build_workflow_plan(plan: dict[str, Any], prompt: str, context: dict[str, A
     if _build_table_points_map_workflow(plan, prompt, context, secondary_intents, manager=manager):
         return
     if _build_table_raster_extraction_workflow(plan, prompt, context):
+        return
+    if _build_raster_processing_workflow(plan, prompt, context, manager=manager):
         return
     clip_args = _as_dict(plan.get("validated_tool_args")).get("vector_clip_by_vector")
     if not isinstance(clip_args, dict):
@@ -952,6 +1296,17 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             ["clear task"],
             "你的需求还不够明确。请说明要检查数据、处理分析、制图、建模、下载数据，还是解释已有结果。",
         )
+        return plan
+
+    if task_type == "modeling" and _prompt_requests_gcp(text):
+        model = _recent_model_for_gcp(context, resolved_objects)
+        gcp_args = _build_gcp_args_from_recent_model(model)
+        if not gcp_args.get("date_col"):
+            inferred_date = _infer_date_field(context)
+            if inferred_date:
+                gcp_args["date_col"] = inferred_date
+        if _build_gcp_workflow(plan, gcp_args):
+            _attach_tool_preconditions(plan)
         return plan
 
     intent_missing = [str(item) for item in intent.get("missing_inputs", []) if item]

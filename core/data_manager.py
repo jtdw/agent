@@ -810,6 +810,94 @@ class DataManager:
     def list_registered_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
         return [self._enrich_registered_artifact(item) for item in self.database.list_artifacts(model_result_id=model_result_id, limit=limit)]
 
+    def _resolve_result_file_for_delete(self, *, artifact_id: str = "", path: str = "") -> Path:
+        artifact = self.get_artifact(artifact_id) if artifact_id else None
+        raw_path = str(path or (artifact or {}).get("path") or "").strip()
+        if not raw_path:
+            raise ValueError("需要提供 artifact_id 或 path 才能删除结果文件。")
+        target = Path(raw_path)
+        if not target.is_absolute():
+            target = self.workdir / target
+        resolved = target.resolve(strict=False)
+        allowed_roots = [self.plot_dir.resolve(), self.derived_dir.resolve()]
+        if not any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
+            raise PermissionError("只能删除工作区 plots/derived 下的结果文件，上传原始数据不会被此接口删除。")
+        return resolved
+
+    def _result_delete_targets(self, target: Path) -> list[Path]:
+        targets = [target]
+        if target.suffix.lower() == ".shp":
+            targets = [target.with_suffix(ext) for ext in SHAPE_SIDE_EXTS]
+        extra = [
+            target.with_suffix(target.suffix + ".aux.xml") if target.suffix else target.with_name(target.name + ".aux.xml"),
+            target.with_suffix(target.suffix + ".ovr") if target.suffix else target.with_name(target.name + ".ovr"),
+            target.with_name(target.name + ".aux.xml"),
+            target.with_name(target.name + ".ovr"),
+        ]
+        seen: set[str] = set()
+        out: list[Path] = []
+        for item in [*targets, *extra]:
+            key = str(item.resolve(strict=False)).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+        return out
+
+    def delete_result_file(self, *, artifact_id: str = "", path: str = "") -> dict[str, Any]:
+        target = self._resolve_result_file_for_delete(artifact_id=artifact_id, path=path)
+        delete_targets = self._result_delete_targets(target)
+        deleted_files: list[str] = []
+        deleted_artifacts: list[str] = []
+        deleted_datasets: list[str] = []
+
+        target_keys = {str(item.resolve(strict=False)).lower() for item in delete_targets}
+        for item in delete_targets:
+            if item.is_dir():
+                shutil.rmtree(item)
+                deleted_files.append(str(item))
+            elif item.exists():
+                item.unlink()
+                deleted_files.append(str(item))
+
+        if artifact_id:
+            if self.database.delete_artifact(artifact_id):
+                deleted_artifacts.append(artifact_id)
+        for artifact in self.database.list_artifacts(limit=1000):
+            artifact_path = Path(str(artifact.get("path") or "")).resolve(strict=False)
+            if str(artifact_path).lower() in target_keys:
+                artifact_key = str(artifact.get("artifact_id") or "")
+                if artifact_key and self.database.delete_artifact(artifact_key):
+                    deleted_artifacts.append(artifact_key)
+
+        for item in self.database.list_catalog():
+            dataset_name = str(item.get("dataset_name") or "")
+            dataset_path = Path(str(item.get("path") or "")).resolve(strict=False)
+            if dataset_name and str(dataset_path).lower() in target_keys:
+                try:
+                    self.database.drop_dataset(dataset_name)
+                except Exception:
+                    pass
+                self.datasets.pop(dataset_name, None)
+                deleted_datasets.append(dataset_name)
+
+        for name, record in list(self.datasets.items()):
+            if str(Path(record.path).resolve(strict=False)).lower() in target_keys:
+                self.datasets.pop(name, None)
+                if name not in deleted_datasets:
+                    deleted_datasets.append(name)
+
+        if self.last_plot_path and str(Path(self.last_plot_path).resolve(strict=False)).lower() in target_keys:
+            self.last_plot_path = ""
+
+        self.log_operation("删除结果文件", str(target), "delete")
+        return {
+            "ok": True,
+            "path": str(target),
+            "deleted_files": deleted_files,
+            "deleted_artifacts": sorted(set(deleted_artifacts)),
+            "deleted_datasets": sorted(set(deleted_datasets)),
+        }
+
     def _enrich_registered_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         item = dict(artifact)
         path = Path(str(item.get("path") or ""))
@@ -847,7 +935,7 @@ class DataManager:
         item = dict(result or {})
         model_result_id = str(item.get("model_result_id") or "")
         registered = self.list_registered_artifacts(model_result_id=model_result_id, limit=100) if model_result_id else []
-        if registered:
+        if model_result_id:
             item["artifacts"] = registered
             item["artifact_ids"] = [str(artifact.get("artifact_id") or "") for artifact in registered if artifact.get("artifact_id")]
         return item

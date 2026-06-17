@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from .response_postprocess import clean_assistant_reply
 from .task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 
 
@@ -37,6 +38,7 @@ def build_chat_response(
     is_status_query = reason in {"download_status", "commercial_download_status"} or reason.endswith("_status")
     if outcome_text and not is_status_query and "任务结果分析：" not in reply:
         reply = f"{reply.rstrip()}\n{outcome_text}"
+    reply = clean_assistant_reply(reply)
     assistant_meta = {key: result.get(key) for key in meta_keys if result.get(key) is not None}
     service.manager.database.add_message(service.current_session_id, "assistant", reply, meta=assistant_meta)
     return attach_chat_state(

@@ -477,6 +477,34 @@ class CommercialService:
         )
         return str(row.get("storage_state_path") or "") if row else ""
 
+    def clear_user_storage_state(self, user_id: str, source_key: str) -> None:
+        user = self.get_user(user_id)
+        row = self.db.fetch_one(
+            """
+            SELECT * FROM source_credentials
+            WHERE user_id=? AND source_key=? AND status='active'
+              AND storage_state_path IS NOT NULL AND storage_state_path!=''
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            [user["user_id"], source_key.strip().lower()],
+        )
+        if row and row.get("storage_state_path"):
+            path = Path(str(row.get("storage_state_path")))
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                pass
+        self.db.execute(
+            """
+            UPDATE source_credentials
+            SET storage_state_path='', updated_at=?
+            WHERE user_id=? AND source_key=?
+            """,
+            [now_str(), user["user_id"], source_key.strip().lower()],
+        )
+
     def set_platform_account_storage_state(self, account_id: str, storage_state_path: str) -> dict[str, Any]:
         row = self.db.fetch_one("SELECT * FROM platform_accounts WHERE account_id=?", [account_id])
         if not row:
@@ -862,7 +890,14 @@ class CommercialService:
 
     def run_job_with_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
         zip_path = result.get("zip_path") or result.get("package_path") or ""
-        output_path = result.get("downloaded_path") or result.get("path") or result.get("dataset_name") or ""
+        output_path = (
+            result.get("final_output_path")
+            or result.get("output_path")
+            or result.get("path")
+            or result.get("dataset_name")
+            or result.get("downloaded_path")
+            or ""
+        )
         artifact_quality = result.get("artifact_quality") if isinstance(result.get("artifact_quality"), list) else self._artifact_quality_for_result(result)
         result["artifact_quality"] = artifact_quality
         if artifact_quality and any(item.get("ok") is False for item in artifact_quality if isinstance(item, dict)):

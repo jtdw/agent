@@ -44,6 +44,7 @@ def main() -> int:
             current["state_path"],
             timeout_seconds=int(current.get("timeout_seconds") or 300),
             headless=bool(current.get("headless", False)),
+            status_path=status_path,
         )
 
         service = CommercialService(workdir)

@@ -120,7 +120,9 @@ export default function App() {
               setBasemap={setBasemap}
               onClose={() => setToolsOpen(false)}
               layerVisibility={layerVisibility}
+              layerOpacity={layerOpacity}
               onLayerToggle={(id) => setLayerVisibility((v) => ({ ...v, [id]: !v[id as keyof typeof v] }))}
+              onLayerOpacityChange={(id, value) => setLayerOpacity((v) => ({ ...v, [id]: value }))}
               onLayerLocate={() => dispatchMapCommand('locate')}
               onRunWorkflowAction={runWorkflowAction}
             />
@@ -142,6 +144,10 @@ export default function App() {
             setUser={setUser}
             resultPanel={latestResultPanel}
             onOpenChat={() => setChatOpen(true)}
+            onMapTextCommand={handleTextMapCommand}
+            externalPrompt={externalPrompt}
+            onResultPanel={setLatestResultPanel}
+            chatContext={chatContext}
             onOpenMap={() => {
               setConsoleOpen(false);
               setChatOpen(true);

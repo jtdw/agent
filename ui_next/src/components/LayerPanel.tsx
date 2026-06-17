@@ -85,7 +85,9 @@ export function LayerPanel({
   setBasemap,
   onClose,
   layerVisibility,
+  layerOpacity,
   onLayerToggle,
+  onLayerOpacityChange,
   onLayerLocate,
   onRunWorkflowAction
 }: {
@@ -94,7 +96,9 @@ export function LayerPanel({
   setBasemap: (value: Basemap) => void;
   onClose?: () => void;
   layerVisibility: LayerVisibility;
+  layerOpacity: LayerOpacity;
   onLayerToggle: (id: keyof LayerVisibility) => void;
+  onLayerOpacityChange: (id: keyof LayerOpacity, value: number) => void;
   onLayerLocate: (id: keyof LayerOpacity) => void;
   onRunWorkflowAction: (action: WorkflowAction) => void;
 }) {
@@ -254,6 +258,23 @@ export function LayerPanel({
       refreshDashboard();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '删除任务失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteArtifact = async (artifact: WorkspaceDashboard['artifacts'][number]) => {
+    setBusy(true);
+    try {
+      const result = await api.deleteWorkspaceArtifact({
+        user_id: userId,
+        artifact_id: artifact.artifact_id || '',
+        path: artifact.path || ''
+      });
+      setDashboard(result.dashboard);
+      setNotice(`已删除结果文件：${artifact.name || artifact.path.split(/[\\/]/).pop() || 'artifact'}`);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '删除结果文件失败');
     } finally {
       setBusy(false);
     }
@@ -478,6 +499,20 @@ export function LayerPanel({
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-black">{layer.name}</div>
                     <div className="truncate text-xs text-slate-500 dark:text-slate-400">{layer.desc}</div>
+                    {opacityLayerId && (
+                      <div className="mt-2 flex items-center gap-2">
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={Math.round((layerOpacity[opacityLayerId] ?? 1) * 100)}
+                          onChange={(event) => onLayerOpacityChange(opacityLayerId, Number(event.target.value) / 100)}
+                          className="h-1.5 min-w-0 flex-1 accent-cyan-glow"
+                          aria-label={`${layer.name} 透明度`}
+                        />
+                        <span className="w-9 text-right text-[11px] font-black text-slate-500 dark:text-slate-400">{Math.round((layerOpacity[opacityLayerId] ?? 1) * 100)}%</span>
+                      </div>
+                    )}
                   </div>
                   {opacityLayerId && (
                     <button type="button" onClick={() => onLayerLocate(opacityLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="定位到图层">
@@ -526,9 +561,14 @@ export function LayerPanel({
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 最近成果</div>
               <div className="space-y-2">
                 {artifacts.map((item, i) => (
-                  <button key={`${item.path}-${i}`} type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="block w-full rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-left text-xs font-semibold text-slate-600 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                  <div key={`${item.path}-${i}`} className="flex items-center justify-between gap-2 rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                    <button type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="min-w-0 flex-1 truncate text-left">
                     {item.name || item.path.split(/[\\/]/).pop() || '成果文件'}
-                  </button>
+                    </button>
+                    <button type="button" onClick={() => deleteArtifact(item)} disabled={busy} className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-coral transition hover:bg-white/60 disabled:opacity-50" title="删除结果文件">
+                      <Trash2 size={14} strokeWidth={1.8} />
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>

@@ -36,8 +36,10 @@ export type JobSummary = {
 };
 
 export type ConsoleArtifact = {
+  artifactId: string;
   label: string;
   url: string;
+  path: string;
   kind: 'report' | 'visual' | 'archive' | 'data' | 'artifact';
 };
 
@@ -109,7 +111,7 @@ export function groupArtifacts(artifacts: WorkspaceArtifact[] = []): ConsoleArti
       else if (/\.(zip|7z|rar)$/i.test(lower)) kind = 'archive';
       else if (/\.(csv|xlsx|xls|md|txt|docx|pdf)$/i.test(lower)) kind = 'report';
       else if (/\.(geojson|json|tif|tiff|shp|gpkg)$/i.test(lower)) kind = 'data';
-      return { label, url, kind };
+      return { artifactId: String(artifact.artifact_id || ''), label, url, path: String(artifact.path || ''), kind };
     })
     .filter((item): item is ConsoleArtifact => Boolean(item));
 }

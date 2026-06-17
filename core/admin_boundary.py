@@ -12,6 +12,7 @@ from .data_manager import DataManager
 
 
 ADMIN_ZIP_NAMES = {
+    "china_admin_county_2023.zip",
     "china_admin_province_city_county_shp.zip",
     "china_admin_boundary.zip",
 }
@@ -81,18 +82,28 @@ def _aliases(region: str) -> list[str]:
     values = REGION_ALIASES.get(key) or REGION_ALIASES.get(key.lower())
     if values:
         return values
-    trimmed = re.sub(r"(省|市|县|区)$", "", key)
+    trimmed = re.sub(r"(特别行政区|自治区|自治州|自治县|自治旗|地区|盟|省|市|县|区|旗)$", "", key)
     values = [key]
     if trimmed and trimmed != key:
         values.append(trimmed)
     if key == trimmed:
-        values.extend([f"{key}省", f"{key}市"])
+        values.extend([f"{key}省", f"{key}市", f"{key}县", f"{key}区", f"{key}旗"])
     return list(dict.fromkeys(values))
 
 
 def _text_match_mask(gdf: gpd.GeoDataFrame, aliases: list[str]) -> pd.Series:
+    preferred = ["地名", "县级", "地级", "省级", "曾用名", "ENG_NAME", "NAME_3", "NAME_2", "NAME_1"]
+    text_candidates = [c for c in gdf.columns if c != "geometry"]
+    text_cols = [c for c in preferred if c in text_candidates] + [c for c in text_candidates if c not in preferred]
+    exact_mask = pd.Series(False, index=gdf.index)
+    for col in text_cols:
+        values = gdf[col].astype(str)
+        for alias in aliases:
+            exact_mask = exact_mask | values.str.casefold().eq(str(alias).casefold())
+    if bool(exact_mask.any()):
+        return exact_mask
+
     mask = pd.Series(False, index=gdf.index)
-    text_cols = [c for c in gdf.columns if c != "geometry" and gdf[c].dtype == object]
     for col in text_cols:
         values = gdf[col].astype(str)
         for alias in aliases:
@@ -114,6 +125,13 @@ def _score_candidate(shp: Path, gdf: gpd.GeoDataFrame, selected: gpd.GeoDataFram
         score += 40
     if "res1" in path_text or "province" in path_text:
         score += 30
+    if "county" in path_text or "县" in path_text:
+        score += 50
+    aliases = set(_aliases(region))
+    for col in ("县级", "地名", "NAME_3"):
+        if col in selected.columns and any(str(v) in aliases for v in selected[col].dropna().astype(str)):
+            score += 80
+            break
     if len(gdf) <= 500:
         score += 15
     if "成都" in region or region.lower() == "chengdu":
