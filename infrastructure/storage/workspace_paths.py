@@ -16,6 +16,12 @@ def workspace_root_for_user(base_workdir: str | Path, user_id: str | None) -> Pa
     return base / "anonymous" if key == "anonymous" else base / "users" / key
 
 
+def workspace_root_for_session(base_workdir: str | Path, user_id: str | None, session_id: str | None) -> Path:
+    user_root = workspace_root_for_user(base_workdir, user_id)
+    session_key = _safe_subject_key(session_id)
+    return user_root / "sessions" / session_key
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspacePaths:
     root: Path

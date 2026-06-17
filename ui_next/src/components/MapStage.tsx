@@ -460,6 +460,7 @@ export function MapStage({
   theme,
   basemap,
   userId = '',
+  sessionId = '',
   drawMode,
   setDrawMode,
   layerVisibility,
@@ -473,6 +474,7 @@ export function MapStage({
   theme: 'light' | 'dark';
   basemap: Basemap;
   userId?: string;
+  sessionId?: string;
   drawMode: boolean;
   setDrawMode: (value: boolean) => void;
   layerVisibility: LayerVisibility;
@@ -548,7 +550,7 @@ export function MapStage({
     let cancelled = false;
     const load = async () => {
       try {
-        const data = await api.mapStations(userId);
+        const data = await api.mapStations(userId, sessionId);
         if (userId && !hasStations(data)) {
           const fallback = await api.mapStations();
           if (!cancelled) {
@@ -587,7 +589,7 @@ export function MapStage({
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [userId, sessionId]);
 
   useEffect(() => {
     onResultLayersChange?.(resultLayers);
@@ -597,7 +599,7 @@ export function MapStage({
     let cancelled = false;
     const load = async () => {
       try {
-        const data = await api.mapLayers(userId);
+        const data = await api.mapLayers(userId, sessionId);
         let layers = data.layers || [];
         if (userId && !hasBoundaryLayer(layers)) {
           const fallback = await api.mapLayers();
@@ -643,7 +645,7 @@ export function MapStage({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [userId, refreshToken]);
+  }, [userId, sessionId, refreshToken]);
 
   const style = useMemo(() => {
     if (tdtConfig?.enabled && tdtConfig.tile_url_templates) return buildTiandituStyle(tdtConfig, basemap, theme);

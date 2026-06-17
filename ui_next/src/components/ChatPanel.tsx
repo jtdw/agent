@@ -24,6 +24,7 @@ export type ChatWorkspaceProps = {
   onMapTextCommand?: (command: ParsedMapTextCommand) => string;
   externalPrompt?: ExternalPromptCommand | null;
   onResultPanel?: (panel: ResultPanel) => void;
+  onSessionChange?: (sessionId: string) => void;
   chatContext?: ChatContextPayload;
   mentionDatasets?: Array<Record<string, unknown> | WorkspaceMention>;
   mode?: ChatWorkspaceMode;
@@ -181,6 +182,7 @@ export function ChatWorkspace({
   onMapTextCommand,
   externalPrompt,
   onResultPanel,
+  onSessionChange,
   chatContext = {},
   mentionDatasets = EMPTY_MENTION_DATASETS,
   mode = 'floating'
@@ -230,12 +232,14 @@ export function ChatWorkspace({
     if (!userId) {
       setSessions([]);
       setCurrentSessionId('');
+      onSessionChange?.('');
       setMessages([]);
       return;
     }
     const r = await api.chatSessions(userId);
     setSessions(r.sessions || []);
     setCurrentSessionId(r.current_session_id || '');
+    onSessionChange?.(r.current_session_id || '');
     setMessages((current) => {
       if ((!r.messages || r.messages.length === 0) && current.length > 0) return current;
       return mergeStableClientMessageIds(current, normalizeChatMessages(r.messages));
@@ -275,7 +279,7 @@ export function ChatWorkspace({
       await new Promise((resolve) => window.setTimeout(resolve, 2000));
       if (!mountedRef.current) return;
       try {
-        const result = await api.jobs(userId);
+        const result = await api.jobs(userId, currentSessionId);
         const job = result.jobs.find((item) => item.job_id === jobId);
         if (!job) continue;
         if ((job.status === 'completed' || job.status === 'success') && !announcedDownloadJobsRef.current.has(jobId)) {
@@ -321,7 +325,7 @@ export function ChatWorkspace({
   const cancelDownload = async (jobId: string) => {
     if (!jobId) return;
     try {
-      await api.cancelDownloadJob(jobId, userId, '用户在登录引导中取消任务。');
+      await api.cancelDownloadJob(jobId, userId, '用户在登录引导中取消任务。', currentSessionId);
       setMessages((current) => [...current, { role: 'assistant', content: '下载任务已取消。', meta: { reason: 'download_cancelled' } }]);
       setGSCloudLoginOpen(false);
     } catch (cause) {
@@ -351,10 +355,10 @@ export function ChatWorkspace({
       setWorkspaceMentions([]);
       return;
     }
-    api.workspaceMentions(userId)
+    api.workspaceMentions(userId, currentSessionId)
       .then((result) => setWorkspaceMentions(normalizeWorkspaceMentions(result.items || [])))
       .catch(() => {});
-  }, [userId]);
+  }, [userId, currentSessionId]);
 
   useEffect(() => {
     setModelNotice('');
@@ -469,7 +473,9 @@ export function ChatWorkspace({
       else setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason } }]);
       if (r.sessions) setSessions(r.sessions);
       if (r.result_panel) onResultPanel?.(r.result_panel);
-      setCurrentSessionId(r.current_session_id || currentSessionId);
+      const nextSessionId = r.current_session_id || currentSessionId;
+      setCurrentSessionId(nextSessionId);
+      onSessionChange?.(nextSessionId);
       setLastFailedPrompt('');
       refreshSessions().catch(() => {});
     } catch (e) {
@@ -531,7 +537,9 @@ export function ChatWorkspace({
     try {
       const r = await api.createChatSession(userId);
       setSessions(r.sessions || []);
-      setCurrentSessionId(r.current_session_id || r.session_id);
+      const nextSessionId = r.current_session_id || r.session_id;
+      setCurrentSessionId(nextSessionId);
+      onSessionChange?.(nextSessionId);
       setMessages(normalizeChatMessages(r.messages));
       setInput('');
     } catch (e) {
@@ -549,7 +557,9 @@ export function ChatWorkspace({
     try {
       const r = await api.switchChatSession(sessionId, userId);
       setSessions(r.sessions || []);
-      setCurrentSessionId(r.current_session_id || sessionId);
+      const nextSessionId = r.current_session_id || sessionId;
+      setCurrentSessionId(nextSessionId);
+      onSessionChange?.(nextSessionId);
       setMessages(normalizeChatMessages(r.messages));
       setEditingId(null);
     } catch (e) {
@@ -569,7 +579,9 @@ export function ChatWorkspace({
         ? await api.deleteChatSession(currentSessionId, userId)
         : await api.clearChatSession(currentSessionId, userId);
       setSessions(r.sessions || []);
-      setCurrentSessionId(r.current_session_id || '');
+      const nextSessionId = r.current_session_id || '';
+      setCurrentSessionId(nextSessionId);
+      onSessionChange?.(nextSessionId);
       setMessages(normalizeChatMessages(r.messages));
       setEditingId(null);
     } catch (e) {
@@ -597,7 +609,9 @@ export function ChatWorkspace({
       const r = await api.retryMessage(editingId, text, userId, currentSessionId);
       setMessages(normalizeChatMessages(r.messages));
       setSessions(r.sessions || []);
-      setCurrentSessionId(r.current_session_id || currentSessionId);
+      const nextSessionId = r.current_session_id || currentSessionId;
+      setCurrentSessionId(nextSessionId);
+      onSessionChange?.(nextSessionId);
       setEditingId(null);
       setEditText('');
     } catch (e) {
@@ -617,7 +631,7 @@ export function ChatWorkspace({
     setUploading(true);
     setError('');
     try {
-      const r = await api.uploadFiles(files, userId);
+      const r = await api.uploadFiles(files, userId, currentSessionId);
       setWorkspaceMentions(normalizeWorkspaceMentions(r.dashboard?.datasets || []));
       const summary = r.outcome_markdown || '';
       setMessages((v) => [
@@ -647,7 +661,7 @@ export function ChatWorkspace({
     const prompt = '一键检查并运行闪电河流域土壤水分融合论文流程。';
     setMessages((v) => [...v, { role: 'user', content: prompt }]);
     try {
-      const r = await api.runSoilMoistureWorkflow(userId);
+      const r = await api.runSoilMoistureWorkflow(userId, currentSessionId);
       setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason } }]);
       setLastFailedPrompt('');
     } catch (e) {
@@ -861,6 +875,7 @@ export function ChatWorkspace({
                           onResume={resumeDownload}
                           onCancel={cancelDownload}
                           onClarification={chooseClarification}
+                          sessionId={currentSessionId}
                         />
                         {!isUser && !isSystem && m.meta?.reason === 'error' && lastFailedPrompt && (
                           <button onClick={() => sendPrompt(lastFailedPrompt)} disabled={thinking} className="mt-3 inline-flex items-center gap-1 rounded-full bg-white/55 px-3 py-1 text-xs font-black text-coral transition-colors hover:bg-white/80 disabled:opacity-50 dark:bg-white/10">

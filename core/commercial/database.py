@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS platform_accounts (
 CREATE TABLE IF NOT EXISTS download_jobs (
     job_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    chat_session_id TEXT NOT NULL DEFAULT '',
     source_key TEXT NOT NULL,
     resource_type TEXT NOT NULL,
     region TEXT,
@@ -171,6 +172,7 @@ COMMERCIAL_USER_MIGRATIONS = {
 
 
 DOWNLOAD_JOB_MIGRATIONS = {
+    "chat_session_id": "ALTER TABLE download_jobs ADD COLUMN chat_session_id TEXT NOT NULL DEFAULT ''",
     "quota_reserved": "ALTER TABLE download_jobs ADD COLUMN quota_reserved INTEGER NOT NULL DEFAULT 0",
     "retried_from_job_id": "ALTER TABLE download_jobs ADD COLUMN retried_from_job_id TEXT",
     "canceled_at": "ALTER TABLE download_jobs ADD COLUMN canceled_at TEXT",

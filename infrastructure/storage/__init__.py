@@ -1,5 +1,5 @@
 """Workspace filesystem boundaries."""
 
-from .workspace_paths import WorkspacePaths, workspace_root_for_user
+from .workspace_paths import WorkspacePaths, workspace_root_for_session, workspace_root_for_user
 
-__all__ = ["WorkspacePaths", "workspace_root_for_user"]
+__all__ = ["WorkspacePaths", "workspace_root_for_user", "workspace_root_for_session"]

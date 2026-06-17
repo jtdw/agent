@@ -20,6 +20,7 @@ from ..domestic_sources.gscloud_adapter import (
     open_login_and_save_state,
     parse_tile_ids,
     plan_aster_gdem_tiles,
+    plan_gscloud_dem_tiles,
 )
 from ..domestic_sources.registry import get_source
 from ..domestic_sources.gscloud_indexer import (
@@ -198,6 +199,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
         region: str = "四川省",
         region_dataset: str = "",
         dataset_id: str = "310",
+        product_key: str = "aster_gdem_30m",
         max_tiles: int = 0,
         timeout_seconds: int = 1800,
         headless: bool = True,
@@ -216,6 +218,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                 region=region,
                 region_dataset=region_dataset,
                 dataset_id=dataset_id,
+                product_key=product_key,
                 max_tiles=max_tiles,
                 timeout_seconds=timeout_seconds,
                 headless=headless,
@@ -233,6 +236,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                 region=region or job.get("region") or "四川省",
                 region_dataset=region_dataset,
                 dataset_id=dataset_id,
+                product_key=product_key,
                 max_tiles=max_tiles,
                 timeout_seconds=timeout_seconds,
                 headless=headless,
@@ -554,16 +558,18 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
         return _json({"default_access_url": GSCLOUD_ASTER_GDEM30_ACCESS_URL, "products": GSCLOUD_DEM_DATASETS})
 
     @tool
-    def plan_gscloud_aster_gdem_tiles(region: str = "四川省", region_dataset: str = "", output_name: str = "", bbox_only: bool = False) -> str:
+    def plan_gscloud_aster_gdem_tiles(region: str = "四川省", region_dataset: str = "", output_name: str = "", bbox_only: bool = False, product_key: str = "aster_gdem_30m", dataset_id: str = "") -> str:
         """根据省市县边界自动计算地理空间数据云 ASTER GDEM 30M 需要下载哪些 1°×1° 分幅。优先使用工作区矢量边界，例如 sichuan_boundary。"""
         try:
-            return _json(plan_aster_gdem_tiles(
+            return _json(plan_gscloud_dem_tiles(
                 manager=manager,
                 region=region,
                 region_dataset=region_dataset,
                 output_name=output_name or f"{region}_aster_gdem_tiles",
                 bbox_only=bbox_only,
                 save_preview=True,
+                product_key=product_key,
+                dataset_id=dataset_id,
             ))
         except Exception as exc:
             return _json({"ok": False, "error": str(exc), "hint": "请先导入或下载区域边界，例如四川边界数据集 sichuan_boundary；没有边界时仅支持内置省份外包框兜底。"})
@@ -592,6 +598,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                 region=region,
                 region_dataset=region_dataset,
                 dataset_id=dataset_id,
+                product_key=product_key,
                 max_tiles=max_tiles,
                 timeout_seconds=timeout_seconds,
                 headless=headless,

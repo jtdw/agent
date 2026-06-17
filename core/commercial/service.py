@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from core.data_manager import DataManager
 from core.domestic_sources.raster_postprocess import standardize_raster_download_result
+from infrastructure.storage.workspace_paths import workspace_root_for_session
 from .database import CommercialDB, future_days, json_dumps, json_loads, now_str
 from domain.downloads.models import decorate_job_record, failure_diagnostic
 from domain.downloads.status import DownloadJobStatus
@@ -666,6 +667,7 @@ class CommercialService:
         direct_url: str = "",
         local_file_path: str = "",
         output_name: str = "",
+        chat_session_id: str = "",
     ) -> dict[str, Any]:
         user = self.get_user(user_id)
         source_key = source_key.strip().lower()
@@ -678,6 +680,7 @@ class CommercialService:
         data = {
             "job_id": job_id,
             "user_id": user["user_id"],
+            "chat_session_id": str(chat_session_id or "").strip(),
             "source_key": source_key,
             "resource_type": resource_type.strip().lower() or "unknown",
             "region": region,
@@ -717,12 +720,22 @@ class CommercialService:
             raise ValueError(f"任务不存在: {job_id}")
         return public_record(decorate_job_record(row, json_loads))
 
-    def list_jobs(self, user_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    def list_jobs(self, user_id: str = "", limit: int = 20, chat_session_id: str = "") -> list[dict[str, Any]]:
+        session_filter = str(chat_session_id or "").strip()
         if user_id:
             user = self.get_user(user_id)
-            rows = self.db.fetch_all("SELECT * FROM download_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?", [user["user_id"], int(limit)])
+            if session_filter:
+                rows = self.db.fetch_all(
+                    "SELECT * FROM download_jobs WHERE user_id=? AND chat_session_id=? ORDER BY created_at DESC LIMIT ?",
+                    [user["user_id"], session_filter, int(limit)],
+                )
+            else:
+                rows = self.db.fetch_all("SELECT * FROM download_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?", [user["user_id"], int(limit)])
         else:
-            rows = self.db.fetch_all("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT ?", [int(limit)])
+            if session_filter:
+                rows = self.db.fetch_all("SELECT * FROM download_jobs WHERE chat_session_id=? ORDER BY created_at DESC LIMIT ?", [session_filter, int(limit)])
+            else:
+                rows = self.db.fetch_all("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT ?", [int(limit)])
         out = []
         for r in rows:
             out.append(public_record(decorate_job_record(r, json_loads)))
@@ -805,6 +818,24 @@ class CommercialService:
             raise ValueError("任务仍在进行或等待处理，请先取消任务后再删除记录。")
         self.db.execute("DELETE FROM download_jobs WHERE job_id=?", [job_id])
         return {"ok": True, "deleted_job_id": job_id}
+
+    def delete_jobs_for_session(self, *, user_id: str, chat_session_id: str) -> dict[str, Any]:
+        user = self.get_user(user_id)
+        session = str(chat_session_id or "").strip()
+        if not session:
+            return {"ok": False, "deleted_count": 0}
+        rows = self.db.fetch_all(
+            "SELECT job_id, status FROM download_jobs WHERE user_id=? AND chat_session_id=?",
+            [user["user_id"], session],
+        )
+        for row in rows:
+            if row.get("status") in {"queued", "ready_to_start", "running", "waiting_login", "waiting_parameters", "waiting_manual"}:
+                self._release_platform_reservation(str(row.get("job_id") or ""), "release_deleted_chat_session_platform_download")
+        self.db.execute(
+            "DELETE FROM download_jobs WHERE user_id=? AND chat_session_id=?",
+            [user["user_id"], session],
+        )
+        return {"ok": True, "deleted_count": len(rows), "chat_session_id": session}
 
     def _update_job(self, job_id: str, **fields: Any) -> None:
         fields["updated_at"] = now_str()
@@ -898,13 +929,20 @@ class CommercialService:
                 quality.append({"ok": False, "path": str(candidate), "reason": "artifact_validation_failed", "detail": str(exc)})
         return quality
 
+    def _data_manager_for_job(self, job: dict[str, Any]) -> DataManager:
+        session_id = str(job.get("chat_session_id") or "").strip()
+        if not session_id:
+            return DataManager(self.workdir)
+        return DataManager(workspace_root_for_session(self.workdir, str(job.get("user_id") or ""), session_id))
+
     def run_job_with_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any]:
         job = self.db.fetch_one("SELECT * FROM download_jobs WHERE job_id=?", [job_id]) or {}
+        manager = self._data_manager_for_job(job)
         try:
             tile_plan = result.get("tile_plan") if isinstance(result.get("tile_plan"), dict) else {}
             clip_vector = str(result.get("clip_vector") or tile_plan.get("region_dataset") or result.get("region_dataset") or "")
             result = standardize_raster_download_result(
-                DataManager(self.workdir),
+                manager,
                 result,
                 output_name=str(job.get("output_name") or result.get("output_name") or "downloaded_raster"),
                 clip_vector=clip_vector,
@@ -1016,6 +1054,7 @@ class CommercialService:
             direct_url=job.get("direct_url", "") or "",
             local_file_path=job.get("local_file_path", "") or "",
             output_name=job.get("output_name", "") or "",
+            chat_session_id=job.get("chat_session_id", "") or "",
         )
         self._update_job(retry["job_id"], retried_from_job_id=job_id)
         return self.get_job(retry["job_id"])

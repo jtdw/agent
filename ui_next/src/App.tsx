@@ -60,9 +60,10 @@ export default function App() {
   const [externalPrompt, setExternalPrompt] = useState<{ id: number; prompt: string } | null>(null);
   const [latestResultPanel, setLatestResultPanel] = useState<ResultPanel | null>(null);
   const [chatContext, setChatContext] = useState<ChatContextPayload>({});
+  const [currentSessionId, setCurrentSessionId] = useState('');
   const updateChatContext = (patch: Partial<ChatContextPayload>) => setChatContext((current) => mergeChatContext(current, patch));
 
-  const resultLayerStorageKey = `gis-result-layer-state-${user?.user_id || 'anonymous'}`;
+  const resultLayerStorageKey = `gis-result-layer-state-${user?.user_id || 'anonymous'}-${currentSessionId || 'no-session'}`;
 
   const dispatchMapCommand = (type: MapCommandType, layerId?: string) => {
     setMapCommand({ type, layerId, id: Date.now() });
@@ -152,11 +153,11 @@ export default function App() {
     <div className="relative isolate h-screen w-screen overflow-hidden text-slate-950 transition-colors duration-500 dark:text-slate-50">
       <SplashScreen visible={splash} />
       <Suspense fallback={<MapFallback />}>
-        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} resultLayerState={resultLayerState} refreshToken={mapRefreshToken} mapCommand={mapCommand} onChatContextChange={updateChatContext} onResultLayersChange={setResultLayers} />
+        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} sessionId={currentSessionId} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} resultLayerState={resultLayerState} refreshToken={mapRefreshToken} mapCommand={mapCommand} onChatContextChange={updateChatContext} onResultLayersChange={setResultLayers} />
       </Suspense>
       <Suspense fallback={chatOpen ? <PanelFallback side="left" /> : null}>
         <AnimatePresence>
-          {chatOpen && <ChatPanel user={user} setUser={setUser} onClose={() => setChatOpen(false)} onMapTextCommand={handleTextMapCommand} externalPrompt={externalPrompt} onResultPanel={setLatestResultPanel} chatContext={chatContext} />}
+          {chatOpen && <ChatPanel user={user} setUser={setUser} onClose={() => setChatOpen(false)} onMapTextCommand={handleTextMapCommand} externalPrompt={externalPrompt} onResultPanel={setLatestResultPanel} onSessionChange={setCurrentSessionId} chatContext={chatContext} />}
         </AnimatePresence>
       </Suspense>
       <Suspense fallback={toolsOpen ? <PanelFallback side="right" /> : null}>
@@ -164,11 +165,14 @@ export default function App() {
           {toolsOpen && (
             <LayerPanel
               user={user}
+              sessionId={currentSessionId}
               basemap={basemap}
               setBasemap={setBasemap}
               onClose={() => setToolsOpen(false)}
               layerVisibility={layerVisibility}
+              layerOpacity={layerOpacity}
               onLayerToggle={(id) => setLayerVisibility((v) => ({ ...v, [id]: !v[id as keyof typeof v] }))}
+              onLayerOpacityChange={(id, opacity) => setLayerOpacity((v) => ({ ...v, [id]: opacity }))}
               onLayerLocate={() => dispatchMapCommand('locate')}
               resultLayers={resultLayers}
               resultLayerState={resultLayerState}
@@ -184,7 +188,7 @@ export default function App() {
         {!consoleOpen && (
           <>
             <SettingsPanel user={user} />
-            <AnalysisPanel userId={user?.user_id || ''} resultPanel={latestResultPanel} onChatContextChange={updateChatContext} />
+            <AnalysisPanel userId={user?.user_id || ''} sessionId={currentSessionId} resultPanel={latestResultPanel} onChatContextChange={updateChatContext} />
           </>
         )}
       </Suspense>
@@ -197,6 +201,7 @@ export default function App() {
             onMapTextCommand={handleTextMapCommand}
             externalPrompt={externalPrompt}
             onResultPanel={setLatestResultPanel}
+            onSessionChange={setCurrentSessionId}
             chatContext={chatContext}
             onOpenMap={() => {
               setConsoleOpen(false);

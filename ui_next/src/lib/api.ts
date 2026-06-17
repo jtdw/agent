@@ -426,15 +426,21 @@ export const api = {
   async tiandituConfig() {
     return request<TiandituConfig>('/api/tianditu/config');
   },
-  async mapStations(user_id?: string) {
-    const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
-    return request<StationCollection>(`/api/map/stations${q}`);
+  async mapStations(user_id?: string, session_id?: string) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return request<StationCollection>(`/api/map/stations${suffix}`);
   },
-  async mapLayers(user_id?: string) {
-    const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
-    return request<{ layers: ResultMapLayer[]; diagnostics?: Array<Record<string, unknown>> }>(`/api/map/layers${q}`);
+  async mapLayers(user_id?: string, session_id?: string) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return request<{ layers: ResultMapLayer[]; diagnostics?: Array<Record<string, unknown>> }>(`/api/map/layers${suffix}`);
   },
-  async refreshMapLayer(payload: { user_id?: string; artifact_id?: string; dataset_name?: string }) {
+  async refreshMapLayer(payload: { user_id?: string; session_id?: string; artifact_id?: string; dataset_name?: string }) {
     return request<{ map_ready: boolean; artifact_id?: string; dataset_name?: string; map_layer_id?: string; layer?: ResultMapLayer }>('/api/map/layers/refresh', {
       method: 'POST',
       body: JSON.stringify(payload)
@@ -528,21 +534,22 @@ export const api = {
       body: JSON.stringify({ user_id: user_id || '', task_id, reason: reason || '用户取消任务。' })
     });
   },
-  async deleteArtifact(artifact_id: string, user_id?: string, delete_file = true) {
+  async deleteArtifact(artifact_id: string, user_id?: string, delete_file = true, session_id?: string) {
     const q = new URLSearchParams();
     if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
     q.set('delete_file', delete_file ? 'true' : 'false');
     return request<{ ok: boolean; artifact_id: string; filename?: string; status: string; file_deleted: boolean }>(
       `/api/artifacts/${encodeURIComponent(artifact_id)}?${q.toString()}`,
       { method: 'DELETE' }
     );
   },
-  async deleteArtifactsBatch(artifact_ids: string[], user_id?: string, delete_file = true) {
+  async deleteArtifactsBatch(artifact_ids: string[], user_id?: string, delete_file = true, session_id?: string) {
     return request<{ ok: boolean; deleted_count: number; failed_count: number; results: Array<{ ok: boolean; artifact_id: string; filename?: string; status: string; file_deleted: boolean; error?: string }> }>(
       '/api/artifacts/delete-batch',
       {
         method: 'POST',
-        body: JSON.stringify({ user_id: user_id || '', artifact_ids, delete_file })
+        body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', artifact_ids, delete_file })
       }
     );
   },
@@ -552,30 +559,37 @@ export const api = {
       body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', message_id, content })
     });
   },
-  async uploadFiles(files: FileList | File[], user_id?: string) {
+  async uploadFiles(files: FileList | File[], user_id?: string, session_id?: string) {
     const fd = new FormData();
     fd.append('user_id', user_id || '');
+    fd.append('session_id', session_id || '');
     Array.from(files).forEach((file) => fd.append('files', file));
     return multipart<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; upload_summaries?: UploadSummary[]; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/files/upload', fd);
   },
-  async dashboard(user_id?: string) {
-    const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
-    return request<WorkspaceDashboard>(`/api/workspace/dashboard${q}`);
+  async dashboard(user_id?: string, session_id?: string) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return request<WorkspaceDashboard>(`/api/workspace/dashboard${suffix}`);
   },
-  async workspaceMentions(user_id?: string) {
-    const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
-    return request<{ items: WorkspaceMention[]; count: number }>(`/api/workspace/mentions${q}`);
+  async workspaceMentions(user_id?: string, session_id?: string) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return request<{ items: WorkspaceMention[]; count: number }>(`/api/workspace/mentions${suffix}`);
   },
-  async exportWorkspace(user_id?: string, mode: 'latest' | 'all' = 'all') {
+  async exportWorkspace(user_id?: string, mode: 'latest' | 'all' = 'all', session_id?: string) {
     return request<{ zip_path: string; download_url?: string; file_count: number }>('/api/workspace/export', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', mode })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', mode })
     });
   },
-  async runSoilMoistureWorkflow(user_id?: string) {
+  async runSoilMoistureWorkflow(user_id?: string, session_id?: string) {
     return request<{ reply: string; model?: string; reason?: string }>('/api/workflows/shandian-soil-moisture', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', run_now: true })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', run_now: true })
     });
   },
   async localLibrary(params: { query?: string; category?: string; data_type?: string; include_disabled?: boolean } = {}) {
@@ -593,10 +607,10 @@ export const api = {
       body: JSON.stringify({})
     });
   },
-  async importLocalLibrary(item_ids: string[], user_id?: string) {
+  async importLocalLibrary(item_ids: string[], user_id?: string, session_id?: string) {
     return request<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/local-library/import', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', item_ids })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', item_ids })
     });
   },
   async pay(user_id: string, plan: PaidPlan) {
@@ -615,6 +629,7 @@ export const api = {
     account_mode: 'own' | 'platform' | 'auto';
     request_text?: string;
     output_name?: string;
+    session_id?: string;
   }) {
     return request<{ job: unknown; auto_supported?: boolean; auto_started?: boolean; reason?: string; auto_tile_job?: unknown; scene_job?: unknown }>('/api/downloads/submit', {
       method: 'POST',
@@ -648,9 +663,12 @@ export const api = {
       body: JSON.stringify(input)
     });
   },
-  async jobs(user_id?: string) {
-    const q = user_id ? `?user_id=${encodeURIComponent(user_id)}` : '';
-    return request<{ jobs: DownloadJob[] }>(`/api/downloads/jobs${q}`);
+  async jobs(user_id?: string, session_id?: string) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
+    const suffix = q.toString() ? `?${q.toString()}` : '';
+    return request<{ jobs: DownloadJob[] }>(`/api/downloads/jobs${suffix}`);
   },
   async loginHealth(user_id: string, source_key = 'gscloud', account_mode: 'own' | 'platform' | 'auto' = 'platform') {
     const q = `?user_id=${encodeURIComponent(user_id)}&source_key=${encodeURIComponent(source_key)}&account_mode=${encodeURIComponent(account_mode)}`;
@@ -688,22 +706,22 @@ export const api = {
     const q = `?user_id=${encodeURIComponent(user_id)}&job_id=${encodeURIComponent(job_id)}`;
     return downloadWithAuth(`/api/downloads/jobs/log-download${q}`, `${job_id}_log.txt`);
   },
-  async deleteDownloadJob(job_id: string, user_id?: string) {
+  async deleteDownloadJob(job_id: string, user_id?: string, session_id?: string) {
     return request<{ ok: boolean; deleted_job_id: string; jobs: DownloadJob[] }>('/api/downloads/jobs/delete', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', job_id })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', job_id })
     });
   },
-  async cancelDownloadJob(job_id: string, user_id?: string, reason?: string) {
+  async cancelDownloadJob(job_id: string, user_id?: string, reason?: string, session_id?: string) {
     return request<DownloadJob & { jobs: DownloadJob[] }>('/api/downloads/jobs/cancel', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', job_id, reason: reason || '用户取消任务。' })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', job_id, reason: reason || '用户取消任务。' })
     });
   },
-  async retryDownloadJob(job_id: string, user_id?: string) {
+  async retryDownloadJob(job_id: string, user_id?: string, session_id?: string) {
     return request<{ job: DownloadJob; jobs: DownloadJob[]; auto_supported?: boolean; auto_started?: boolean; reason?: string }>('/api/downloads/jobs/retry', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', job_id })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', job_id })
     });
   },
   async downloadAuthenticated(url: string, fallbackName?: string) {

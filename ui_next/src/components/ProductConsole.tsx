@@ -61,6 +61,7 @@ type ProductConsoleProps = {
   externalPrompt?: ExternalPromptCommand | null;
   onMapTextCommand?: (command: ParsedMapTextCommand) => string;
   onResultPanel?: (panel: ResultPanel) => void;
+  onSessionChange?: (sessionId: string) => void;
   chatContext?: ChatContextPayload;
 };
 
@@ -259,6 +260,7 @@ export function ProductConsole({
   externalPrompt,
   onMapTextCommand,
   onResultPanel,
+  onSessionChange,
   chatContext = {}
 }: ProductConsoleProps) {
   const [activeTab, setActiveTab] = useState<ConsoleTab>('overview');
@@ -287,15 +289,20 @@ export function ProductConsole({
   const [deletingArtifactId, setDeletingArtifactId] = useState('');
   const [selectedArtifactIds, setSelectedArtifactIds] = useState<Set<string>>(() => new Set());
   const [deletedArtifactIds, setDeletedArtifactIds] = useState<Set<string>>(() => new Set());
+  const [currentSessionId, setCurrentSessionId] = useState('');
   const userId = user?.user_id || '';
   const openChatPage = () => setActiveTab('chat');
+  const updateSession = (sessionId: string) => {
+    setCurrentSessionId(sessionId);
+    onSessionChange?.(sessionId);
+  };
 
   const refresh = useCallback(async () => {
     setError('');
     try {
       const [dashboardData, jobsData] = await Promise.all([
-        api.dashboard(userId),
-        userId ? api.jobs(userId) : Promise.resolve({ jobs: [] as DownloadJob[] })
+        api.dashboard(userId, currentSessionId),
+        userId ? api.jobs(userId, currentSessionId) : Promise.resolve({ jobs: [] as DownloadJob[] })
       ]);
       setDashboard(dashboardData);
       setJobs(jobsData.jobs || []);
@@ -305,7 +312,7 @@ export function ProductConsole({
     } finally {
       setLoading(false);
     }
-  }, [userId]);
+  }, [userId, currentSessionId]);
 
   useEffect(() => {
     setLoading(true);
@@ -391,7 +398,8 @@ export function ProductConsole({
         end_date: endDate,
         account_mode: accountMode,
         request_text: `控制台提交：下载 ${region} ${product.requestLabel}`,
-        output_name: outputName.trim() || defaultOutputName
+        output_name: outputName.trim() || defaultOutputName,
+        session_id: currentSessionId
       });
       const created = result.job as DownloadJob | undefined;
       setNotice(result.auto_started ? '任务已启动，系统正在后台执行。' : `任务已创建：${result.reason || '等待处理'}`);
@@ -445,7 +453,7 @@ export function ProductConsole({
   const cancelJob = async (job: DownloadJob) => {
     setBusyJobId(job.job_id);
     try {
-      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在控制台取消任务。');
+      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在控制台取消任务。', currentSessionId);
       setJobs(result.jobs || []);
       setNotice(`已取消任务：${getJobName(job)}`);
     } catch (e) {
@@ -458,7 +466,7 @@ export function ProductConsole({
   const retryJob = async (job: DownloadJob) => {
     setBusyJobId(job.job_id);
     try {
-      const result = await api.retryDownloadJob(job.job_id, userId);
+      const result = await api.retryDownloadJob(job.job_id, userId, currentSessionId);
       setJobs(result.jobs || []);
       setNotice(result.auto_started ? '已创建重试任务并开始后台执行。' : `已创建重试任务：${result.reason || '等待处理'}`);
       const newJob = result.job as DownloadJob | undefined;
@@ -473,7 +481,7 @@ export function ProductConsole({
   const deleteJob = async (job: DownloadJob) => {
     setBusyJobId(job.job_id);
     try {
-      const result = await api.deleteDownloadJob(job.job_id, userId);
+      const result = await api.deleteDownloadJob(job.job_id, userId, currentSessionId);
       setJobs(result.jobs || []);
       setNotice(`已删除任务记录：${getJobName(job)}`);
       if (selectedJobId === job.job_id) setSelectedJobId(result.jobs?.[0]?.job_id || '');
@@ -488,7 +496,7 @@ export function ProductConsole({
     setExporting(true);
     setNotice('');
     try {
-      const result = await api.exportWorkspace(userId, 'all');
+      const result = await api.exportWorkspace(userId, 'all', currentSessionId);
       setNotice(`已打包 ${result.file_count} 个成果文件。`);
       await refresh();
       if (result.download_url) await api.downloadAuthenticated(result.download_url, 'workspace-export.zip');
@@ -541,7 +549,7 @@ export function ProductConsole({
     setDeletingArtifactId('__batch__');
     setNotice('');
     try {
-      const result = await api.deleteArtifactsBatch(artifactIds, userId, true);
+      const result = await api.deleteArtifactsBatch(artifactIds, userId, true, currentSessionId);
       const deletedIds = (result.results || []).filter((item) => item.ok).map((item) => item.artifact_id);
       pruneDeletedArtifacts(deletedIds);
       setNotice(result.failed_count ? `Deleted ${deletedIds.length} result file(s); ${result.failed_count} failed.` : `Deleted ${deletedIds.length} result file(s).`);
@@ -562,7 +570,7 @@ export function ProductConsole({
     setDeletingArtifactId(artifact.artifact_id);
     setNotice('');
     try {
-      const result = await api.deleteArtifact(artifact.artifact_id, userId, true);
+      const result = await api.deleteArtifact(artifact.artifact_id, userId, true, currentSessionId);
       if (!result.ok) throw new Error(result.status || 'Delete failed.');
       pruneDeletedArtifacts([artifact.artifact_id]);
       setNotice(`已删除结果文件：${artifact.label}`);
@@ -995,7 +1003,7 @@ export function ProductConsole({
           <MetricCard label="文档" value={counts.document || 0} hint="说明、报告和 Markdown。" icon={Archive} />
         </div>
       </Panel>
-      <LocalLibraryPanel userId={userId} onImported={refresh} />
+      <LocalLibraryPanel userId={userId} sessionId={currentSessionId} onImported={refresh} />
     </div>
   );
 
@@ -1007,6 +1015,7 @@ export function ProductConsole({
       onMapTextCommand={onMapTextCommand}
       externalPrompt={externalPrompt}
       onResultPanel={onResultPanel}
+      onSessionChange={updateSession}
       chatContext={chatContext}
       mentionDatasets={dashboard?.datasets || []}
     />

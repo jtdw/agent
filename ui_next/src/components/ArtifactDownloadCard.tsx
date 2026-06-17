@@ -44,11 +44,13 @@ function formatTime(value?: string) {
 export function ArtifactDownloadCard({
   artifact,
   userId,
+  sessionId,
   onDeleted,
   onShowOnMap
 }: {
   artifact: ChatArtifact;
   userId?: string;
+  sessionId?: string;
   onDeleted?: (artifactId: string) => void;
   onShowOnMap?: (artifact: ChatArtifact) => void;
 }) {
@@ -86,7 +88,7 @@ export function ArtifactDownloadCard({
     setDeleting(true);
     setError('');
     try {
-      await api.deleteArtifact(artifact.artifact_id, userId, true);
+      await api.deleteArtifact(artifact.artifact_id, userId, true, sessionId);
       setDeleted(true);
       onDeleted?.(artifact.artifact_id);
     } catch (cause) {
@@ -105,7 +107,7 @@ export function ArtifactDownloadCard({
     setMapping(true);
     setError('');
     try {
-      const result = await api.refreshMapLayer({ user_id: userId, artifact_id: artifact.artifact_id });
+      const result = await api.refreshMapLayer({ user_id: userId, session_id: sessionId, artifact_id: artifact.artifact_id });
       window.dispatchEvent(new CustomEvent('gis:show-artifact-on-map', { detail: { artifact, result } }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '无法显示到地图');

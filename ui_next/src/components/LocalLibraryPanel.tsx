@@ -86,7 +86,7 @@ function LibraryItemCard({
   );
 }
 
-export function LocalLibraryPanel({ userId, onImported }: { userId?: string; onImported?: () => void }) {
+export function LocalLibraryPanel({ userId, sessionId = '', onImported }: { userId?: string; sessionId?: string; onImported?: () => void }) {
   const [library, setLibrary] = useState<LocalLibraryResponse | null>(null);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
@@ -135,7 +135,7 @@ export function LocalLibraryPanel({ userId, onImported }: { userId?: string; onI
     }
     setBusy(true);
     try {
-      const r = await api.importLocalLibrary(ids, userId || '');
+      const r = await api.importLocalLibrary(ids, userId || '', sessionId);
       setNotice(r.messages.join('；'));
       setSelected([]);
       onImported?.();

@@ -37,6 +37,21 @@ class MapLayerServiceTests(unittest.TestCase):
             self.assertEqual(layer["meta"]["crs"], "EPSG:4326")
             self.assertEqual(layer["meta"]["geometry_type"], "Point")
 
+    def test_large_county_admin_vector_layer_is_not_truncated(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            gdf = gpd.GeoDataFrame(
+                {"name": [f"county_{i}" for i in range(2105)], "geometry": [Point(73 + i * 0.001, 30.0) for i in range(2105)]},
+                crs="EPSG:4326",
+            )
+
+            layer = MapLayerService(service).vector_map_layer("china_admin_county_2023", gdf, dataset_name="china_admin_county_2023")
+
+            self.assertIsNotNone(layer)
+            self.assertEqual(layer["feature_count"], 2105)
+            self.assertEqual(layer["meta"]["feature_count"], 2105)
+            self.assertEqual(len(layer["geojson"]["features"]), 2105)
+
     def test_refresh_artifact_loads_spatial_file_and_updates_artifact_metadata(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))

@@ -123,11 +123,14 @@ function LayerMetadata({ layer, onClose }: { layer: ResultMapLayer; onClose: () 
 
 export function LayerPanel({
   user,
+  sessionId = '',
   basemap,
   setBasemap,
   onClose,
   layerVisibility,
+  layerOpacity,
   onLayerToggle,
+  onLayerOpacityChange,
   onLayerLocate,
   resultLayers = [],
   resultLayerState = {},
@@ -137,11 +140,14 @@ export function LayerPanel({
   onRunWorkflowAction
 }: {
   user: CommercialUser | null;
+  sessionId?: string;
   basemap: Basemap;
   setBasemap: (value: Basemap) => void;
   onClose?: () => void;
   layerVisibility: LayerVisibility;
+  layerOpacity: LayerOpacity;
   onLayerToggle: (id: keyof LayerVisibility) => void;
+  onLayerOpacityChange: (id: keyof LayerOpacity, opacity: number) => void;
   onLayerLocate: (id: keyof LayerOpacity) => void;
   resultLayers?: ResultMapLayer[];
   resultLayerState?: ResultLayerUiState;
@@ -165,7 +171,7 @@ export function LayerPanel({
   const userId = user?.user_id || '';
 
   const refreshDashboard = () => {
-    api.dashboard(userId).then(setDashboard).catch(() => setDashboard(null));
+    api.dashboard(userId, sessionId).then(setDashboard).catch(() => setDashboard(null));
   };
 
   const refreshJobs = () => {
@@ -173,7 +179,7 @@ export function LayerPanel({
       setJobs([]);
       return;
     }
-    api.jobs(userId)
+    api.jobs(userId, sessionId)
       .then((r) => {
         const nextJobs = r.jobs || [];
         setJobs(nextJobs);
@@ -204,7 +210,7 @@ export function LayerPanel({
       refreshJobs();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [userId]);
+  }, [userId, sessionId]);
 
   const submitPlatformJob = async () => {
     if (!user) {
@@ -221,6 +227,7 @@ export function LayerPanel({
         resource_type: product.value,
         region,
         account_mode: 'platform',
+        session_id: sessionId,
         request_text: `前端一键提交：下载 ${region} ${product.requestLabel}`,
         output_name: `${region}_${product.outputSuffix}`
       });
@@ -278,7 +285,7 @@ export function LayerPanel({
   const exportAll = async () => {
     setBusy(true);
     try {
-      const r = await api.exportWorkspace(userId, 'all');
+      const r = await api.exportWorkspace(userId, 'all', sessionId);
       setNotice(`已打包 ${r.file_count} 个成果文件。${r.download_url ? '可在最近成果中下载。' : ''}`);
       refreshDashboard();
       if (r.download_url) await downloadUrl(r.download_url, 'workspace-export.zip');
@@ -301,7 +308,7 @@ export function LayerPanel({
   const deleteJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.deleteDownloadJob(job.job_id, userId);
+      const result = await api.deleteDownloadJob(job.job_id, userId, sessionId);
       setJobs(result.jobs || []);
       setNotice(`已删除下载任务记录：${job.output_name || job.job_id}`);
       refreshDashboard();
@@ -315,7 +322,7 @@ export function LayerPanel({
   const cancelJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在前端取消任务。');
+      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在前端取消任务。', sessionId);
       setJobs(result.jobs || []);
       setNotice(`已取消下载任务：${job.output_name || job.job_id}`);
       refreshDashboard();
@@ -329,7 +336,7 @@ export function LayerPanel({
   const retryJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.retryDownloadJob(job.job_id, userId);
+      const result = await api.retryDownloadJob(job.job_id, userId, sessionId);
       setJobs(result.jobs || []);
       setNotice(result.auto_started ? '已创建重试任务并开始后台下载。' : `已创建重试任务：${result.reason || '等待处理'}`);
       refreshDashboard();
@@ -517,7 +524,7 @@ export function LayerPanel({
 
           <ResearchWorkflowPanel onRunAction={onRunWorkflowAction} />
 
-          <LocalLibraryPanel userId={userId} onImported={refreshDashboard} />
+          <LocalLibraryPanel userId={userId} sessionId={sessionId} onImported={refreshDashboard} />
 
           <div className="mt-4 space-y-2">
             {layers.map((layer) => {
@@ -543,6 +550,18 @@ export function LayerPanel({
                       setLayers((items) => items.map((x) => x.id === layer.id ? { ...x, active: !active } : x));
                     }}
                   />
+                  {opacityLayerId && (
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={1}
+                      step={0.05}
+                      value={layerOpacity[opacityLayerId]}
+                      onChange={(event) => onLayerOpacityChange(opacityLayerId, Number(event.target.value))}
+                      className="col-span-4 mt-1 w-full accent-cyan-500"
+                      aria-label="全局透明度"
+                    />
+                  )}
                 </motion.div>
               );
             })}

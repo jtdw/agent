@@ -32,6 +32,20 @@ class GSCloudIntentRouterTests(unittest.TestCase):
         self.assertEqual(route.kind, "clarify")
         self.assertEqual(route.product_key, "modl1d_china_1km_lst_daily")
 
+    def test_routes_srtmdemutm_url_to_dem_product(self):
+        route = route_gscloud_download_intent("下载成都 https://www.gscloud.cn/sources/accessdata/306?pid=302 这个 DEM")
+
+        self.assertEqual(route.kind, "matched")
+        self.assertEqual(route.product_key, "srtmdemutm_90m")
+        self.assertEqual(route.resource_type, "dem")
+
+    def test_routes_dem_request_with_generic_admin_region(self):
+        route = route_gscloud_download_intent("下载青海省 DEM 数据")
+
+        self.assertEqual(route.kind, "matched")
+        self.assertEqual(route.product_key, "gscloud_dem")
+        self.assertEqual(route.resource_type, "dem")
+
     def test_ambiguous_vegetation_request_asks_clarification(self):
         route = route_gscloud_download_intent("下载植被数据")
 

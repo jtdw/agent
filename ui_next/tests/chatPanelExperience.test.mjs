@@ -50,7 +50,8 @@ const refreshSessionsSource = source.match(/const refreshSessions = async[\s\S]*
 assert.match(refreshSessionsSource, /if \(!userId\) \{[\s\S]*?setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?setMessages\(\[\]\);[\s\S]*?return;/, 'ChatPanel must not load anonymous chat history before login');
 assert.match(sendPromptSource, /if \(!userId\) \{[\s\S]*?return;/, 'ChatPanel must not create anonymous chat records before login');
 assert.match(sendPromptSource, /setMessages\(\(current\) => mergeStableClientMessageIds\(current, normalizeChatMessages\(r\.messages\)\)\)/);
-assert.equal(sendPromptSource.includes('setCurrentSessionId(r.current_session_id || currentSessionId)'), true);
+assert.equal(sendPromptSource.includes('const nextSessionId = r.current_session_id || currentSessionId'), true);
+assert.equal(sendPromptSource.includes('setCurrentSessionId(nextSessionId)'), true);
 assert.match(source, /mergeStableClientMessageIds/, 'ChatPanel must preserve optimistic message keys when server messages return');
 assert.match(source, /id:\s*`pending-\$\{Date\.now\(\)\}-\$\{hashString\(text\)\}`/, 'Optimistic user messages must carry a stable client id');
 assert.match(source, /if \(message\.id\) return `message-\$\{message\.id\}`;[\s\S]*?if \(message\.message_id\)/, 'ChatPanel message keys must prefer stable client ids before persisted ids');

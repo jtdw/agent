@@ -81,6 +81,17 @@ SENTINEL2_MSI = GSCloudProduct(
     download_mode="scene_table",
 )
 
+SRTMDEMUTM_90M = GSCloudProduct(
+    key="srtmdemutm_90m",
+    name="SRTMDEMUTM 90M 分辨率数字高程数据产品",
+    resource_type="srtmdemutm_90m",
+    dataset_id="306",
+    pid="302",
+    access_url="https://www.gscloud.cn/sources/accessdata/306?pid=302",
+    aliases=("srtmdemutm", "srtm dem utm", "srtm 90m", "srtm90", "90m dem", "90米dem", "srtm", "utm_srtm", "accessdata/306", "pid=302"),
+    download_mode="tile_grid",
+)
+
 
 GSCLOUD_PRODUCTS = {
     LANDSAT8_OLI_TIRS.key: LANDSAT8_OLI_TIRS,
@@ -89,6 +100,7 @@ GSCLOUD_PRODUCTS = {
     MODEV1F_CHINA_250M_EVI_5DAY.key: MODEV1F_CHINA_250M_EVI_5DAY,
     MOD021KM_1KM_SURFACE_REFLECTANCE.key: MOD021KM_1KM_SURFACE_REFLECTANCE,
     SENTINEL2_MSI.key: SENTINEL2_MSI,
+    SRTMDEMUTM_90M.key: SRTMDEMUTM_90M,
 }
 
 

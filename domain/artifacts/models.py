@@ -7,23 +7,34 @@ from urllib.parse import urlencode
 from .policies import artifact_mime_type, assert_artifact_path_allowed, safe_download_filename
 
 
-def artifact_download_url(artifact_id: str, user_id: str = "") -> str:
+def _artifact_query(user_id: str = "", session_id: str = "") -> str:
+    params = {}
+    if str(user_id or "").strip():
+        params["user_id"] = str(user_id).strip()
+    if str(session_id or "").strip():
+        params["session_id"] = str(session_id).strip()
+    return urlencode(params)
+
+
+def artifact_download_url(artifact_id: str, user_id: str = "", session_id: str = "") -> str:
     clean_id = str(artifact_id or "").strip()
     if not clean_id:
         return ""
     url = f"/api/artifacts/{clean_id}/download"
-    return f"{url}?{urlencode({'user_id': str(user_id).strip()})}" if str(user_id or "").strip() else url
+    query = _artifact_query(user_id, session_id)
+    return f"{url}?{query}" if query else url
 
 
-def artifact_meta_url(artifact_id: str, user_id: str = "") -> str:
+def artifact_meta_url(artifact_id: str, user_id: str = "", session_id: str = "") -> str:
     clean_id = str(artifact_id or "").strip()
     if not clean_id:
         return ""
     url = f"/api/artifacts/{clean_id}"
-    return f"{url}?{urlencode({'user_id': str(user_id).strip()})}" if str(user_id or "").strip() else url
+    query = _artifact_query(user_id, session_id)
+    return f"{url}?{query}" if query else url
 
 
-def public_artifact_payload(artifact: dict[str, Any], *, workdir: str | Path, user_id: str = "") -> dict[str, Any]:
+def public_artifact_payload(artifact: dict[str, Any], *, workdir: str | Path, user_id: str = "", session_id: str = "") -> dict[str, Any]:
     path = assert_artifact_path_allowed(workdir, str(artifact.get("path") or ""))
     artifact_id = str(artifact.get("artifact_id") or "")
     artifact_type = str(artifact.get("type") or artifact.get("category") or "artifact")
@@ -53,6 +64,6 @@ def public_artifact_payload(artifact: dict[str, Any], *, workdir: str | Path, us
             "message_id": str(meta.get("message_id") or artifact.get("message_id") or ""),
         },
         "preview_available": bool(artifact.get("preview_available")),
-        "download_url": artifact_download_url(artifact_id, user_id=user_id),
-        "metadata_url": artifact_meta_url(artifact_id, user_id=user_id),
+        "download_url": artifact_download_url(artifact_id, user_id=user_id, session_id=session_id),
+        "metadata_url": artifact_meta_url(artifact_id, user_id=user_id, session_id=session_id),
     }

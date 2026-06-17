@@ -43,6 +43,9 @@ assert.match(
 assert.equal(mapStageSource.includes('right: 430'), false);
 assert.match(layerPanelSource, /resultLayers/, 'LayerPanel must render artifact-level result layers');
 assert.match(layerPanelSource, /LayerMetadata/, 'LayerPanel must expose result layer metadata');
+assert.match(layerPanelSource, /layerOpacity/, 'LayerPanel must receive global layer opacity state');
+assert.match(layerPanelSource, /onLayerOpacityChange/, 'LayerPanel must expose global layer opacity controls');
+assert.match(layerPanelSource, /value=\{layerOpacity\[opacityLayerId\]\}/, 'Global layer rows must bind their sliders to current opacity values');
 assert.match(artifactCardSource, /onShowOnMap/, 'Artifact cards must expose a show-on-map action for map-ready artifacts');
 assert.match(apiSource, /refreshMapLayer/, 'Frontend API must expose map layer refresh');
 assert.equal(layerPanelSource.includes('图层透明度'), false);

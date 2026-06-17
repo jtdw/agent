@@ -81,7 +81,7 @@ class MapLayerService:
     def raster_preview_path(self, dataset_name: str) -> Path:
         return self.service.manager.temp_dir / "map_previews" / f"{safe_layer_id(dataset_name)}.png"
 
-    def ensure_raster_preview(self, dataset_name: str, user_id: str = "") -> dict[str, Any]:
+    def ensure_raster_preview(self, dataset_name: str, user_id: str = "", session_id: str = "") -> dict[str, Any]:
         import numpy as np
         import rasterio
         from PIL import Image
@@ -133,6 +133,8 @@ class MapLayerService:
         params = {"dataset_name": dataset_name}
         if str(user_id or "").strip():
             params["user_id"] = str(user_id or "").strip()
+        if str(session_id or "").strip():
+            params["session_id"] = str(session_id or "").strip()
         return {
             "preview_path": str(preview_path),
             "preview_url": f"/api/map/raster-preview?{urlencode(params)}",
@@ -176,8 +178,8 @@ class MapLayerService:
         if gdf.crs:
             gdf = gdf.to_crs("EPSG:4326")
         feature_count_total = int(len(gdf))
-        if len(gdf) > 2000:
-            gdf = gdf.head(2000)
+        if len(gdf) > 5000:
+            gdf = gdf.head(5000)
         artifact_id = str((artifact or {}).get("artifact_id") or "")
         layer_meta = _merge_meta(meta, (artifact or {}).get("meta") if isinstance((artifact or {}).get("meta"), dict) else None)
         layer_meta.update(
@@ -204,7 +206,7 @@ class MapLayerService:
             "meta": layer_meta,
         }
 
-    def dataset_layer(self, item: dict[str, Any], artifact: dict[str, Any] | None = None, user_id: str = "") -> dict[str, Any] | None:
+    def dataset_layer(self, item: dict[str, Any], artifact: dict[str, Any] | None = None, user_id: str = "", session_id: str = "") -> dict[str, Any] | None:
         name = str(item.get("name") or "")
         data_type = str(item.get("type") or "")
         meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
@@ -220,7 +222,7 @@ class MapLayerService:
                 dataset_name=name,
             )
         if data_type == "raster":
-            preview = self.ensure_raster_preview(name, user_id=user_id)
+            preview = self.ensure_raster_preview(name, user_id=user_id, session_id=session_id)
             artifact_id = str((artifact or {}).get("artifact_id") or "")
             layer_meta = _merge_meta(meta, preview.get("meta"), (artifact or {}).get("meta") if isinstance((artifact or {}).get("meta"), dict) else None)
             layer_meta.update(
@@ -268,7 +270,7 @@ class MapLayerService:
             "meta": _merge_meta(meta, {"artifact_id": artifact_id, "map_ready": True}),
         }
 
-    def workspace_layers(self, user_id: str = "") -> dict[str, Any]:
+    def workspace_layers(self, user_id: str = "", session_id: str = "") -> dict[str, Any]:
         artifacts = self.service.manager.list_artifacts()
         artifacts_by_path = _artifact_path_index(artifacts)
         artifacts_by_dataset = _artifact_dataset_index(artifacts)
@@ -283,7 +285,7 @@ class MapLayerService:
                 except Exception:
                     artifact = None
             try:
-                layer = self.dataset_layer(item, artifact=artifact, user_id=user_id)
+                layer = self.dataset_layer(item, artifact=artifact, user_id=user_id, session_id=session_id)
             except Exception as exc:
                 diagnostics.append({"dataset_name": name, "error": str(exc)})
                 continue
@@ -302,7 +304,7 @@ class MapLayerService:
 
         return {"layers": layers, "diagnostics": diagnostics}
 
-    def refresh_artifact(self, artifact_id: str, user_id: str = "") -> dict[str, Any]:
+    def refresh_artifact(self, artifact_id: str, user_id: str = "", session_id: str = "") -> dict[str, Any]:
         artifact = self.service.manager.get_artifact(artifact_id)
         if not artifact:
             raise FileNotFoundError(f"artifact not found: {artifact_id}")
@@ -335,7 +337,7 @@ class MapLayerService:
         dataset = next((item for item in self.service.manager.list_datasets() if item.get("name") == dataset_name), None)
         if not dataset:
             raise ValueError(f"dataset not found after artifact refresh: {dataset_name}")
-        layer = self.dataset_layer(dataset, artifact=artifact, user_id=user_id)
+        layer = self.dataset_layer(dataset, artifact=artifact, user_id=user_id, session_id=session_id)
         if not layer:
             raise ValueError(f"artifact produced no map layer: {artifact_id}")
         refreshed_meta = _merge_meta(

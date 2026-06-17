@@ -13,6 +13,7 @@ from .gscloud_products import (
     MODL1D_CHINA_1KM_LST_DAILY,
     MODND1D_CHINA_500M_NDVI_DAILY,
     SENTINEL2_MSI,
+    SRTMDEMUTM_90M,
 )
 
 
@@ -56,6 +57,8 @@ def _has_region_hint(prompt: str) -> bool:
     normalized = _norm(text)
     explicit = ("成都", "成都市", "四川", "四川省", "重庆", "重庆市", "云南", "云南省", "贵州", "贵州省", "闪电河", "研究区", "区域", "流域")
     if any(term in text for term in explicit):
+        return True
+    if re.search(r"[\u4e00-\u9fff]{2,12}(?:特别行政区|自治区|自治州|地区|盟|省|市|县|区|旗|流域)", text):
         return True
     return any(term in normalized for term in ("chengdu", "sichuan", "chongqing", "yunnan", "guizhou", "basin", "region", "aoi"))
 
@@ -102,6 +105,12 @@ INTENTS: tuple[_IntentSpec, ...] = (
         resource_type=LANDSAT8_OLI_TIRS.resource_type,
         aliases=_product_aliases(LANDSAT8_OLI_TIRS.key, "陆地卫星八", "landsat八", "landsat影像"),
         category_terms=("landsat", "陆地卫星", "l8", "oli"),
+    ),
+    _IntentSpec(
+        product_key=SRTMDEMUTM_90M.key,
+        resource_type="dem",
+        aliases=_product_aliases(SRTMDEMUTM_90M.key, "srtmdemutm 90m", "srtm dem 90m", "90m dem", "90米dem"),
+        category_terms=("srtm", "srtmdemutm", "90m", "90米", "306", "302"),
     ),
     _IntentSpec(
         product_key="gscloud_dem",
@@ -168,7 +177,8 @@ def route_gscloud_download_intent(prompt: str) -> GSCloudIntentRoute:
     if scored:
         best_score, best_spec, best_terms = scored[0]
         second_score = scored[1][0] if len(scored) > 1 else 0.0
-        if best_score >= 0.72 and best_score - second_score >= 0.12:
+        specific_product_match = best_spec.product_key != "gscloud_dem" and best_score >= 0.86
+        if best_score >= 0.72 and (best_score - second_score >= 0.12 or specific_product_match):
             if _has_download_action(text) and not _has_region_hint(text):
                 return GSCloudIntentRoute(
                     kind="clarify",

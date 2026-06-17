@@ -115,7 +115,8 @@ export function ChatMessageRenderer({
   onLogin,
   onResume,
   onCancel,
-  onClarification
+  onClarification,
+  sessionId
 }: {
   message: ChatMessage;
   content: string;
@@ -126,6 +127,7 @@ export function ChatMessageRenderer({
   onResume?: (jobId: string) => void;
   onCancel?: (jobId: string) => void;
   onClarification?: (value: string, label: string) => void;
+  sessionId?: string;
 }) {
   const artifacts = artifactsFromMessage(message);
   const [deletedArtifactIds, setDeletedArtifactIds] = useState<Set<string>>(() => new Set());
@@ -165,6 +167,7 @@ export function ChatMessageRenderer({
             <ArtifactDownloadCard
               key={artifact.artifact_id || artifact.download_url}
               artifact={artifact}
+              sessionId={sessionId}
               onDeleted={(artifactId) => setDeletedArtifactIds((current) => new Set(current).add(artifactId))}
             />
           ))}

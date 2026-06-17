@@ -7,11 +7,11 @@ const composerSource = await readFile('src/components/ChatComposer.tsx', 'utf8')
 const productConsoleSource = await readFile('src/components/ProductConsole.tsx', 'utf8');
 
 assert.match(apiSource, /export type WorkspaceMention/, 'API types must expose compact workspace mention items');
-assert.match(apiSource, /workspaceMentions\(user_id\?: string\)/, 'API helper must load compact workspace mentions');
+assert.match(apiSource, /workspaceMentions\(user_id\?: string, session_id\?: string\)/, 'API helper must load compact workspace mentions for the current session');
 assert.match(apiSource, /\/api\/workspace\/mentions/, 'workspaceMentions must call the compact mentions endpoint');
 
 assert.match(chatPanelSource, /mentionDatasets\?:[^;]*WorkspaceMention/, 'ChatWorkspace must accept mention datasets from parent surfaces');
-assert.match(chatPanelSource, /api\.workspaceMentions\(userId\)/, 'ChatWorkspace must refresh mention datasets through the compact API');
+assert.match(chatPanelSource, /api\.workspaceMentions\(userId, currentSessionId\)/, 'ChatWorkspace must refresh mention datasets through the compact API for the current session');
 assert.match(chatPanelSource, /setWorkspaceMentions\(normalizeWorkspaceMentions/, 'ChatWorkspace must normalize mentions before rendering the picker');
 assert.match(chatPanelSource, /mentionItems=\{workspaceMentions\}/, 'ChatWorkspace must pass mention items into ChatComposer');
 assert.doesNotMatch(chatPanelSource, /api\.dashboard/, 'ChatWorkspace must not fetch the full dashboard for mention suggestions');

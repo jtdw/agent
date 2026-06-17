@@ -20,22 +20,35 @@ from .registry import get_source
 GSCLOUD_HOME = "https://www.gscloud.cn/"
 # 你截图里的 ASTER GDEM 30M 访问数据页。
 GSCLOUD_ASTER_GDEM30_ACCESS_URL = "https://www.gscloud.cn/sources/accessdata/310?pid=1"
+GSCLOUD_SRTMDEMUTM_90M_ACCESS_URL = "https://www.gscloud.cn/sources/accessdata/306?pid=302"
 GSCLOUD_DEM_INDEX_URL = "https://www.gscloud.cn/sources/index?pid=1&rootid=1&title=DEM&sort=priority&page=1"
 
 # 常见产品页。后续你可以继续补充实际 id。
 GSCLOUD_DEM_DATASETS: dict[str, dict[str, Any]] = {
     "aster_gdem_30m": {
         "dataset_id": "310",
+        "pid": "1",
         "name": "ASTER GDEM 30M 分辨率数字高程数据",
         "access_url": GSCLOUD_ASTER_GDEM30_ACCESS_URL,
         "file_pattern": "ASTGTM_N{lat:02d}E{lon:03d}.img.zip",
+        "tile_scheme": "astgtm_1deg",
     },
     "gdemv2_30m": {
         # 这个 id 来自你截图底部状态栏 accessdata/421?pid=1；如页面变化，可在调用时覆盖 dataset_id。
         "dataset_id": "421",
+        "pid": "1",
         "name": "GDEMV2 30M 分辨率数字高程数据",
         "access_url": "https://www.gscloud.cn/sources/accessdata/421?pid=1",
         "file_pattern": "ASTGTM_N{lat:02d}E{lon:03d}.img.zip",
+        "tile_scheme": "astgtm_1deg",
+    },
+    "srtmdemutm_90m": {
+        "dataset_id": "306",
+        "pid": "302",
+        "name": "SRTMDEMUTM 90M 分辨率数字高程数据产品",
+        "access_url": GSCLOUD_SRTMDEMUTM_90M_ACCESS_URL,
+        "file_pattern": "utm_srtm_{strip:02d}_{row:02d}.img.zip",
+        "tile_scheme": "srtm_utm_5deg",
     },
 }
 
@@ -657,6 +670,22 @@ def _format_astgtm_tile_id(lat_floor: int, lon_floor: int) -> str:
     return f"ASTGTM_{lat_prefix}{abs(int(lat_floor)):02d}{lon_prefix}{abs(int(lon_floor)):03d}"
 
 
+def _format_srtm_utm_tile_id(row: int, strip: int) -> str:
+    return f"utm_srtm_{int(strip):02d}_{int(row):02d}"
+
+
+def resolve_gscloud_dem_product(product_key: str = "", dataset_id: str = "") -> tuple[str, dict[str, Any]]:
+    key = str(product_key or "").strip().lower()
+    dataset = str(dataset_id or "").strip()
+    if key and key in GSCLOUD_DEM_DATASETS:
+        return key, GSCLOUD_DEM_DATASETS[key]
+    if dataset:
+        for candidate_key, product in GSCLOUD_DEM_DATASETS.items():
+            if str(product.get("dataset_id") or "") == dataset:
+                return candidate_key, product
+    return "aster_gdem_30m", GSCLOUD_DEM_DATASETS["aster_gdem_30m"]
+
+
 def _tile_bounds_from_id(tile_id: str) -> tuple[float, float, float, float]:
     import re
 
@@ -666,6 +695,22 @@ def _tile_bounds_from_id(tile_id: str) -> tuple[float, float, float, float]:
     lat = int(m.group(2)) * (1 if m.group(1) == "N" else -1)
     lon = int(m.group(4)) * (1 if m.group(3) == "E" else -1)
     return float(lon), float(lat), float(lon + 1), float(lat + 1)
+
+
+def _srtm_utm_cell_bounds(row: int, strip: int) -> tuple[float, float, float, float]:
+    west = -180.0 + (int(strip) - 1) * 5.0
+    south = 60.0 - int(row) * 5.0
+    return west, south, west + 5.0, south + 5.0
+
+
+def _srtm_utm_indices_for_bbox(minx: float, miny: float, maxx: float, maxy: float) -> list[tuple[int, int, tuple[float, float, float, float]]]:
+    items: list[tuple[int, int, tuple[float, float, float, float]]] = []
+    for strip in range(1, 73):
+        for row in range(1, 31):
+            bounds = _srtm_utm_cell_bounds(row, strip)
+            if _bbox_intersects((minx, miny, maxx, maxy), bounds):
+                items.append((row, strip, bounds))
+    return items
 
 
 def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", region_dataset: str = ""):
@@ -823,6 +868,138 @@ def _guard_region_gdf_or_fallback(gdf, region: str, source_name: str, source_typ
         f"边界数据 {source_name!r} 未通过校验：{reason}。"
         "且该区域没有内置外包框，无法安全计算分幅。"
     )
+
+def plan_gscloud_dem_tiles(
+    manager: DataManager,
+    region: str = "四川省",
+    region_dataset: str = "",
+    output_name: str = "",
+    bbox_only: bool = False,
+    save_preview: bool = True,
+    product_key: str = "aster_gdem_30m",
+    dataset_id: str = "",
+) -> dict[str, Any]:
+    """Plan GSCloud DEM tile identifiers for supported DEM grid products."""
+    import math
+    import pandas as pd
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    product_key, product = resolve_gscloud_dem_product(product_key, dataset_id)
+    tile_scheme = str(product.get("tile_scheme") or "astgtm_1deg")
+    region = str(region or "四川省").strip() or "四川省"
+    gdf, source_name, source_type = _find_region_gdf_for_tile_plan(manager, region=region, region_dataset=region_dataset)
+    region_guard_note = ""
+    if gdf is not None:
+        gdf, source_name, source_type, region_guard_note = _guard_region_gdf_or_fallback(
+            gdf, region, source_name, source_type
+        )
+    if gdf is None:
+        gdf = _preset_gdf_for_region(region)
+        source_name = region
+        source_type = "preset_bbox"
+        region_guard_note = f"未找到工作区边界，已使用 {region} 内置外包框兜底。"
+    if gdf is None or gdf.empty:
+        raise ValueError(f"未找到 {region} 的边界数据，无法安全计算 GSCloud DEM 分幅。")
+
+    geom = gdf.geometry.unary_union
+    minx, miny, maxx, maxy = [float(v) for v in gdf.total_bounds]
+    records: list[dict[str, Any]] = []
+    geoms = []
+
+    if tile_scheme == "srtm_utm_5deg":
+        for row, strip, bounds in _srtm_utm_indices_for_bbox(minx, miny, maxx, maxy):
+            west, south, east, north = bounds
+            tile_geom = box(west, south, east, north)
+            if not (True if bbox_only else bool(tile_geom.intersects(geom))):
+                continue
+            tile_id = _format_srtm_utm_tile_id(row, strip)
+            records.append(
+                {
+                    "tile_id": tile_id,
+                    "row": row,
+                    "strip": strip,
+                    "south": south,
+                    "north": north,
+                    "west": west,
+                    "east": east,
+                    "expected_filename": f"{tile_id}.img.zip",
+                }
+            )
+            geoms.append(tile_geom)
+        records.sort(key=lambda x: (x["row"], x["strip"]))
+    else:
+        lon_start = math.floor(minx)
+        lon_end = math.ceil(maxx) - 1
+        lat_start = math.floor(miny)
+        lat_end = math.ceil(maxy) - 1
+        for lat in range(lat_start, lat_end + 1):
+            for lon in range(lon_start, lon_end + 1):
+                tile_geom = box(lon, lat, lon + 1, lat + 1)
+                if not (True if bbox_only else bool(tile_geom.intersects(geom))):
+                    continue
+                tile_id = _format_astgtm_tile_id(lat, lon)
+                records.append(
+                    {
+                        "tile_id": tile_id,
+                        "lat_floor": lat,
+                        "lon_floor": lon,
+                        "south": lat,
+                        "north": lat + 1,
+                        "west": lon,
+                        "east": lon + 1,
+                        "expected_filename": f"{tile_id}.img.zip",
+                    }
+                )
+                geoms.append(tile_geom)
+        records.sort(key=lambda x: (x["lat_floor"], x["lon_floor"]))
+
+    tile_ids = [r["tile_id"] for r in records]
+    if not records:
+        raise RuntimeError("区域范围内没有计算出任何 GSCloud DEM 分幅，请检查边界坐标系或区域名称。")
+
+    base = safe_name(output_name or f"{region}_{product_key}_tiles")
+    derived_files: dict[str, str] = {}
+    if save_preview:
+        df = pd.DataFrame(records)
+        csv_path = manager.derived_dir / f"{base}.csv"
+        txt_path = manager.derived_dir / f"{base}.txt"
+        df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        txt_path.write_text("\n".join(tile_ids), encoding="utf-8")
+        derived_files["csv_path"] = str(csv_path)
+        derived_files["txt_path"] = str(txt_path)
+        try:
+            grid = gpd.GeoDataFrame(records, geometry=geoms, crs="EPSG:4326")
+            grid_name = manager.put_vector(base + "_grid", grid, filename=f"{base}_grid.geojson")
+            derived_files["grid_dataset_name"] = grid_name
+            derived_files["grid_path"] = str(manager.get(grid_name).path)
+        except Exception as exc:
+            derived_files["grid_error"] = str(exc)
+        manager.log_operation("计算地理空间数据云 DEM 分幅", f"{region} -> {len(tile_ids)} 个分幅", "download")
+
+    return {
+        "product_key": product_key,
+        "product_name": product.get("name"),
+        "dataset_id": str(product.get("dataset_id") or ""),
+        "pid": str(product.get("pid") or "1"),
+        "access_url": product.get("access_url"),
+        "tile_scheme": tile_scheme,
+        "region": region,
+        "region_dataset": source_name,
+        "region_source": source_type,
+        "region_guard_note": region_guard_note,
+        "bbox": [round(minx, 6), round(miny, 6), round(maxx, 6), round(maxy, 6)],
+        "tile_count": len(tile_ids),
+        "tile_ids": tile_ids,
+        "tile_ids_text": ", ".join(tile_ids),
+        "records": records,
+        "derived_files": derived_files,
+        "notes": [
+            f"{product.get('name') or product_key} 使用 {tile_scheme} 分幅规则。",
+            "如果 region_source=preset_bbox，说明当前没有使用真实边界，而是用近似外包框兜底，下载后仍会按边界裁剪。",
+        ],
+    }
+
 
 def plan_aster_gdem_tiles(
     manager: DataManager,
