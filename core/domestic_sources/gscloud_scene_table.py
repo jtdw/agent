@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .gscloud_download_recovery import recover_gscloud_download_from_error_page
+
 
 AVAILABLE = "\u6709"
 UNAVAILABLE = "\u65e0"
@@ -136,6 +138,13 @@ def click_scene_row_download(page, row, timeout_ms: int):
                 loc.first.click(timeout=5000)
             return dl_info.value
         except Exception as exc:
+            recovered = recover_gscloud_download_from_error_page(
+                page,
+                timeout_ms=timeout_ms,
+                playwright_timeout_error=type(exc),
+            )
+            if recovered is not None:
+                return recovered
             last_error = exc
             continue
     raise RuntimeError(f"未能定位当前行下载按钮：{last_error}")

@@ -1,0 +1,53 @@
+from pathlib import Path
+import tempfile
+import unittest
+
+from fastapi.testclient import TestClient
+
+import api_server
+from core.commercial.service import CommercialService
+
+
+class AuthIsolationTests(unittest.TestCase):
+    def test_same_user_cannot_download_artifact_from_another_session(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            original_workdir = api_server.base_settings.workdir
+            original_commercial = api_server.commercial_service
+            original_services = dict(api_server._workspace_services)
+            try:
+                root = Path(tmp) / "server"
+                root.mkdir(parents=True, exist_ok=True)
+                api_server._workspace_services.clear()
+                api_server.base_settings.workdir = root
+                api_server.base_settings.ensure_dirs()
+                api_server.commercial_service = CommercialService(root)
+                client = TestClient(api_server.app)
+                user_id = client.post("/api/auth/register", json={"email": "iso@example.com", "password": "password1"}).json()["user"]["user_id"]
+                service = api_server.workspace_for(user_id)
+                first = service.create_new_session("first")
+                second = service.create_new_session("second")
+                service.set_request_context(user_id, first)
+                path = service.manager.derived_dir / "first.txt"
+                path.write_text("first", encoding="utf-8")
+                artifact = service.manager.register_artifact(path=str(path), type="file", title="first")
+
+                ok = client.get(
+                    f"/api/artifacts/{artifact['artifact_id']}/download",
+                    params={"user_id": user_id, "session_id": first},
+                )
+                denied = client.get(
+                    f"/api/artifacts/{artifact['artifact_id']}/download",
+                    params={"user_id": user_id, "session_id": second},
+                )
+
+                self.assertEqual(ok.status_code, 200)
+                self.assertIn(denied.status_code, {403, 404})
+            finally:
+                api_server._workspace_services.clear()
+                api_server._workspace_services.update(original_services)
+                api_server.base_settings.workdir = original_workdir
+                api_server.commercial_service = original_commercial
+
+
+if __name__ == "__main__":
+    unittest.main()

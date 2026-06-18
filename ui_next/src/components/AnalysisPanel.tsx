@@ -26,6 +26,11 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
   const refresh = async () => {
     setLoading(true);
     setError('');
+    if (!userId) {
+      setDashboard(null);
+      setLoading(false);
+      return;
+    }
     try {
       setDashboard(await api.dashboard(userId));
     } catch (e) {

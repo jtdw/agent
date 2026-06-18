@@ -36,6 +36,8 @@ class WorkspaceDatabase:
                     sql_table TEXT,
                     row_count INTEGER,
                     auto_synced INTEGER NOT NULL DEFAULT 0,
+                    owner_user_id TEXT,
+                    session_id TEXT,
                     meta_json TEXT,
                     updated_at TEXT NOT NULL
                 );
@@ -56,6 +58,8 @@ class WorkspaceDatabase:
                     source_type TEXT,
                     source_value TEXT,
                     output_prefix TEXT,
+                    owner_user_id TEXT,
+                    session_id TEXT,
                     summary_json TEXT,
                     started_at TEXT NOT NULL,
                     finished_at TEXT
@@ -116,6 +120,8 @@ class WorkspaceDatabase:
                     metrics_dataset TEXT,
                     metrics_path TEXT,
                     figure_path TEXT,
+                    owner_user_id TEXT,
+                    session_id TEXT,
                     artifact_ids_json TEXT,
                     artifacts_json TEXT,
                     metrics_json TEXT,
@@ -127,6 +133,8 @@ class WorkspaceDatabase:
                 CREATE TABLE IF NOT EXISTS artifacts (
                     artifact_id TEXT PRIMARY KEY,
                     path TEXT NOT NULL,
+                    absolute_path TEXT,
+                    relative_path TEXT,
                     type TEXT,
                     title TEXT,
                     description TEXT,
@@ -135,6 +143,11 @@ class WorkspaceDatabase:
                     task_id TEXT,
                     model_result_id TEXT,
                     dataset_id TEXT,
+                    owner_user_id TEXT,
+                    session_id TEXT,
+                    mime_type TEXT,
+                    source_tool TEXT,
+                    is_deleted INTEGER NOT NULL DEFAULT 0,
                     meta_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -147,6 +160,37 @@ class WorkspaceDatabase:
                 );
                 """
             )
+            self._ensure_columns(conn)
+
+    def _ensure_columns(self, conn: sqlite3.Connection) -> None:
+        migrations: dict[str, dict[str, str]] = {
+            "dataset_catalog": {
+                "owner_user_id": "TEXT",
+                "session_id": "TEXT",
+            },
+            "pipeline_runs": {
+                "owner_user_id": "TEXT",
+                "session_id": "TEXT",
+            },
+            "model_results": {
+                "owner_user_id": "TEXT",
+                "session_id": "TEXT",
+            },
+            "artifacts": {
+                "absolute_path": "TEXT",
+                "relative_path": "TEXT",
+                "owner_user_id": "TEXT",
+                "session_id": "TEXT",
+                "mime_type": "TEXT",
+                "source_tool": "TEXT",
+                "is_deleted": "INTEGER NOT NULL DEFAULT 0",
+            },
+        }
+        for table, columns in migrations.items():
+            existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            for column, definition in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def upsert_model_result(self, payload: dict[str, Any]) -> dict[str, Any]:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -164,6 +208,8 @@ class WorkspaceDatabase:
             "metrics_dataset": str(payload.get("metrics_dataset") or ""),
             "metrics_path": str(payload.get("metrics_path") or ""),
             "figure_path": str(payload.get("figure_path") or ""),
+            "owner_user_id": str(payload.get("owner_user_id") or ""),
+            "session_id": str(payload.get("session_id") or ""),
             "artifact_ids_json": json.dumps(payload.get("artifact_ids") or [], ensure_ascii=False),
             "artifacts_json": json.dumps(payload.get("artifacts") or [], ensure_ascii=False, default=str),
             "metrics_json": json.dumps(payload.get("metrics") or {}, ensure_ascii=False, default=str),
@@ -177,12 +223,14 @@ class WorkspaceDatabase:
                 INSERT INTO model_results (
                     model_result_id, task_id, dataset_id, model_name, output_prefix,
                     result_dataset, metrics_dataset, metrics_path, figure_path,
+                    owner_user_id, session_id,
                     artifact_ids_json, artifacts_json, metrics_json, diagnostics_json,
                     created_at, updated_at
                 )
                 VALUES (
                     :model_result_id, :task_id, :dataset_id, :model_name, :output_prefix,
                     :result_dataset, :metrics_dataset, :metrics_path, :figure_path,
+                    :owner_user_id, :session_id,
                     :artifact_ids_json, :artifacts_json, :metrics_json, :diagnostics_json,
                     :created_at, :updated_at
                 )
@@ -195,6 +243,8 @@ class WorkspaceDatabase:
                     metrics_dataset=excluded.metrics_dataset,
                     metrics_path=excluded.metrics_path,
                     figure_path=excluded.figure_path,
+                    owner_user_id=excluded.owner_user_id,
+                    session_id=excluded.session_id,
                     artifact_ids_json=excluded.artifact_ids_json,
                     artifacts_json=excluded.artifacts_json,
                     metrics_json=excluded.metrics_json,
@@ -247,6 +297,8 @@ class WorkspaceDatabase:
         row = {
             "artifact_id": artifact_id,
             "path": path,
+            "absolute_path": str(payload.get("absolute_path") or path),
+            "relative_path": str(payload.get("relative_path") or ""),
             "type": str(payload.get("type") or ""),
             "title": str(payload.get("title") or payload.get("name") or ""),
             "description": str(payload.get("description") or ""),
@@ -255,6 +307,11 @@ class WorkspaceDatabase:
             "task_id": str(payload.get("task_id") or ""),
             "model_result_id": str(payload.get("model_result_id") or ""),
             "dataset_id": str(payload.get("dataset_id") or ""),
+            "owner_user_id": str(payload.get("owner_user_id") or ""),
+            "session_id": str(payload.get("session_id") or ""),
+            "mime_type": str(payload.get("mime_type") or ""),
+            "source_tool": str(payload.get("source_tool") or ""),
+            "is_deleted": 1 if bool(payload.get("is_deleted")) else 0,
             "meta_json": json.dumps(payload.get("meta") or {}, ensure_ascii=False, default=str),
             "created_at": created_at,
             "updated_at": now,
@@ -263,17 +320,21 @@ class WorkspaceDatabase:
             conn.execute(
                 """
                 INSERT INTO artifacts (
-                    artifact_id, path, type, title, description, quality_status,
+                    artifact_id, path, absolute_path, relative_path, type, title, description, quality_status,
                     preview_available, task_id, model_result_id, dataset_id,
+                    owner_user_id, session_id, mime_type, source_tool, is_deleted,
                     meta_json, created_at, updated_at
                 )
                 VALUES (
-                    :artifact_id, :path, :type, :title, :description, :quality_status,
+                    :artifact_id, :path, :absolute_path, :relative_path, :type, :title, :description, :quality_status,
                     :preview_available, :task_id, :model_result_id, :dataset_id,
+                    :owner_user_id, :session_id, :mime_type, :source_tool, :is_deleted,
                     :meta_json, :created_at, :updated_at
                 )
                 ON CONFLICT(artifact_id) DO UPDATE SET
                     path=excluded.path,
+                    absolute_path=excluded.absolute_path,
+                    relative_path=excluded.relative_path,
                     type=excluded.type,
                     title=excluded.title,
                     description=excluded.description,
@@ -282,6 +343,11 @@ class WorkspaceDatabase:
                     task_id=excluded.task_id,
                     model_result_id=excluded.model_result_id,
                     dataset_id=excluded.dataset_id,
+                    owner_user_id=excluded.owner_user_id,
+                    session_id=excluded.session_id,
+                    mime_type=excluded.mime_type,
+                    source_tool=excluded.source_tool,
+                    is_deleted=excluded.is_deleted,
                     meta_json=excluded.meta_json,
                     updated_at=excluded.updated_at
                 """,
@@ -293,6 +359,7 @@ class WorkspaceDatabase:
     def _decode_artifact(row: sqlite3.Row) -> dict[str, Any]:
         payload = dict(row)
         payload["preview_available"] = bool(payload.get("preview_available"))
+        payload["is_deleted"] = bool(payload.get("is_deleted"))
         payload["meta"] = json.loads(payload.pop("meta_json") or "{}")
         payload["name"] = Path(str(payload.get("path") or "")).name
         return payload
@@ -305,20 +372,32 @@ class WorkspaceDatabase:
             ).fetchone()
         return self._decode_artifact(row) if row else None
 
-    def delete_artifact(self, artifact_id: str) -> int:
+    def delete_artifact(self, artifact_id: str, *, hard: bool = False) -> int:
         with self._connect() as conn:
-            cursor = conn.execute(
-                "DELETE FROM artifacts WHERE artifact_id = ?",
-                (str(artifact_id or ""),),
-            )
+            if hard:
+                cursor = conn.execute(
+                    "DELETE FROM artifacts WHERE artifact_id = ?",
+                    (str(artifact_id or ""),),
+                )
+            else:
+                cursor = conn.execute(
+                    "UPDATE artifacts SET is_deleted = 1, updated_at = ? WHERE artifact_id = ?",
+                    (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(artifact_id or "")),
+                )
             return int(cursor.rowcount or 0)
 
-    def list_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    def list_artifacts(self, *, model_result_id: str = "", session_id: str = "", include_deleted: bool = False, limit: int = 200) -> list[dict[str, Any]]:
         params: list[Any] = []
-        where = ""
+        clauses = []
         if str(model_result_id or "").strip():
-            where = "WHERE model_result_id = ?"
+            clauses.append("model_result_id = ?")
             params.append(str(model_result_id))
+        if str(session_id or "").strip():
+            clauses.append("session_id = ?")
+            params.append(str(session_id))
+        if not include_deleted:
+            clauses.append("(is_deleted IS NULL OR is_deleted = 0)")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
         params.append(int(limit))
         with self._connect() as conn:
             rows = conn.execute(
@@ -365,19 +444,23 @@ class WorkspaceDatabase:
         row_count: int | None,
         auto_synced: bool,
         meta: dict[str, Any] | None,
+        owner_user_id: str = "",
+        session_id: str = "",
     ) -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO dataset_catalog (dataset_name, data_type, path, sql_table, row_count, auto_synced, meta_json, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO dataset_catalog (dataset_name, data_type, path, sql_table, row_count, auto_synced, owner_user_id, session_id, meta_json, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(dataset_name) DO UPDATE SET
                     data_type=excluded.data_type,
                     path=excluded.path,
                     sql_table=excluded.sql_table,
                     row_count=excluded.row_count,
                     auto_synced=excluded.auto_synced,
+                    owner_user_id=excluded.owner_user_id,
+                    session_id=excluded.session_id,
                     meta_json=excluded.meta_json,
                     updated_at=excluded.updated_at
                 """,
@@ -388,6 +471,8 @@ class WorkspaceDatabase:
                     sql_table,
                     row_count,
                     1 if auto_synced else 0,
+                    owner_user_id,
+                    session_id,
                     json.dumps(meta or {}, ensure_ascii=False),
                     now,
                 ),
@@ -420,10 +505,12 @@ class WorkspaceDatabase:
         df: pd.DataFrame,
         meta: dict[str, Any] | None = None,
         auto_synced: bool = True,
+        owner_user_id: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         sql_table = self.safe_table_name(dataset_name, prefix="tbl")
         row_count = self._replace_table(sql_table, df)
-        self._upsert_catalog(dataset_name, "table", path, sql_table, row_count, auto_synced, meta)
+        self._upsert_catalog(dataset_name, "table", path, sql_table, row_count, auto_synced, meta, owner_user_id, session_id)
         return {"dataset_name": dataset_name, "sql_table": sql_table, "row_count": row_count, "data_type": "table"}
 
     def sync_vector(
@@ -433,6 +520,8 @@ class WorkspaceDatabase:
         gdf: Any,
         meta: dict[str, Any] | None = None,
         auto_synced: bool = True,
+        owner_user_id: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         df = pd.DataFrame(gdf.drop(columns=["geometry"], errors="ignore")).copy()
         if hasattr(gdf, "geometry"):
@@ -450,7 +539,7 @@ class WorkspaceDatabase:
                 pass
         sql_table = self.safe_table_name(dataset_name, prefix="vec")
         row_count = self._replace_table(sql_table, df)
-        self._upsert_catalog(dataset_name, "vector", path, sql_table, row_count, auto_synced, meta)
+        self._upsert_catalog(dataset_name, "vector", path, sql_table, row_count, auto_synced, meta, owner_user_id, session_id)
         return {"dataset_name": dataset_name, "sql_table": sql_table, "row_count": row_count, "data_type": "vector"}
 
     def sync_document(
@@ -460,6 +549,8 @@ class WorkspaceDatabase:
         text: str,
         meta: dict[str, Any] | None = None,
         auto_synced: bool = True,
+        owner_user_id: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
@@ -476,7 +567,7 @@ class WorkspaceDatabase:
                 """,
                 (dataset_name, dataset_name, path, text, json.dumps(meta or {}, ensure_ascii=False), now),
             )
-        self._upsert_catalog(dataset_name, "document", path, "document_store", 1, auto_synced, meta)
+        self._upsert_catalog(dataset_name, "document", path, "document_store", 1, auto_synced, meta, owner_user_id, session_id)
         return {"dataset_name": dataset_name, "sql_table": "document_store", "row_count": 1, "data_type": "document"}
 
     def register_raster(
@@ -485,16 +576,29 @@ class WorkspaceDatabase:
         path: str,
         meta: dict[str, Any] | None = None,
         auto_synced: bool = True,
+        owner_user_id: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
-        self._upsert_catalog(dataset_name, "raster", path, None, None, auto_synced, meta)
+        self._upsert_catalog(dataset_name, "raster", path, None, None, auto_synced, meta, owner_user_id, session_id)
         return {"dataset_name": dataset_name, "sql_table": None, "row_count": None, "data_type": "raster"}
 
-    def list_catalog(self) -> list[dict[str, Any]]:
+    def list_catalog(self, *, session_id: str = "") -> list[dict[str, Any]]:
+        params: list[Any] = []
+        where = ""
+        if str(session_id or "").strip():
+            where = "WHERE session_id = ?"
+            params.append(str(session_id))
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT dataset_name, data_type, path, sql_table, row_count, auto_synced, updated_at FROM dataset_catalog ORDER BY updated_at DESC, dataset_name"
+                f"SELECT dataset_name, data_type, path, sql_table, row_count, auto_synced, owner_user_id, session_id, meta_json, updated_at FROM dataset_catalog {where} ORDER BY updated_at DESC, dataset_name",
+                params,
             ).fetchall()
-        return [dict(row) for row in rows]
+        payloads = []
+        for row in rows:
+            payload = dict(row)
+            payload["meta"] = json.loads(payload.pop("meta_json") or "{}")
+            payloads.append(payload)
+        return payloads
 
     def list_sql_tables(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
@@ -515,7 +619,7 @@ class WorkspaceDatabase:
     def dataset_info(self, dataset_name: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT dataset_name, data_type, path, sql_table, row_count, auto_synced, meta_json, updated_at FROM dataset_catalog WHERE dataset_name = ?",
+                "SELECT dataset_name, data_type, path, sql_table, row_count, auto_synced, owner_user_id, session_id, meta_json, updated_at FROM dataset_catalog WHERE dataset_name = ?",
                 (dataset_name,),
             ).fetchone()
         if not row:
@@ -525,8 +629,41 @@ class WorkspaceDatabase:
         return payload
 
     def query(self, sql: str) -> pd.DataFrame:
+        return self.query_readonly(sql)
+
+    def _allowed_query_tables(self) -> set[str]:
         with self._connect() as conn:
-            return pd.read_sql_query(sql, conn)
+            rows = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        allowed_prefixes = ("tbl_", "vec_")
+        allowed_exact = {"document_store", "dataset_catalog"}
+        return {str(row[0]) for row in rows if str(row[0]) in allowed_exact or str(row[0]).startswith(allowed_prefixes)}
+
+    def query_readonly(self, sql: str, *, limit: int = 500) -> pd.DataFrame:
+        raw = str(sql or "").strip()
+        if not raw:
+            raise PermissionError("SQL query is empty.")
+        normalized = re.sub(r"\s+", " ", raw).strip()
+        probe = normalized.rstrip(";").strip()
+        if ";" in probe:
+            raise PermissionError("Only one read-only SQL statement is allowed.")
+        lowered = probe.lower()
+        if not (lowered.startswith("select ") or lowered.startswith("with ")):
+            raise PermissionError("Only SELECT or WITH read-only SQL queries are allowed.")
+        forbidden = re.compile(r"\b(drop|delete|update|insert|alter|attach|detach|pragma|replace|vacuum|create|truncate)\b", re.IGNORECASE)
+        if forbidden.search(probe):
+            raise PermissionError("Mutating or administrative SQL statements are not allowed.")
+        allowed_tables = self._allowed_query_tables()
+        table_refs = re.findall(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*)", probe, flags=re.IGNORECASE)
+        invalid = [name for name in table_refs if name not in allowed_tables]
+        if invalid:
+            raise PermissionError(f"SQL table is not in the allowed workspace scope: {', '.join(sorted(set(invalid)))}")
+        bounded = probe
+        if not re.search(r"\blimit\s+\d+\b", lowered):
+            bounded = f"SELECT * FROM ({probe}) AS readonly_query LIMIT {int(limit)}"
+        with self._connect() as conn:
+            return pd.read_sql_query(bounded, conn)
 
     def log_operation(self, title: str, detail: str = "", category: str = "info") -> None:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

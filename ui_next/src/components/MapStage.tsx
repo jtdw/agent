@@ -318,10 +318,6 @@ function layerColor(kind: string, index: number) {
   return ['#0B5FF4', '#f59e0b', '#fb7185'][index % 3];
 }
 
-function hasBoundaryLayer(layers: ResultMapLayer[]) {
-  return layers.some((layer) => (layer.kind || 'boundary') === 'boundary');
-}
-
 function hasStations(collection: StationCollection | null) {
   return Boolean(collection?.stations?.length);
 }
@@ -566,33 +562,22 @@ export function MapStage({
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
+      if (!userId) {
+        if (!cancelled) setResultLayers([]);
+        return;
+      }
       try {
         const data = await api.mapLayers(userId);
-        let layers = data.layers || [];
-        if (userId && !hasBoundaryLayer(layers)) {
-          const fallback = await api.mapLayers();
-          const fallbackLayers = (fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary');
-          layers = [...fallbackLayers, ...layers];
-        }
-        if (!cancelled) setResultLayers(layers);
+        if (!cancelled) setResultLayers(data.layers || []);
       } catch {
-        if (!userId) {
-          if (!cancelled) setResultLayers([]);
-          return;
-        }
-        try {
-          const fallback = await api.mapLayers();
-          if (!cancelled) setResultLayers((fallback.layers || []).filter((layer) => (layer.kind || 'boundary') === 'boundary'));
-        } catch {
-          if (!cancelled) setResultLayers([]);
-        }
+        if (!cancelled) setResultLayers([]);
       }
     };
     load();
-    const timer = window.setInterval(load, 8000);
+    const timer = userId ? window.setInterval(load, 8000) : 0;
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer) window.clearInterval(timer);
     };
   }, [userId]);
 

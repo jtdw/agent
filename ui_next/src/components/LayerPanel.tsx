@@ -39,7 +39,7 @@ const downloadProducts: DownloadProduct[] = [
 
 function LayerThumb({ accent }: { accent: string }) {
   return (
-    <div className="relative h-12 w-14 shrink-0 overflow-hidden rounded-2xl border border-white/40 bg-white/40 dark:border-white/10 dark:bg-white/5">
+    <div className="relative h-12 w-14 shrink-0 overflow-hidden rounded-2xl border border-white/55 bg-white/55 shadow-inner dark:border-white/10 dark:bg-white/5">
       <div className="absolute inset-0 opacity-70" style={{ background: `linear-gradient(135deg, ${accent}, transparent 62%)` }} />
       <svg viewBox="0 0 80 64" className="absolute inset-0 h-full w-full opacity-80">
         <path d="M0 46 C15 34 22 42 37 31 C54 20 62 28 80 16" fill="none" stroke="currentColor" strokeWidth="4" className="text-white/80" />
@@ -54,7 +54,7 @@ function GlowSwitch({ active, onClick }: { active: boolean; onClick: () => void 
     <button
       type="button"
       onClick={onClick}
-      className={cn('relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition', active ? 'border-cyan-glow/50 bg-cyan-glow/30 shadow-glow' : 'border-white/40 bg-slate-400/15 dark:border-white/10')}
+      className={cn('relative h-7 w-12 shrink-0 overflow-hidden rounded-full border shadow-inner transition', active ? 'border-cyan-glow/50 bg-cyan-glow/30 shadow-glow' : 'border-slate-200 bg-slate-200/70 dark:border-white/10 dark:bg-white/10')}
       aria-pressed={active}
     >
       <span className={cn('absolute left-1 top-1 h-5 w-5 rounded-full bg-white shadow-lg transition-transform duration-200 ease-out', active && 'translate-x-5')} />
@@ -116,6 +116,10 @@ export function LayerPanel({
   const userId = user?.user_id || '';
 
   const refreshDashboard = () => {
+    if (!user) {
+      setDashboard(null);
+      return;
+    }
     api.dashboard(userId).then(setDashboard).catch(() => setDashboard(null));
   };
 
@@ -358,7 +362,7 @@ export function LayerPanel({
       transition={{ type: 'spring', stiffness: 300, damping: 30 }}
     >
       <GlassCard className="flex h-full min-h-0 flex-col overflow-hidden p-0">
-        <div className="shrink-0 border-b border-white/30 bg-white/45 px-4 py-4 backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/35">
+        <div className="shrink-0 border-b border-white/45 bg-white/68 px-4 py-4 shadow-[0_12px_34px_rgba(15,23,42,.05)] backdrop-blur-2xl dark:border-white/10 dark:bg-slate-950/48">
           <div className="mb-4 flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2 text-lg font-black tracking-tight"><Layers3 size={20} strokeWidth={1.5} /> 数据与工具</div>
@@ -376,18 +380,18 @@ export function LayerPanel({
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pb-10">
           <div className="mt-4 grid grid-cols-4 gap-2">
             {[['矢量', counts.vector || 0], ['栅格', counts.raster || 0], ['表格', counts.table || 0], ['文档', counts.document || 0]].map(([k, v]) => (
-              <div key={String(k)} className="rounded-2xl border border-white/30 bg-white/35 p-2 text-center dark:border-white/10 dark:bg-white/5">
+              <div key={String(k)} className="rounded-2xl border border-white/45 bg-white/58 p-2 text-center shadow-sm dark:border-white/10 dark:bg-white/5">
                 <div className="text-base font-black text-ocean dark:text-cyan-glow">{String(v)}</div>
                 <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">{String(k)}</div>
               </div>
             ))}
           </div>
 
-          <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
+          <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
             <div className="mb-1 flex items-center gap-2 text-sm font-black"><BarChart3 size={16} strokeWidth={1.5} /> 运行状态</div>
             <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">{String(runtime.label || '就绪')} · {String(runtime.detail || '等待任务')}</p>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200/70 dark:bg-white/10">
-              <div className="h-full rounded-full bg-gradient-to-r from-ocean to-cyan-glow transition-all" style={{ width: `${Number(runtime.progress || 0)}%` }} />
+            <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-slate-200/80 ring-1 ring-slate-900/5 dark:bg-white/10 dark:ring-white/5">
+              <div className="h-full rounded-full bg-gradient-to-r from-ocean to-cyan-glow transition-all duration-500" style={{ width: `${Number(runtime.progress || 0)}%` }} />
             </div>
             {runningJobs.length > 0 && (
               <div className="mt-3 rounded-2xl border border-cyan-glow/25 bg-cyan-glow/10 px-3 py-2 text-xs font-semibold text-slate-600 dark:text-slate-200">
@@ -402,7 +406,7 @@ export function LayerPanel({
           </div>
 
           {recentJobs.length > 0 && (
-            <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
+            <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 下载任务</div>
               <div className="space-y-2">
                 {recentJobs.map((job) => {
@@ -412,7 +416,7 @@ export function LayerPanel({
                   const retryable = failed || job.status === 'canceled' || job.status === 'waiting_login' || job.status === 'waiting_manual';
                   const deletable = !active;
                   return (
-                    <div key={job.job_id} className={cn('rounded-2xl border px-3 py-2 text-xs', done ? 'border-emerald-300/35 bg-emerald-400/10' : failed ? 'border-coral/30 bg-coral/10' : 'border-white/25 bg-white/25 dark:border-white/10 dark:bg-white/5')}>
+                    <div key={job.job_id} className={cn('rounded-2xl border px-3 py-2 text-xs shadow-sm transition hover:-translate-y-0.5', done ? 'border-emerald-300/35 bg-emerald-400/10' : failed ? 'border-coral/30 bg-coral/10' : 'border-white/35 bg-white/45 dark:border-white/10 dark:bg-white/5')}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="truncate font-black text-slate-700 dark:text-slate-100">{job.output_name || job.job_id}</div>
@@ -475,7 +479,7 @@ export function LayerPanel({
                           成果质量：{job.artifact_quality.every((item) => item.ok !== false) ? '已通过基础检查' : '需要检查文件或范围'}
                         </div>
                       ) : null}
-                      {failed && job.error_message && <div className="mt-1 text-coral">{job.error_message}</div>}
+                      {failed && job.error_message && !job.failure_diagnostic?.user_message && <div className="mt-1 text-coral">{job.error_message}</div>}
                       {done && !job.download_url && <div className="mt-1 text-slate-500 dark:text-slate-400">已完成，结果正在整理。</div>}
                     </div>
                   );
@@ -493,7 +497,7 @@ export function LayerPanel({
               const active = hasLayerVisibility(layer.id) ? layerVisibility[layer.id] : layer.active;
               const opacityLayerId = hasLayerOpacity(layer.id) ? layer.id : null;
               return (
-                <motion.div key={layer.id} whileHover={{ x: 3 }} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/30 p-2.5 transition hover:bg-white/45 dark:border-white/10 dark:hover:bg-white/5', active && 'bg-white/45 dark:bg-white/5')}>
+                <motion.div key={layer.id} whileHover={{ x: 3 }} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/45 bg-white/34 p-2.5 shadow-sm transition hover:bg-white/62 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/8', active && 'bg-white/68 ring-1 ring-cyan-300/25 dark:bg-white/8')}>
                   {active && <motion.span layoutId="layer-active" className="absolute left-0 top-3 h-10 w-1 rounded-full bg-gradient-to-b from-ocean to-cyan-glow" />}
                   <LayerThumb accent={layer.accent} />
                   <div className="min-w-0 flex-1">
@@ -515,7 +519,7 @@ export function LayerPanel({
                     )}
                   </div>
                   {opacityLayerId && (
-                    <button type="button" onClick={() => onLayerLocate(opacityLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/35 bg-white/45 text-slate-500 transition hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="定位到图层">
+                    <button type="button" onClick={() => onLayerLocate(opacityLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/45 bg-white/58 text-slate-500 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/80 dark:border-white/10 dark:bg-white/10" title="定位到图层">
                       <Map size={14} strokeWidth={1.7} />
                     </button>
                   )}
@@ -531,12 +535,12 @@ export function LayerPanel({
             })}
           </div>
 
-          <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
+          <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
             <div className="mb-2 flex items-center gap-2 text-sm font-black"><Database size={16} strokeWidth={1.5} /> 数据下载</div>
             <select
               value={downloadResourceType}
               onChange={(event) => setDownloadResourceType(event.target.value)}
-              className="mt-3 w-full rounded-2xl border border-white/35 bg-white/55 px-3 py-2 text-sm font-semibold text-slate-700 outline-none transition focus:border-cyan-300 dark:border-white/10 dark:bg-slate-900 dark:text-slate-100"
+              className="mt-3 w-full rounded-2xl border border-white/55 bg-white/75 px-3 py-2 text-sm font-semibold text-slate-700 outline-none shadow-sm transition focus:border-cyan-300 focus:ring-4 focus:ring-cyan-200/35 dark:border-white/10 dark:bg-slate-900 dark:text-slate-100"
               aria-label="选择下载产品"
             >
               {downloadProducts.map((product) => (
@@ -546,7 +550,7 @@ export function LayerPanel({
             <input
               value={downloadRegion}
               onChange={(event) => setDownloadRegion(event.target.value)}
-              className="mt-3 w-full rounded-2xl border border-white/35 bg-white/55 px-3 py-2 text-sm font-semibold text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-cyan-300 dark:border-white/10 dark:bg-white/10 dark:text-slate-100"
+              className="mt-3 w-full rounded-2xl border border-white/55 bg-white/75 px-3 py-2 text-sm font-semibold text-slate-700 outline-none shadow-sm transition placeholder:text-slate-400 focus:border-cyan-300 focus:ring-4 focus:ring-cyan-200/35 dark:border-white/10 dark:bg-white/10 dark:text-slate-100"
               placeholder="输入下载区域，例如 成都市 / 四川省"
             />
             <button onClick={preflightPlatformJob} disabled={preflightBusy || busy} className="glass-button mt-3 w-full gap-2 rounded-2xl text-sm font-black disabled:opacity-60"><ScanSearch size={16} strokeWidth={1.5} /> {preflightBusy ? '验证中...' : '先验证可下载'}</button>
@@ -557,11 +561,11 @@ export function LayerPanel({
           </div>
 
           {artifacts.length > 0 && (
-            <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-slate-950/20">
+            <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 最近成果</div>
               <div className="space-y-2">
                 {artifacts.map((item, i) => (
-                  <div key={`${item.path}-${i}`} className="flex items-center justify-between gap-2 rounded-2xl border border-white/25 bg-white/30 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                  <div key={`${item.path}-${i}`} className="flex items-center justify-between gap-2 rounded-2xl border border-white/35 bg-white/48 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/72 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
                     <button type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="min-w-0 flex-1 truncate text-left">
                     {item.name || item.path.split(/[\\/]/).pop() || '成果文件'}
                     </button>

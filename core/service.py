@@ -25,6 +25,7 @@ from .result_interpreter import interpret_result
 from .task_planner import build_task_plan
 from .task_outcome_advisor import build_task_outcome
 from .tool_executor import execute_validated_tool_plan
+from .tool_context import ToolRuntimeContext
 from .workflow_executor import execute_workflow_plan
 
 try:
@@ -152,6 +153,16 @@ class GISWorkspaceService:
         }
         self._agents: dict[str, Any] = {}
         self.current_session_id = self._ensure_session()
+        self.current_user_id = ""
+        self.manager.set_runtime_scope("", self.current_session_id)
+
+    def set_request_context(self, user_id: str = "", session_id: str = "") -> None:
+        self.current_user_id = str(user_id or "").strip()
+        if session_id:
+            self.use_session_or_current(session_id)
+        else:
+            self.current_session_id = self._ensure_session()
+        self.manager.set_runtime_scope(self.current_user_id, self.current_session_id)
 
     def _get_agent(self, model_name: str) -> Any:
         if model_name not in self._agents:
@@ -165,6 +176,15 @@ class GISWorkspaceService:
                 ) from exc
             self._agents[model_name] = GISAgent(agent_settings, self.manager)
         return self._agents[model_name]
+
+    def _tool_runtime_context(self, *, job_id: str = "") -> ToolRuntimeContext:
+        return ToolRuntimeContext(
+            current_user_id=str(getattr(self, "current_user_id", "") or ""),
+            current_session_id=str(self.current_session_id or ""),
+            workspace_dir=self.manager.workdir,
+            permission_scope={"workspace:read", "workspace:write", "database:read", "filesystem:read", "filesystem:write"},
+            job_id=job_id,
+        )
 
     def _ensure_session(self) -> str:
         current = self.manager.database.get_current_conversation_id()
@@ -218,6 +238,7 @@ class GISWorkspaceService:
         self.manager.database.create_conversation(session_id, title or "新对话")
         self.current_session_id = session_id
         self.manager.database.set_current_conversation_id(session_id)
+        self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), session_id)
         self.manager.log_operation("新建对话", session_id, "chat")
         return session_id
 
@@ -227,22 +248,26 @@ class GISWorkspaceService:
             raise ValueError(f"未找到会话：{session_id}")
         self.current_session_id = session_id
         self.manager.database.set_current_conversation_id(session_id)
+        self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), session_id)
         self.manager.log_operation("切换对话", session_id, "chat")
 
     def use_session_or_current(self, session_id: str) -> bool:
         clean = str(session_id or "").strip()
         if not clean:
             self.current_session_id = self._ensure_session()
+            self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), self.current_session_id)
             return False
 
         existing = {item["session_id"] for item in self.manager.database.list_conversations()}
         if clean in existing:
             self.current_session_id = clean
             self.manager.database.set_current_conversation_id(clean)
+            self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), clean)
             self.manager.log_operation("切换对话", clean, "chat")
             return True
 
         self.current_session_id = self._ensure_session()
+        self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), self.current_session_id)
         self.manager.log_operation("会话已失效，使用当前会话继续", clean, "chat")
         return False
 
@@ -271,6 +296,7 @@ class GISWorkspaceService:
 
         was_current = session_id == self.current_session_id
         deleted_title = target.get("title", "新对话")
+        cleanup = self.manager.cleanup_session_data(session_id)
         self.manager.database.delete_conversation(session_id)
 
         remaining = [item for item in self.manager.database.list_conversations() if item["session_id"] != session_id]
@@ -281,7 +307,8 @@ class GISWorkspaceService:
         else:
             self.current_session_id = self.create_new_session()
 
-        self.manager.log_operation("删除对话", deleted_title, "chat")
+        self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), self.current_session_id)
+        self.manager.log_operation("删除对话", f"{deleted_title} | {cleanup}", "chat")
         return self.current_session_id
 
     def current_messages(self) -> list[dict[str, Any]]:
@@ -1141,7 +1168,7 @@ class GISWorkspaceService:
                 self._set_runtime_status("等待补充信息", str(plan.get("clarification_question") or ""), busy=False, phase="clarification", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "images": [], "task_outcome": task_outcome}
 
-            workflow_execution = execute_workflow_plan(self.manager, plan) if plan.get("workflow_plan") else {"executed": False}
+            workflow_execution = execute_workflow_plan(self.manager, plan, context=self._tool_runtime_context()) if plan.get("workflow_plan") else {"executed": False}
             if workflow_execution.get("executed"):
                 raw_reply = str(workflow_execution.get("raw_reply") or "")
                 dashboard_data = self.dashboard()
@@ -1198,7 +1225,7 @@ class GISWorkspaceService:
                     "task_outcome": task_outcome,
                 }
 
-            deterministic_execution = execute_validated_tool_plan(self.manager, plan)
+            deterministic_execution = execute_validated_tool_plan(self.manager, plan, context=self._tool_runtime_context())
             if deterministic_execution.get("executed"):
                 raw_reply = str(deterministic_execution.get("raw_reply") or "")
                 dashboard_data = self.dashboard()

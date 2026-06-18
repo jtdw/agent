@@ -104,6 +104,24 @@ class FollowupResolverFrontendContextTests(unittest.TestCase):
         self.assertIn("artifact", resolved["referenced_object"]["type"])
         self.assertIn("latest.png", resolved["referenced_object"]["path"])
 
+    def test_normal_chinese_recent_result_reference_resolves_artifact(self) -> None:
+        state = ConversationState(active_artifacts=[{"name": "latest_dem.tif", "path": "outputs/latest_dem.tif"}]).to_dict()
+
+        resolved = resolve_followup("\u4e0b\u8f7d\u521a\u624d\u751f\u6210\u7684\u7ed3\u679c", state, {})
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["referenced_object"]["type"], "artifact")
+        self.assertIn("latest_dem.tif", resolved["referenced_object"]["path"])
+
+    def test_normal_chinese_current_layer_reference_resolves_selected_layer(self) -> None:
+        state = ConversationState(selected_layer={"id": "layer_dem", "type": "raster"}).to_dict()
+
+        resolved = resolve_followup("\u628a\u5f53\u524d\u56fe\u5c42\u52a0\u5165\u5730\u56fe", state, {})
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["referenced_object"]["type"], "layer")
+        self.assertEqual(resolved["referenced_object"]["id"], "layer_dem")
+
 
 if __name__ == "__main__":
     unittest.main()

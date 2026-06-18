@@ -4,6 +4,7 @@ import os
 from typing import Any, Callable
 
 from core.llm_intent_classifier import classify_intent_with_llm
+from core.semantic_parser import parse_user_semantics
 
 
 INTENTS = {
@@ -61,18 +62,14 @@ def _secondary_intents(prompt: str, primary: str) -> list[str]:
             "叠加",
             "提取",
             "转换",
-            "瑁佸壀",
-            "鍙犲姞",
-            "鎻愬彇",
-            "娓呮礂",
         ),
     )
     map_hits = _contains_any(
         text,
-        ("制图", "画图", "画", "图", "地图", "分布图", "专题图", "可视化", "出一张图", "鍒跺浘", "鐢诲浘", "鍦板浘", "鍥"),
+        ("制图", "画图", "画", "图", "地图", "分布图", "专题图", "可视化", "出一张图"),
     )
-    result_hits = _contains_any(text, ("解释", "说明", "解读", "含义", "怎么看", "瑙ｉ噴", "璇存槑", "鎬庝箞鐪"))
-    modeling_hits = _contains_any(text, ("建模", "模型", "预测", "训练", "寤烘ā", "妯", "棰勬祴", "璁粌"))
+    result_hits = _contains_any(text, ("解释", "说明", "解读", "含义", "怎么看"))
+    modeling_hits = _contains_any(text, ("建模", "模型", "预测", "训练"))
 
     ordered: list[str] = []
     if processing_hits:
@@ -149,6 +146,21 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             classifier="rule",
         )
 
+    semantic = parse_user_semantics(text)
+    if semantic.get("intent") == "data_download" and float(semantic.get("confidence") or 0.0) >= 0.68:
+        return _normalize_result(
+            {
+                "intent": "data_download",
+                "confidence": semantic.get("confidence"),
+                "reason": "semantic_parser_data_download",
+                "needs_followup_resolution": False,
+                "keywords": [item for item in (semantic.get("action"), semantic.get("resource_type"), semantic.get("region")) if item],
+                "missing_inputs": semantic.get("missing_slots") or [],
+                "should_ask_clarification": bool(semantic.get("needs_clarification")),
+            },
+            classifier="rule",
+        )
+
     data_check_tokens = (
         "\u68c0\u67e5\u5f53\u524d\u4e0a\u4f20\u6570\u636e",
         "\u68c0\u67e5\u6570\u636e",
@@ -186,7 +198,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "error",
             "failed",
             "鎶ラ敊",
-            "閿欒",
             "澶辫触",
             "寮傚父",
         ),
@@ -217,10 +228,8 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "改进一下",
             "再做",
             "它",
-            "杩欎釜",
             "鍒氭墠",
             "缁х画",
-            "涓嬩竴姝",
             "璇存槑",
             "鎬庝箞鐪",
         ),
@@ -228,7 +237,7 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
     if followup_hits and _state_has_recent_object(state):
         weak_complex_request = "整理" in text or "综合" in text
         processing_request = any(word in text for word in ("\u88c1\u526a", "\u5904\u7406", "\u53e0\u52a0", "\u63d0\u53d6", "\u8f6c\u6362", "clip", "overlay"))
-        map_request = any(word in text for word in ("制图", "画图", "画", "出一张图", "鍒跺浘", "鐢诲浘", "鐢"))
+        map_request = any(word in text for word in ("制图", "画图", "画", "出一张图", "鐢"))
         if weak_complex_request:
             return _normalize_result(
                 {
@@ -247,11 +256,11 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             intent = "data_upload_analysis"
         elif ("数据" in text or "鏁版嵁" in text) and ("能做什么" in text or "鑳藉仛" in text):
             intent = "data_upload_analysis"
-        elif any(word in text for word in ("图", "地图", "制图", "分布", "鍥", "鍦板浘", "鍒跺浘")):
+        elif any(word in text for word in ("图", "地图", "制图", "分布", "鍥")):
             intent = "map_generation" if map_request else "follow_up_question"
-        elif any(word in text for word in ("结果", "指标", "模型", "缁撴灉", "鎸囨爣", "妯")):
+        elif any(word in text for word in ("结果", "指标", "模型", "妯")):
             intent = "result_analysis"
-        elif "下一步" in text or "继续" in text or "涓嬩竴姝" in text or "缁х画" in text:
+        elif "下一步" in text or "继续" in text:
             intent = "follow_up_question"
         else:
             intent = "follow_up_question"
@@ -281,8 +290,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "行政区",
             "边界",
             "遥感",
-            "涓嬭浇",
-            "鑾峰彇",
             "闄嶆按",
             "琛屾斂鍖",
             "杈圭晫",
@@ -318,11 +325,8 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "融合",
             "训练",
             "回归",
-            "寤烘ā",
             "妯",
-            "棰勬祴",
             "闅忔満",
-            "璁粌",
         ),
     )
     if modeling_hits:
@@ -357,13 +361,7 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "转点",
             "缺失值",
             "字段检查",
-            "娓呮礂",
-            "杞崲",
-            "瑁佸壀",
-            "鍙犲姞",
-            "鎻愬彇",
             "缂撳啿",
-            "鐩镐氦",
             "閲嶆姇",
         ),
     )
@@ -394,12 +392,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "人口密度图",
             "map",
             "plot",
-            "鍒跺浘",
-            "鐢诲浘",
-            "鍦板浘",
-            "鍥句欢",
-            "涓撻鍥",
-            "鍙",
             "鐢",
             "鍥",
         ),
@@ -429,9 +421,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "评价",
             "精度",
             "残差",
-            "缁撴灉",
-            "鎸囨爣",
-            "瑙ｉ噴",
             "璇存槑",
             "璇勪环",
             "娈嬪樊",

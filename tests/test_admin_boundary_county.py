@@ -32,6 +32,26 @@ class AdminBoundaryCountyTests(unittest.TestCase):
             self.assertEqual(len(gdf), 1)
             self.assertEqual(str(gdf.iloc[0]["县级"]), "阿巴嘎旗")
 
+    def test_prefecture_alias_does_not_pull_same_named_county_elsewhere(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+
+            gdf, _, _ = extract_local_admin_boundary(manager, "\u8d44\u9633")
+
+            self.assertIsNotNone(gdf)
+            self.assertEqual(len(gdf), 3)
+            self.assertEqual(set(gdf["地级"].astype(str)), {"\u8d44\u9633\u5e02"})
+
+    def test_region_query_strips_processing_verb_prefix(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+
+            gdf, _, _ = extract_local_admin_boundary(manager, "\u8fdb\u884c\u8d44\u9633\u5e02")
+
+            self.assertIsNotNone(gdf)
+            self.assertEqual(len(gdf), 3)
+            self.assertEqual(set(gdf["\u5730\u7ea7"].astype(str)), {"\u8d44\u9633\u5e02"})
+
 
 if __name__ == "__main__":
     unittest.main()

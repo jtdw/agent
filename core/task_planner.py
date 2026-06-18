@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from core.field_semantics import match_user_field_concept
 from core.object_resolver import resolve_object_reference
+from core.semantic_parser import parse_user_semantics
 from core.task_slots import extract_task_slots
 from core.tool_contracts import ToolPrecondition
 from core.tool_preconditions import (
@@ -12,6 +14,7 @@ from core.tool_preconditions import (
     validate_model_target,
     validate_required_fields,
 )
+from core.workflows.registry import build_executable_workflow, match_workflow_template
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -59,8 +62,6 @@ def _prompt_has_explicit_field_hint(prompt: str) -> bool:
             "目标变量",
             "经度",
             "纬度",
-            "瀛楁",
-            "鐩爣鍙橀噺",
         )
     )
 
@@ -78,8 +79,6 @@ def _prompt_has_target_hint(prompt: str) -> bool:
             "label",
             "预测字段",
             "预测列",
-            "鐩爣鍙橀噺",
-            "棰勬祴瀛楁",
         )
     )
 
@@ -102,7 +101,35 @@ def _default_plan(task_type: str) -> dict[str, Any]:
         "validated_tool_args": {},
         "workflow_plan": [],
         "slot_validation_errors": [],
+        "semantic_parse": {},
+        "download_plan": {},
     }
+
+
+def _build_download_plan_from_semantics(semantic: dict[str, Any], prompt: str) -> dict[str, Any]:
+    resource_type = str(semantic.get("resource_type") or "").strip()
+    if not resource_type:
+        return {}
+    normalized_resource = "dem" if resource_type.upper() == "DEM" else resource_type
+    source_key = str(semantic.get("data_source") or "")
+    if not source_key and normalized_resource in {"dem", "NDVI", "EVI", "Landsat", "Sentinel-2"}:
+        source_key = "gscloud"
+    output_region = str(semantic.get("region") or semantic.get("region_raw") or "region")
+    safe_region = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "_", output_region).strip("_") or "region"
+    plan = {
+        "source_key": source_key,
+        "resource_type": normalized_resource,
+        "region": str(semantic.get("region") or ""),
+        "region_raw": str(semantic.get("region_raw") or ""),
+        "region_standard": str(semantic.get("region_standard") or ""),
+        "admin_level": str(semantic.get("admin_level") or ""),
+        "resolution": str(semantic.get("resolution") or ""),
+        "product_key": str(semantic.get("product_key") or ""),
+        "dataset_id": str(semantic.get("dataset_id") or ""),
+        "output_name": f"{safe_region}_{normalized_resource.lower()}",
+        "request_text": str(prompt or ""),
+    }
+    return plan
 
 
 def _semantic_candidates(context: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -359,15 +386,13 @@ def _prompt_requests_map(prompt: str) -> bool:
             "\u5206\u5e03\u56fe",
             "\u4e13\u9898\u56fe",
             "\u53ef\u89c6\u5316",
-            "鍦板浘",
-            "鐢诲浘",
         )
     )
 
 
 def _prompt_requests_interpretation(prompt: str, secondary_intents: list[str]) -> bool:
     text = str(prompt or "").lower()
-    return "result_analysis" in secondary_intents or any(token in text for token in ("explain", "interpret", "解释", "说明", "解读", "怎么看", "瑙ｉ噴"))
+    return "result_analysis" in secondary_intents or any(token in text for token in ("explain", "interpret", "解释", "说明", "解读", "怎么看"))
 
 
 def _prompt_requests_export(prompt: str) -> bool:
@@ -737,7 +762,7 @@ def _prompt_requests_raster_algebra(prompt: str) -> bool:
 
 
 def _target_crs_from_prompt(prompt: str) -> str:
-    match = re.search(r"epsg\s*[:\uff1a]?\s*(\d{3,6})", str(prompt or ""), flags=re.IGNORECASE)
+    match = re.search(r"epsg\s*[:：]?\s*(\d{3,6})", str(prompt or ""), flags=re.IGNORECASE)
     return f"EPSG:{match.group(1)}" if match else ""
 
 
@@ -1263,12 +1288,107 @@ def _append_secondary_steps(plan: dict[str, Any], secondary_intents: list[str]) 
             plan["expected_outputs"].append("模型指标")
 
 
+def _apply_registered_workflow_priority(plan: dict[str, Any], prompt: str) -> None:
+    template = match_workflow_template(prompt)
+    if not template:
+        return
+
+    plan["workflow_template"] = template
+    required_tools = [str(item) for item in template.get("required_tools", []) if str(item or "").strip()]
+    existing_tools = [str(item) for item in plan.get("recommended_tools", []) if str(item or "").strip()]
+    plan["recommended_tools"] = list(dict.fromkeys([*required_tools, *existing_tools]))
+
+    title = str(template.get("title") or template.get("workflow_id") or "registered workflow")
+    step = f"优先匹配确定性工作流：{title}"
+    steps = [str(item) for item in plan.get("execution_steps", []) if str(item or "").strip()]
+    if step not in steps:
+        plan["execution_steps"] = [step, *steps]
+
+
+def _extract_output_name(prompt: str, default_name: str) -> str:
+    match = re.search(r"(?:输出|保存为|命名为|output(?:_name)?\s*[:=]?)\s*([A-Za-z0-9_\-\u4e00-\u9fff]+)", prompt, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip(" ，,。.;；")
+    return default_name
+
+
+def _registered_workflow_params(workflow_id: str, prompt: str, context: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    dataset = _dataset_name(context)
+    fields = [str(field) for field in context.get("available_fields", []) if str(field or "").strip()]
+    lower_fields = {field.lower(): field for field in fields}
+    validated = _as_dict(plan.get("validated_tool_args"))
+    if workflow_id == "table_to_points":
+        args = dict(_as_dict(validated.get("table_to_points")))
+        x_col = args.get("x_col") or lower_fields.get("lon") or lower_fields.get("lng") or lower_fields.get("longitude") or lower_fields.get("x")
+        y_col = args.get("y_col") or lower_fields.get("lat") or lower_fields.get("latitude") or lower_fields.get("y")
+        return {
+            "dataset_name": args.get("dataset_name") or dataset,
+            "x_col": x_col or "",
+            "y_col": y_col or "",
+            "crs": args.get("crs") or "EPSG:4326",
+            "output_name": args.get("output_name") or _extract_output_name(prompt, f"{Path(dataset).stem if dataset else 'table'}_points"),
+        }
+    if workflow_id == "vector_clip_vector":
+        args = dict(_as_dict(validated.get("vector_clip_by_vector")))
+        referenced = _as_dict(context.get("referenced_object"))
+        clip_name = (
+            args.get("clip_name")
+            or referenced.get("dataset_id")
+            or referenced.get("name")
+            or referenced.get("id")
+            or context.get("selected_layer_id")
+            or ""
+        )
+        return {
+            "dataset_name": args.get("dataset_name") or dataset,
+            "clip_name": clip_name,
+            "output_name": args.get("output_name") or _extract_output_name(prompt, f"{Path(dataset).stem if dataset else 'vector'}_clipped"),
+        }
+    if workflow_id == "vector_clip_raster":
+        args = dict(_as_dict(validated.get("clip_raster_by_vector")))
+        referenced = _as_dict(context.get("referenced_object"))
+        raster_name = args.get("raster_name") or (dataset if _dataset_type(context) == "raster" else _active_or_first_raster(context))
+        vector_name = args.get("vector_name") or referenced.get("dataset_id") or referenced.get("name") or referenced.get("id") or ""
+        return {
+            "raster_name": raster_name,
+            "vector_name": vector_name,
+            "output_name": args.get("output_name") or _extract_output_name(prompt, f"{Path(raster_name).stem if raster_name else 'raster'}_clipped"),
+        }
+    if workflow_id in {"upload_vector_profile", "upload_raster_profile"}:
+        return {"dataset_name": dataset}
+    if workflow_id == "map_export":
+        return {"dataset_name": dataset, "column": "", "output_name": _extract_output_name(prompt, f"{Path(dataset).stem if dataset else 'map'}_map")}
+    if workflow_id == "processing_report":
+        return {"report_title": _extract_output_name(prompt, "processing_report")}
+    if workflow_id == "raster_statistics":
+        raster_name = dataset if _dataset_type(context) == "raster" else _active_or_first_raster(context)
+        return {"raster_name": raster_name}
+    return dict(_as_dict(validated.get(workflow_id)))
+
+
+def _attach_executable_registered_workflow(plan: dict[str, Any], prompt: str, context: dict[str, Any]) -> None:
+    template = _as_dict(plan.get("workflow_template"))
+    workflow_id = str(template.get("workflow_id") or "")
+    if not workflow_id:
+        return
+    executable = build_executable_workflow(workflow_id, _registered_workflow_params(workflow_id, prompt, context, plan))
+    plan["executable_workflow"] = executable
+    if executable.get("status") == "ready" and not plan.get("workflow_plan"):
+        plan["workflow_plan"] = executable.get("workflow_plan") or []
+
+
 def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any], manager: Any | None = None) -> dict[str, Any]:
-    task_type = str(intent.get("intent") or "unclear_request")
     text = str(prompt or "")
+    semantic = parse_user_semantics(text, context)
+    task_type = str(intent.get("intent") or semantic.get("intent") or "unclear_request")
+    if task_type == "unclear_request" and semantic.get("intent") != "unclear_request":
+        task_type = str(semantic.get("intent") or task_type)
     dataset = _dataset_name(context)
     plan = _default_plan(task_type)
+    plan["semantic_parse"] = semantic
     confidence = float(intent.get("confidence") or 0.0)
+    if confidence <= 0 and semantic.get("confidence"):
+        confidence = float(semantic.get("confidence") or 0.0)
     referenced_object = intent.get("referenced_object") or context.get("referenced_object")
     secondary_intents = [item for item in intent.get("secondary_intents", []) if isinstance(item, str)]
     resolved_objects = _resolve_objects_for_plan(text, context, manager=manager)
@@ -1438,12 +1558,21 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
                 "请提供报错信息，或先运行一次任务让我记录失败原因。",
             )
     elif task_type == "data_download":
+        download_plan = _build_download_plan_from_semantics(semantic, text)
+        if download_plan:
+            plan["download_plan"] = download_plan
         plan.update(
             required_inputs=["resource type", "region/time/account if needed"],
             recommended_tools=["download_backend_status", "list_remote_resource_catalog"],
             execution_steps=["识别数据类型、区域和时间范围。", "优先检查本地文件库和可用下载源。"],
             expected_outputs=["下载计划", "数据集或下载任务"],
         )
+        if semantic.get("needs_clarification"):
+            _add_missing_inputs(
+                plan,
+                [str(item) for item in semantic.get("missing_slots", []) if str(item).strip()] or ["region"],
+                str(semantic.get("clarification_question") or "请补充下载区域。"),
+            )
     elif task_type == "general_gis_question":
         plan.update(
             recommended_tools=[],
@@ -1465,11 +1594,13 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     if slot_missing:
         _add_missing_inputs(plan, slot_missing)
 
+    _apply_registered_workflow_priority(plan, text)
     plan["required_inputs"] = list(dict.fromkeys(plan.get("required_inputs", [])))
     plan["missing_inputs"] = list(dict.fromkeys(plan.get("missing_inputs", [])))
     plan["recommended_tools"] = list(dict.fromkeys(plan.get("recommended_tools", [])))
     plan["expected_outputs"] = list(dict.fromkeys(plan.get("expected_outputs", [])))
     _build_validated_tool_args(plan, slots, context, manager=manager)
     _build_workflow_plan(plan, text, context, secondary_intents, manager=manager)
+    _attach_executable_registered_workflow(plan, text, context)
     _attach_tool_preconditions(plan)
     return plan

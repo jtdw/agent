@@ -34,13 +34,14 @@ from core.api_helpers import (
     safe_key as _safe_key,
 )
 from core.archive_utils import safe_extract_zip
-from core.artifacts import artifact_download_url, assert_artifact_path_allowed, public_artifact_payload, safe_download_filename, shapefile_zip_path
+from core.artifacts import artifact_download_url, assert_artifact_path_allowed, content_disposition_attachment, public_artifact_payload, safe_download_filename, shapefile_zip_path
 from core.chat_response import attach_chat_state, build_chat_response
 from core.chat_tasks import cancel_chat_task, finish_chat_task, start_chat_task
 from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 from core.api_utils import api_guard, resolve_child_path
 from core.local_library import LocalFileLibrary
 from core.map_layers import MapLayerService
+from core.semantic_parser import parse_user_semantics
 from core.station_data import find_station_archives, parse_ismn_station_zip
 from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gscloud_download_intent
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
@@ -198,10 +199,22 @@ def _require_current_request_user(request: Request) -> str:
     return user_id
 
 
+def _allow_anonymous_core_access() -> bool:
+    return os.getenv("GIS_AGENT_ALLOW_ANONYMOUS", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _require_request_user_if_present(request: Request, user_id: str) -> str:
     if not str(user_id or "").strip():
-        return ""
+        if _allow_anonymous_core_access():
+            return ""
+        return _require_current_request_user(request)
     return _require_request_user(request, user_id)
+
+
+def _scoped_workspace_service(user_id: str, session_id: str = "") -> GISWorkspaceService:
+    service = workspace_for(user_id)
+    service.set_request_context(user_id, session_id)
+    return service
 
 
 def _require_admin_or_mock_payment_user(request: Request, user_id: str) -> str:
@@ -328,11 +341,13 @@ class DownloadPreflightIn(BaseModel):
 
 class ExportIn(BaseModel):
     user_id: str = ""
+    session_id: str = ""
     mode: Literal["latest", "all"] = "all"
 
 
 class ArtifactDeleteIn(BaseModel):
     user_id: str = ""
+    session_id: str = ""
     artifact_id: str = ""
     path: str = ""
 
@@ -433,12 +448,13 @@ def _relative_artifact_url(service: GISWorkspaceService, file_path: str, user_id
 
 def _decorate_dashboard(service: GISWorkspaceService, user_id: str = "") -> dict:
     data = service.dashboard()
+    session_id = str(getattr(service, "current_session_id", "") or "")
     for item in data.get("artifacts", []):
         if not isinstance(item, dict) or not item.get("path"):
             continue
         artifact_id = str(item.get("artifact_id") or "")
         if artifact_id:
-            item["download_url"] = artifact_download_url(artifact_id, user_id=user_id)
+            item["download_url"] = artifact_download_url(artifact_id, user_id=user_id, session_id=session_id)
         else:
             item["download_url"] = _relative_artifact_url(service, item["path"], user_id=user_id)
     for result in data.get("model_results", []):
@@ -449,7 +465,7 @@ def _decorate_dashboard(service: GISWorkspaceService, user_id: str = "") -> dict
                 continue
             artifact_id = str(artifact.get("artifact_id") or "")
             if artifact_id:
-                artifact["download_url"] = artifact_download_url(artifact_id, user_id=user_id)
+                artifact["download_url"] = artifact_download_url(artifact_id, user_id=user_id, session_id=session_id)
             else:
                 artifact["download_url"] = _relative_artifact_url(service, artifact["path"], user_id=user_id)
     latest = data.get("latest_pipeline") if isinstance(data.get("latest_pipeline"), dict) else {}
@@ -836,8 +852,10 @@ def map_stations(request: Request, user_id: str = Query(default="")):
 @app.get("/api/map/layers")
 def map_layers(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
     def run():
+        if not str(user_id or "").strip() and not str(session_id or "").strip():
+            return {"layers": []}
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        return MapLayerService(workspace_for(authorized_user_id)).workspace_layers(
+        return MapLayerService(_scoped_workspace_service(authorized_user_id, session_id)).workspace_layers(
             user_id=authorized_user_id,
             session_id=session_id,
         )
@@ -849,9 +867,10 @@ def map_layers(request: Request, user_id: str = Query(default=""), session_id: s
 def refresh_map_layer(body: MapLayerRefreshIn, request: Request):
     def run():
         authorized_user_id = _require_request_user_if_present(request, body.user_id)
-        service = workspace_for(authorized_user_id)
+        service = _scoped_workspace_service(authorized_user_id, body.session_id)
         layer_service = MapLayerService(service)
         if body.artifact_id:
+            service.manager.assert_artifact_access(authorized_user_id, body.session_id or service.current_session_id, body.artifact_id)
             return layer_service.refresh_artifact(body.artifact_id, user_id=authorized_user_id, session_id=body.session_id)
         if body.dataset_name:
             dataset = next((item for item in service.manager.list_datasets() if item.get("name") == body.dataset_name), None)
@@ -867,10 +886,10 @@ def refresh_map_layer(body: MapLayerRefreshIn, request: Request):
 
 
 @app.get("/api/map/raster-preview")
-def map_raster_preview(request: Request, user_id: str = Query(default=""), dataset_name: str = Query(...)):
+def map_raster_preview(request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), dataset_name: str = Query(...)):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = workspace_for(authorized_user_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
         layer_service = MapLayerService(service)
         target = layer_service.raster_preview_path(dataset_name)
         if not target.exists():
@@ -927,13 +946,13 @@ def logout(response: Response, request: Request):
 
 @app.get("/api/chat/messages")
 def messages(request: Request, user_id: str = Query(default="")):
-    return guard(lambda: {"messages": workspace_for(_require_request_user_if_present(request, user_id)).current_messages()})
+    return guard(lambda: {"messages": _scoped_workspace_service(_require_request_user_if_present(request, user_id)).current_messages()})
 
 
 @app.get("/api/chat/sessions")
 def chat_sessions(request: Request, user_id: str = Query(default="")):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, user_id))
+        service = _scoped_workspace_service(_require_request_user_if_present(request, user_id))
         return {
             "sessions": service.list_sessions(),
             "current_session_id": service.current_session_id,
@@ -946,7 +965,7 @@ def chat_sessions(request: Request, user_id: str = Query(default="")):
 @app.post("/api/chat/sessions")
 def create_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id))
         session_id = service.create_new_session(body.title or None)
         return {
             "session_id": session_id,
@@ -961,7 +980,7 @@ def create_chat_session(body: ChatSessionIn, request: Request):
 @app.post("/api/chat/sessions/switch")
 def switch_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
         service.switch_session(body.session_id)
         return {
             "sessions": service.list_sessions(),
@@ -975,7 +994,7 @@ def switch_chat_session(body: ChatSessionIn, request: Request):
 @app.post("/api/chat/sessions/rename")
 def rename_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
         service.rename_session(body.session_id, body.title)
         return {"sessions": service.list_sessions(), "current_session_id": service.current_session_id}
 
@@ -985,7 +1004,7 @@ def rename_chat_session(body: ChatSessionIn, request: Request):
 @app.post("/api/chat/sessions/delete")
 def delete_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
         current = service.delete_session(body.session_id)
         return {
             "current_session_id": current,
@@ -999,9 +1018,7 @@ def delete_chat_session(body: ChatSessionIn, request: Request):
 @app.post("/api/chat/sessions/clear")
 def clear_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
-        if body.session_id:
-            service.use_session_or_current(body.session_id)
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
         service.clear_current_chat()
         return {
             "current_session_id": service.current_session_id,
@@ -1015,9 +1032,7 @@ def clear_chat_session(body: ChatSessionIn, request: Request):
 @app.post("/api/chat/retry")
 def retry_chat_message(body: ChatRetryIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
-        if body.session_id:
-            service.use_session_or_current(body.session_id)
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
         result = service.edit_user_message_and_retry(body.message_id, body.content)
         return {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id}
 
@@ -1027,9 +1042,7 @@ def retry_chat_message(body: ChatRetryIn, request: Request):
 @app.get("/api/chat/models")
 def chat_models(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, user_id))
-        if session_id:
-            service.use_session_or_current(session_id)
+        service = _scoped_workspace_service(_require_request_user_if_present(request, user_id), session_id)
         return service.chat_model_state(session_id or service.current_session_id)
 
     return guard(run)
@@ -1038,9 +1051,7 @@ def chat_models(request: Request, user_id: str = Query(default=""), session_id: 
 @app.post("/api/chat/models/select")
 def select_chat_model(body: ChatModelIn, request: Request):
     def run():
-        service = workspace_for(_require_request_user_if_present(request, body.user_id))
-        if body.session_id:
-            service.use_session_or_current(body.session_id)
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
         return service.select_chat_model(body.model, body.session_id or service.current_session_id)
 
     return guard(run)
@@ -1085,6 +1096,11 @@ def _maybe_import_library_items_for_prompt(service: GISWorkspaceService, prompt:
 
 
 def _extract_region_from_prompt(prompt: str) -> str:
+    semantic = parse_user_semantics(prompt)
+    semantic_region = str(semantic.get("region") or semantic.get("region_raw") or "").strip()
+    if semantic_region:
+        return semantic_region
+
     text = prompt or ""
     candidates = [
         "成都市", "成都", "四川省", "四川", "闪电河流域", "闪电河",
@@ -1093,12 +1109,41 @@ def _extract_region_from_prompt(prompt: str) -> str:
     for item in candidates:
         if item in text:
             return "成都市" if item == "成都" else ("四川省" if item == "四川" else item)
+
+    admin_matches: list[str] = []
+    for match in re.finditer(
+        r"([\u4e00-\u9fff]{2,18}?(?:特别行政区|自治州|自治县|自治旗|地区|盟|省|市|县|区|旗))(?=(?:的|DEM|dem|GDEM|gdem|SRTM|srtm|90|30|数据|高程|[，。；;\s]|$))",
+        text,
+    ):
+        value = match.group(1).strip()
+        value = re.sub(r"^(?:帮我|请|给我|为我|下载|获取|准备|预检|裁剪|覆盖|查询|计算|进行|处理|提取|生成|制作)+", "", value)
+        if value:
+            admin_matches.append(value)
+    if admin_matches:
+        return admin_matches[-1]
+
     m = re.search(r"(?:下载|裁剪|覆盖|范围|区域为|研究区为)([^，。；;\s]{2,18})", text)
     if m:
         value = m.group(1).strip()
+        value = re.split(r"(?:的)?(?:SRTM|srtm|ASTER|aster|GDEM|gdem|DEM|dem|90m|90M|30m|30M|90米|30米|高程|数据)", value, maxsplit=1)[0]
         value = re.sub(r"(范围|区域|DEM|数据|的)$", "", value)
         return value or "当前研究区"
     return "当前研究区"
+
+
+def _extract_gscloud_dem_dataset_id_from_prompt(prompt: str) -> str:
+    semantic = parse_user_semantics(prompt)
+    dataset_id = str(semantic.get("dataset_id") or "").strip()
+    if dataset_id:
+        return dataset_id
+
+    text = str(prompt or "")
+    compact = re.sub(r"\s+", "", text).lower()
+    if "srtm" in compact or "90m" in compact or "90米" in compact:
+        return "306"
+    if "gdemv2" in compact or "gdem2" in compact:
+        return "421"
+    return "310"
 
 
 def _extract_output_name_from_prompt(prompt: str, region: str, resource_type: str) -> str:
@@ -1182,7 +1227,7 @@ def _is_gscloud_modev1f_download_prompt(prompt: str) -> bool:
     product = match_gscloud_product(text)
     if product is None or product.key != MODEV1F_CHINA_250M_EVI_5DAY.key:
         return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索", "涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱?")):
+    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
         return False
     upper = text.upper()
     return (
@@ -1277,7 +1322,7 @@ def _is_gscloud_mod021km_download_prompt(prompt: str) -> bool:
     product = match_gscloud_product(text)
     if product is None or product.key != MOD021KM_1KM_SURFACE_REFLECTANCE.key:
         return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索", "涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱?")):
+    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
         return False
     upper = text.upper()
     return (
@@ -1381,7 +1426,7 @@ def _is_gscloud_sentinel2_download_prompt(prompt: str) -> bool:
     product = match_gscloud_product(text)
     if product is None or product.key != SENTINEL2_MSI.key:
         return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索", "涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱?")):
+    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
         return False
     upper = text.upper()
     return (
@@ -1722,6 +1767,7 @@ def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str) -> dict:
     region = _extract_region_from_prompt(prompt)
     account_mode = "platform" if "平台账号" in prompt or "账号池" in prompt else "own"
     output_name = _extract_output_name_from_prompt(prompt, region, "dem")
+    dataset_id = _extract_gscloud_dem_dataset_id_from_prompt(prompt)
     job = commercial_service.submit_job(
         user_id=user_id,
         source_key="gscloud",
@@ -1748,7 +1794,7 @@ def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str) -> dict:
             job_id=job["job_id"],
             region=region,
             region_dataset="",
-            dataset_id="310",
+            dataset_id=dataset_id,
             max_tiles=0,
             timeout_seconds=1800,
             headless=True,
@@ -1957,7 +2003,7 @@ def _maybe_start_gscloud_auto_download(job: dict, region: str = "") -> dict:
         job_id=job_id,
         region=actual_region,
         region_dataset="",
-        dataset_id="310",
+        dataset_id=_extract_gscloud_dem_dataset_id_from_prompt(request_text),
         max_tiles=0,
         timeout_seconds=1800,
         headless=True,
@@ -2116,7 +2162,7 @@ def _download_requires_login_result(prompt: str) -> dict:
 def ask(body: AskIn, request: Request):
     def run():
         user_id = _require_request_user_if_present(request, body.user_id)
-        service = workspace_for(user_id)
+        service = _scoped_workspace_service(user_id, body.session_id)
         task_id = str(body.task_id or "").strip()
         if task_id:
             start_chat_task(task_id, user_id=user_id, session_id=body.session_id)
@@ -2124,8 +2170,6 @@ def ask(body: AskIn, request: Request):
             if task_id:
                 finish_chat_task(task_id)
             return _attach_result_panel(service, user_id, response)
-        if body.session_id:
-            service.use_session_or_current(body.session_id)
         service.apply_frontend_context(body.frontend_context)
         if _is_commercial_download_status_prompt(body.prompt):
             if not user_id:
@@ -2215,9 +2259,7 @@ async def upload_files(request: Request, user_id: str = Form(default=""), sessio
     if not payload:
         raise HTTPException(status_code=400, detail="没有读取到有效上传文件。")
     def run():
-        service = workspace_for(authorized_user_id)
-        if session_id:
-            service.use_session_or_current(session_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
         messages = service.upload_bytes_batch(payload)
         result = {"ok": True, "count": len(payload), "messages": messages}
         dashboard_data = _decorate_dashboard(service, user_id=authorized_user_id)
@@ -2249,7 +2291,7 @@ def import_local_library(body: LocalLibraryImportIn, request: Request):
         user_id = _require_request_user_if_present(request, body.user_id)
         if not body.item_ids:
             raise ValueError("请选择至少一个本地文件库条目。")
-        service = workspace_for(user_id)
+        service = _scoped_workspace_service(user_id)
         messages: list[str] = []
         for item in local_library.resolve_paths(body.item_ids):
             messages.append(service.import_local_library_item(item))
@@ -2262,10 +2304,10 @@ def import_local_library(body: LocalLibraryImportIn, request: Request):
 
 
 @app.get("/api/workspace/dashboard")
-def dashboard(request: Request, user_id: str = Query(default="")):
+def dashboard(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        data = _decorate_dashboard(workspace_for(authorized_user_id), user_id=authorized_user_id)
+        data = _decorate_dashboard(_scoped_workspace_service(authorized_user_id, session_id), user_id=authorized_user_id)
         data["local_library"] = local_library.list_items()
         return data
 
@@ -2276,9 +2318,7 @@ def dashboard(request: Request, user_id: str = Query(default="")):
 def workspace_mentions(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = workspace_for(authorized_user_id)
-        if session_id:
-            service.use_session_or_current(session_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
         return _build_workspace_mentions(service.manager.list_datasets())
 
     return guard(run)
@@ -2288,7 +2328,7 @@ def workspace_mentions(request: Request, user_id: str = Query(default=""), sessi
 def export_workspace(body: ExportIn, request: Request):
     def run():
         user_id = _require_request_user_if_present(request, body.user_id)
-        service = workspace_for(user_id)
+        service = _scoped_workspace_service(user_id, body.session_id)
         result = service.export_results(mode=body.mode)
         result["download_url"] = _relative_artifact_url(service, result["zip_path"], user_id=user_id)
         _audit(request, user_id=user_id, action="workspace.export", resource_type="artifact", resource_id=str(result.get("zip_path") or ""), detail={"mode": body.mode, "file_count": result.get("file_count")})
@@ -2301,7 +2341,7 @@ def export_workspace(body: ExportIn, request: Request):
 def delete_workspace_artifact(body: ArtifactDeleteIn, request: Request):
     def run():
         user_id = _require_request_user_if_present(request, body.user_id)
-        service = workspace_for(user_id)
+        service = _scoped_workspace_service(user_id, body.session_id)
         result = service.manager.delete_result_file(artifact_id=body.artifact_id, path=body.path)
         result["dashboard"] = _decorate_dashboard(service, user_id=user_id)
         _audit(
@@ -2318,11 +2358,7 @@ def delete_workspace_artifact(body: ArtifactDeleteIn, request: Request):
 
 
 def _public_artifact_or_error(service: GISWorkspaceService, artifact_id: str, user_id: str = "", session_id: str = "") -> dict:
-    artifact = service.manager.get_artifact(artifact_id)
-    if not artifact:
-        artifact = next((item for item in service.manager.list_artifacts() if str(item.get("artifact_id") or "") == artifact_id), None)
-    if not artifact:
-        raise FileNotFoundError(f"artifact not found: {artifact_id}")
+    artifact = service.manager.assert_artifact_access(user_id, session_id or service.current_session_id, artifact_id)
     return public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=user_id, session_id=session_id)
 
 
@@ -2330,7 +2366,7 @@ def _public_artifact_or_error(service: GISWorkspaceService, artifact_id: str, us
 def artifact_metadata(artifact_id: str, request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = workspace_for(authorized_user_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
         return _public_artifact_or_error(service, artifact_id, user_id=authorized_user_id, session_id=session_id)
 
     return guard(run)
@@ -2340,7 +2376,8 @@ def artifact_metadata(artifact_id: str, request: Request, user_id: str = Query(d
 def delete_artifact(artifact_id: str, request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), delete_file: bool = Query(default=True)):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = workspace_for(authorized_user_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
+        service.manager.assert_artifact_access(authorized_user_id, session_id or service.current_session_id, artifact_id)
         result = service.manager.delete_result_file(artifact_id=artifact_id if delete_file else "", path="")
         status = "deleted" if result.get("deleted_files") or result.get("deleted_artifacts") or result.get("deleted_datasets") else "not_found"
         _audit(
@@ -2368,12 +2405,8 @@ def delete_artifact(artifact_id: str, request: Request, user_id: str = Query(def
 def artifact_download(artifact_id: str, request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = workspace_for(authorized_user_id)
-        artifact = service.manager.get_artifact(artifact_id)
-        if not artifact:
-            artifact = next((item for item in service.manager.list_artifacts() if str(item.get("artifact_id") or "") == artifact_id), None)
-        if not artifact:
-            raise FileNotFoundError(f"artifact not found: {artifact_id}")
+        service = _scoped_workspace_service(authorized_user_id, session_id)
+        artifact = service.manager.assert_artifact_access(authorized_user_id, session_id or service.current_session_id, artifact_id)
         public = public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=authorized_user_id, session_id=session_id)
         target = assert_artifact_path_allowed(service.manager.workdir, str(artifact.get("path") or ""))
         if target.suffix.lower() == ".shp":
@@ -2385,19 +2418,32 @@ def artifact_download(artifact_id: str, request: Request, user_id: str = Query(d
             str(target),
             media_type=str(public.get("mime_type") or "application/octet-stream"),
             filename=safe_download_filename(str(public.get("filename") or target.name)),
+            headers={"Content-Disposition": content_disposition_attachment(str(public.get("filename") or target.name))},
         )
 
     return guard(run)
 
 
 @app.get("/api/files/artifact")
-def artifact(request: Request, user_id: str = Query(default=""), path: str = Query(...)):
+def artifact(request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), path: str = Query(...)):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = workspace_for(authorized_user_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
         target = resolve_child_path(service.manager.workdir, path)
+        target_key = str(target.resolve(strict=False)).lower()
+        artifact_match = next(
+            (
+                item
+                for item in service.manager.list_artifacts()
+                if str(Path(str(item.get("path") or "")).resolve(strict=False)).lower() == target_key
+            ),
+            None,
+        )
+        if not artifact_match:
+            raise PermissionError("workspace file downloads require a session-owned artifact")
+        service.manager.assert_artifact_access(authorized_user_id, session_id or service.current_session_id, str(artifact_match.get("artifact_id") or ""))
         _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="workspace_file", resource_id=path)
-        return FileResponse(str(target), filename=target.name)
+        return FileResponse(str(target), filename=target.name, headers={"Content-Disposition": content_disposition_attachment(target.name)})
 
     return guard(run)
 
@@ -2583,7 +2629,7 @@ def download_job_log_file(request: Request, user_id: str = Query(...), job_id: s
         return PlainTextResponse(
             text,
             media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": f'attachment; filename="{job_id}_log.txt"'},
+            headers={"Content-Disposition": content_disposition_attachment(f"{job_id}_log.txt")},
         )
 
     return guard(run)
@@ -2637,7 +2683,7 @@ def download_job_artifact(request: Request, user_id: str = Query(...), job_id: s
             _audit(request, user_id=authorized_user_id, action="download.artifact", status="denied", resource_type="download_job", resource_id=job_id, detail={"path": path})
             raise PermissionError("下载路径不属于该任务。")
         _audit(request, user_id=authorized_user_id, action="download.artifact", resource_type="download_job", resource_id=job_id, detail={"path": path})
-        return FileResponse(str(target), filename=target.name)
+        return FileResponse(str(target), filename=target.name, headers={"Content-Disposition": content_disposition_attachment(target.name)})
     return guard(run)
 
 
@@ -2659,9 +2705,7 @@ def shandian_soil_moisture_workflow(body: WorkflowIn, request: Request):
     def run():
         user_id = _require_request_user_if_present(request, body.user_id)
         if body.run_now:
-            service = workspace_for(user_id)
-            if body.session_id:
-                service.use_session_or_current(body.session_id)
+            service = _scoped_workspace_service(user_id, body.session_id)
             return service.ask(SHANDIAN_WORKFLOW_PROMPT)
         return {"prompt": SHANDIAN_WORKFLOW_PROMPT}
 

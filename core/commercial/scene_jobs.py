@@ -104,6 +104,8 @@ def start_gscloud_scene_process(
     cmd = [sys.executable, "-m", "core.commercial.gscloud_scene_worker", "--status-path", str(status_path)]
     env = os.environ.copy()
     env["PYTHONPATH"] = str(project_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     with open(log_path, "a", encoding="utf-8") as log_fh:
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
         proc = subprocess.Popen(

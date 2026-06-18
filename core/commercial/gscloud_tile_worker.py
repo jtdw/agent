@@ -9,7 +9,7 @@ from typing import Any
 from ..data_manager import DataManager
 from .service import CommercialService
 from ..domestic_sources.gscloud_adapter import (
-    plan_aster_gdem_tiles,
+    plan_gscloud_dem_tiles,
     gscloud_platform_state_path,
     gscloud_user_state_path,
 )
@@ -97,13 +97,14 @@ def main() -> int:
         })
         _safe_write_json(status_path, current)
 
-        plan = plan_aster_gdem_tiles(
+        plan = plan_gscloud_dem_tiles(
             manager=manager,
             region=region,
             region_dataset=region_dataset,
             output_name=f"{output_name}_tile_plan",
             bbox_only=False,
             save_preview=True,
+            dataset_id=str(current.get("dataset_id") or "310"),
         )
         ids = list(plan.get("tile_ids") or [])
         max_tiles = int(current.get("max_tiles") or 0)
@@ -127,7 +128,9 @@ def main() -> int:
         result = download_gscloud_tiles_by_identifier_search(
             manager=manager,
             tile_ids=ids,
-            dataset_id=str(current.get("dataset_id") or "310"),
+            dataset_id=str(plan.get("dataset_id") or current.get("dataset_id") or "310"),
+            pid=str(plan.get("pid") or "1"),
+            tile_scheme=str(plan.get("tile_scheme") or "astgtm_1deg"),
             storage_state_path=state_path,
             output_name=output_name,
             timeout_seconds=int(current.get("timeout_seconds") or 1800),

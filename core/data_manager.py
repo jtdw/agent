@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import mimetypes
 import os
 import re
 import shutil
@@ -96,8 +97,20 @@ def _read_station_series_table(path: Path) -> pd.DataFrame | None:
 
 
 def _read_csv_table(path: Path) -> pd.DataFrame:
+    def read_csv_with_encoding(**options: Any) -> pd.DataFrame:
+        last_exc: Exception | None = None
+        for encoding in ("utf-8-sig", "utf-8", "gbk"):
+            try:
+                return pd.read_csv(path, encoding=encoding, **options)
+            except UnicodeDecodeError as exc:
+                last_exc = exc
+                continue
+        if last_exc is not None:
+            return pd.read_csv(path, encoding="utf-8", encoding_errors="replace", **options)
+        return pd.read_csv(path, encoding="utf-8-sig", **options)
+
     try:
-        return pd.read_csv(path)
+        return read_csv_with_encoding()
     except pd.errors.ParserError as exc:
         station_df = _read_station_series_table(path)
         if station_df is not None:
@@ -108,7 +121,7 @@ def _read_csv_table(path: Path) -> pd.DataFrame:
             {"sep": r"\s+", "engine": "python"},
         ):
             try:
-                return pd.read_csv(path, **options)
+                return read_csv_with_encoding(**options)
             except Exception:
                 continue
         raise ValueError(
@@ -128,19 +141,74 @@ class DatasetRecord:
 class DataManager:
     def __init__(self, workdir: Path):
         self.workdir = Path(workdir)
-        self.upload_dir = self.workdir / "uploads"
-        self.plot_dir = self.workdir / "plots"
-        self.derived_dir = self.workdir / "derived"
-        self.temp_dir = self.workdir / "temp"
+        self.base_upload_dir = self.workdir / "uploads"
+        self.base_plot_dir = self.workdir / "plots"
+        self.base_derived_dir = self.workdir / "derived"
+        self.base_temp_dir = self.workdir / "temp"
+        self.current_user_id = ""
+        self.current_session_id = ""
+        self.upload_dir = self.base_upload_dir
+        self.plot_dir = self.base_plot_dir
+        self.derived_dir = self.base_derived_dir
+        self.temp_dir = self.base_temp_dir
         self.datasets: dict[str, DatasetRecord] = {}
         self.database = WorkspaceDatabase(self.workdir / "workspace.db")
         self.last_plot_path: str = ""
         self.operation_log: list[dict[str, Any]] = []
 
-        for folder in [self.upload_dir, self.plot_dir, self.derived_dir, self.temp_dir]:
+        for folder in [self.base_upload_dir, self.base_plot_dir, self.base_derived_dir, self.base_temp_dir]:
             folder.mkdir(parents=True, exist_ok=True)
 
         self._restore_workspace_state()
+
+    def set_runtime_scope(self, user_id: str = "", session_id: str = "") -> None:
+        self.current_user_id = str(user_id or "").strip()
+        self.current_session_id = str(session_id or "").strip()
+        if self.current_session_id:
+            root = self.workdir / "sessions" / re.sub(r"[^A-Za-z0-9_.-]+", "_", self.current_session_id)
+            self.upload_dir = root / "uploads"
+            self.plot_dir = root / "plots"
+            self.derived_dir = root / "derived"
+            self.temp_dir = root / "temp"
+        else:
+            self.upload_dir = self.base_upload_dir
+            self.plot_dir = self.base_plot_dir
+            self.derived_dir = self.base_derived_dir
+            self.temp_dir = self.base_temp_dir
+        for folder in [self.upload_dir, self.plot_dir, self.derived_dir, self.temp_dir]:
+            folder.mkdir(parents=True, exist_ok=True)
+
+    def _scoped_meta(self, meta: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(meta or {})
+        if self.current_user_id:
+            payload.setdefault("owner_user_id", self.current_user_id)
+        if self.current_session_id:
+            payload.setdefault("session_id", self.current_session_id)
+        return payload
+
+    def _record_visible_in_current_session(self, record: DatasetRecord) -> bool:
+        if not self.current_session_id:
+            return True
+        return str((record.meta or {}).get("session_id") or "") == self.current_session_id
+
+    def _artifact_visible_in_current_session(self, artifact: dict[str, Any]) -> bool:
+        if artifact.get("is_deleted"):
+            return False
+        if not self.current_session_id:
+            return True
+        return str(artifact.get("session_id") or (artifact.get("meta") or {}).get("session_id") or "") == self.current_session_id
+
+    def _scoped_relative_path(self, path: Path) -> str:
+        try:
+            return str(path.resolve().relative_to(self.workdir.resolve())).replace("\\", "/")
+        except Exception:
+            return path.name
+
+    def _unique_storage_name(self, filename: str) -> str:
+        original = Path(str(filename or "uploaded.bin")).name
+        stem = re.sub(r"[^A-Za-z0-9_.\-\u4e00-\u9fff]+", "_", Path(original).stem).strip("._-") or "uploaded"
+        suffix = Path(original).suffix.lower()
+        return f"{uuid4().hex}_{stem}{suffix}"
 
     def _restore_workspace_state(self) -> None:
         self.operation_log = self.database.list_operations(limit=100)
@@ -172,7 +240,7 @@ class DataManager:
         if data_type == "vector":
             actual = self._prepare_vector_source(path)
             gdf = gpd.read_file(actual)
-            self.datasets[dataset_name] = DatasetRecord(dataset_name, actual, "vector", gdf, self._build_vector_meta(gdf))
+            self.datasets[dataset_name] = DatasetRecord(dataset_name, actual, "vector", gdf, self._scoped_meta({**self._build_vector_meta(gdf), **(item.get("meta") or {})}))
         elif data_type == "raster":
             with rasterio.open(path) as src:
                 meta = {
@@ -184,19 +252,19 @@ class DataManager:
                     "dtype": str(src.dtypes[0]) if src.dtypes else None,
                     "nodata": src.nodata,
                 }
-            self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "raster", str(path), meta)
+            self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "raster", str(path), self._scoped_meta({**meta, **(item.get("meta") or {})}))
         elif data_type == "table":
             if path.suffix.lower() == ".csv":
                 df = _read_csv_table(path)
             else:
                 df = pd.read_excel(path)
-            self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "table", df, {"rows": len(df), "columns": list(df.columns)})
+            self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "table", df, self._scoped_meta({"rows": len(df), "columns": list(df.columns), **(item.get("meta") or {})}))
         elif data_type == "document":
             if path.suffix.lower() == ".docx":
                 text = self._read_docx_text(path)
             else:
                 text = path.read_text(encoding="utf-8", errors="ignore")
-            self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "document", text, self._build_document_meta(text))
+            self.datasets[dataset_name] = DatasetRecord(dataset_name, path, "document", text, self._scoped_meta({**self._build_document_meta(text), **(item.get("meta") or {})}))
 
     def log_operation(self, title: str, detail: str = "", category: str = "info") -> None:
         entry = {
@@ -284,12 +352,19 @@ class DataManager:
 
     def _copy_to_uploads(self, source: Path) -> Path:
         source = Path(source)
-        target = self.upload_dir / source.name
+        try:
+            source.resolve().relative_to(self.upload_dir.resolve())
+            return source
+        except Exception:
+            pass
+        storage_name = self._unique_storage_name(source.name)
+        target = self.upload_dir / storage_name
 
         if source.suffix.lower() == ".shp":
+            target_stem = target.stem
             for sibling in source.parent.glob(f"{source.stem}.*"):
                 if sibling.suffix.lower() in SHAPE_SIDE_EXTS:
-                    dest = self.upload_dir / sibling.name
+                    dest = self.upload_dir / f"{target_stem}{sibling.suffix.lower()}"
                     if sibling.resolve() != dest.resolve():
                         shutil.copy2(sibling, dest)
             return target
@@ -352,7 +427,7 @@ class DataManager:
         return "\n".join(paragraphs)
 
     def save_uploaded_bytes(self, filename: str, data: bytes) -> Path:
-        target = self.upload_dir / Path(filename).name
+        target = self.upload_dir / self._unique_storage_name(filename)
         target.write_bytes(data)
         return target
 
@@ -409,7 +484,7 @@ class DataManager:
                 path=actual,
                 data_type="vector",
                 object_ref=gdf,
-                meta=self._build_vector_meta(gdf),
+                meta=self._scoped_meta(self._build_vector_meta(gdf)),
             )
         elif ext in RASTER_EXTS:
             with rasterio.open(actual) as src:
@@ -427,7 +502,7 @@ class DataManager:
                 path=actual,
                 data_type="raster",
                 object_ref=str(actual),
-                meta=meta,
+                meta=self._scoped_meta(meta),
             )
         elif ext in TABLE_EXTS:
             if ext == ".csv":
@@ -439,7 +514,7 @@ class DataManager:
                 path=actual,
                 data_type="table",
                 object_ref=df,
-                meta={"rows": len(df), "columns": list(df.columns)},
+                meta=self._scoped_meta({"rows": len(df), "columns": list(df.columns)}),
             )
         elif ext in DOCUMENT_EXTS:
             if ext == ".docx":
@@ -451,7 +526,7 @@ class DataManager:
                 path=actual,
                 data_type="document",
                 object_ref=text,
-                meta=self._build_document_meta(text),
+                meta=self._scoped_meta(self._build_document_meta(text)),
             )
         else:
             raise ValueError(f"暂不支持的文件类型: {ext}")
@@ -473,10 +548,11 @@ class DataManager:
                 "meta": record.meta,
             }
             for name, record in self.datasets.items()
+            if self._record_visible_in_current_session(record)
         ]
 
     def list_dataset_names(self) -> list[str]:
-        return list(self.datasets.keys())
+        return [name for name, record in self.datasets.items() if self._record_visible_in_current_session(record)]
 
     def dataset_brief(self) -> str:
         if not self.datasets:
@@ -485,7 +561,7 @@ class DataManager:
 
     def workspace_summary(self) -> dict[str, Any]:
         return {
-            "dataset_count": len(self.datasets),
+            "dataset_count": len(self.list_datasets()),
             "artifact_count": len(self.list_artifacts()),
             "last_plot": self.last_plot_path,
             "operation_count": len(self.operation_log),
@@ -533,18 +609,26 @@ class DataManager:
                     "artifact_id": artifact_id,
                     "name": path.name,
                     "path": str(path),
+                    "absolute_path": str(path.resolve(strict=False)),
+                    "relative_path": self._scoped_relative_path(path),
+                    "owner_user_id": self.current_user_id,
+                    "session_id": self.current_session_id,
                     "display_path": (str(relative).replace("\\", "/") if not isinstance(relative, str) else relative),
                     "category": category,
                     "size_kb": round(path.stat().st_size / 1024, 2),
                     "modified": datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    "meta": self._scoped_meta({}),
                 }
             )
-        return registered + artifacts
+        return [item for item in registered + artifacts if self._artifact_visible_in_current_session(item)]
 
     def get(self, name: str) -> DatasetRecord:
         if name not in self.datasets:
             raise KeyError(f"未找到数据集: {name}")
-        return self.datasets[name]
+        record = self.datasets[name]
+        if not self._record_visible_in_current_session(record):
+            raise PermissionError(f"dataset is outside the current session: {name}")
+        return record
 
     def get_vector(self, name: str) -> gpd.GeoDataFrame:
         record = self.get(name)
@@ -613,7 +697,7 @@ class DataManager:
             path=output_path,
             data_type="vector",
             object_ref=gdf,
-            meta=self._build_vector_meta(gdf),
+            meta=self._scoped_meta(self._build_vector_meta(gdf)),
         )
         self._sync_dataset_to_database(dataset_name, auto_synced=True)
         return dataset_name
@@ -622,13 +706,13 @@ class DataManager:
         dataset_name = self._unique_name(name)
         filename = _safe_output_filename(filename or "", f"{dataset_name}.csv", {".csv"})
         output_path = self.derived_dir / filename
-        df.to_csv(output_path, index=False)
+        df.to_csv(output_path, index=False, encoding="utf-8-sig")
         self.datasets[dataset_name] = DatasetRecord(
             name=dataset_name,
             path=output_path,
             data_type="table",
             object_ref=df,
-            meta={"rows": len(df), "columns": list(df.columns)},
+            meta=self._scoped_meta({"rows": len(df), "columns": list(df.columns)}),
         )
         self._sync_dataset_to_database(dataset_name, auto_synced=True)
         return dataset_name
@@ -643,7 +727,7 @@ class DataManager:
             path=output_path,
             data_type="document",
             object_ref=text,
-            meta=self._build_document_meta(text),
+            meta=self._scoped_meta(self._build_document_meta(text)),
         )
         self._sync_dataset_to_database(dataset_name, auto_synced=True)
         return dataset_name
@@ -655,7 +739,7 @@ class DataManager:
             path=path,
             data_type="raster",
             object_ref=str(path),
-            meta=meta or {},
+            meta=self._scoped_meta(meta or {}),
         )
         self._sync_dataset_to_database(dataset_name, auto_synced=True)
         return dataset_name
@@ -663,13 +747,13 @@ class DataManager:
     def _sync_dataset_to_database(self, name: str, auto_synced: bool = True) -> dict[str, Any]:
         record = self.get(name)
         if record.data_type == "table":
-            return self.database.sync_table(name, str(record.path), self.get_table(name), meta=record.meta, auto_synced=auto_synced)
+            return self.database.sync_table(name, str(record.path), self.get_table(name), meta=record.meta, auto_synced=auto_synced, owner_user_id=self.current_user_id, session_id=self.current_session_id)
         if record.data_type == "vector":
-            return self.database.sync_vector(name, str(record.path), self.get_vector(name), meta=record.meta, auto_synced=auto_synced)
+            return self.database.sync_vector(name, str(record.path), self.get_vector(name), meta=record.meta, auto_synced=auto_synced, owner_user_id=self.current_user_id, session_id=self.current_session_id)
         if record.data_type == "document":
-            return self.database.sync_document(name, str(record.path), self.get_document_text(name), meta=record.meta, auto_synced=auto_synced)
+            return self.database.sync_document(name, str(record.path), self.get_document_text(name), meta=record.meta, auto_synced=auto_synced, owner_user_id=self.current_user_id, session_id=self.current_session_id)
         if record.data_type == "raster":
-            return self.database.register_raster(name, str(record.path), meta=record.meta, auto_synced=auto_synced)
+            return self.database.register_raster(name, str(record.path), meta=record.meta, auto_synced=auto_synced, owner_user_id=self.current_user_id, session_id=self.current_session_id)
         raise TypeError(f"暂不支持同步到数据库的数据类型: {record.data_type}")
 
     def sync_dataset_to_database(self, name: str) -> dict[str, Any]:
@@ -686,7 +770,7 @@ class DataManager:
 
     def list_database_objects(self) -> dict[str, Any]:
         return {
-            "catalog": self.database.list_catalog(),
+            "catalog": self.database.list_catalog(session_id=self.current_session_id),
             "sql_tables": self.database.list_sql_tables(),
         }
 
@@ -764,6 +848,8 @@ class DataManager:
             "metrics_dataset": metrics_dataset,
             "metrics_path": metrics_path,
             "figure_path": figure_path,
+            "owner_user_id": self.current_user_id,
+            "session_id": self.current_session_id,
             "artifact_ids": [str(item.get("artifact_id") or "") for item in synced_artifacts if item.get("artifact_id")] or artifact_ids or [],
             "artifacts": synced_artifacts or artifacts or [],
             "metrics": metrics or {},
@@ -784,12 +870,20 @@ class DataManager:
         task_id: str = "",
         model_result_id: str = "",
         dataset_id: str = "",
+        mime_type: str = "",
+        source_tool: str = "",
         meta: dict[str, Any] | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
+        artifact_path = Path(path)
+        if not artifact_path.is_absolute():
+            artifact_path = self.workdir / artifact_path
+        scoped_meta = self._scoped_meta(meta or {k: v for k, v in extra.items() if k not in {"name", "display_path", "category", "size_kb", "modified"}})
         payload = {
             "artifact_id": artifact_id or f"artifact_{uuid4().hex[:10]}",
-            "path": path,
+            "path": str(artifact_path),
+            "absolute_path": str(artifact_path.resolve(strict=False)),
+            "relative_path": self._scoped_relative_path(artifact_path),
             "type": type,
             "title": title,
             "description": description,
@@ -798,17 +892,41 @@ class DataManager:
             "task_id": task_id,
             "model_result_id": model_result_id,
             "dataset_id": dataset_id,
-            "meta": meta or {k: v for k, v in extra.items() if k not in {"name", "display_path", "category", "size_kb", "modified"}},
+            "owner_user_id": self.current_user_id,
+            "session_id": self.current_session_id,
+            "mime_type": mime_type or mimetypes.guess_type(str(artifact_path))[0] or "application/octet-stream",
+            "source_tool": source_tool,
+            "meta": scoped_meta,
         }
         artifact = self.database.upsert_artifact(payload)
         return self._enrich_registered_artifact(artifact)
 
     def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         artifact = self.database.get_artifact(artifact_id)
-        return self._enrich_registered_artifact(artifact) if artifact else None
+        if not artifact or not self._artifact_visible_in_current_session(artifact):
+            return None
+        return self._enrich_registered_artifact(artifact)
 
     def list_registered_artifacts(self, *, model_result_id: str = "", limit: int = 200) -> list[dict[str, Any]]:
-        return [self._enrich_registered_artifact(item) for item in self.database.list_artifacts(model_result_id=model_result_id, limit=limit)]
+        return [
+            self._enrich_registered_artifact(item)
+            for item in self.database.list_artifacts(model_result_id=model_result_id, session_id=self.current_session_id, limit=limit)
+            if self._artifact_visible_in_current_session(item)
+        ]
+
+    def assert_artifact_access(self, user_id: str, session_id: str, artifact_id: str) -> dict[str, Any]:
+        artifact = self.database.get_artifact(artifact_id)
+        if not artifact or artifact.get("is_deleted"):
+            raise FileNotFoundError(f"artifact not found: {artifact_id}")
+        owner = str(artifact.get("owner_user_id") or "")
+        artifact_session = str(artifact.get("session_id") or "")
+        if owner and str(user_id or "") and owner != str(user_id or ""):
+            raise PermissionError("artifact belongs to another user")
+        if artifact_session and str(session_id or "") and artifact_session != str(session_id or ""):
+            raise PermissionError("artifact belongs to another session")
+        if artifact_session and self.current_session_id and artifact_session != self.current_session_id:
+            raise PermissionError("artifact is outside the current session")
+        return self._enrich_registered_artifact(artifact)
 
     def _resolve_result_file_for_delete(self, *, artifact_id: str = "", path: str = "") -> Path:
         artifact = self.get_artifact(artifact_id) if artifact_id else None
@@ -862,14 +980,14 @@ class DataManager:
         if artifact_id:
             if self.database.delete_artifact(artifact_id):
                 deleted_artifacts.append(artifact_id)
-        for artifact in self.database.list_artifacts(limit=1000):
+        for artifact in self.database.list_artifacts(session_id=self.current_session_id, limit=1000):
             artifact_path = Path(str(artifact.get("path") or "")).resolve(strict=False)
             if str(artifact_path).lower() in target_keys:
                 artifact_key = str(artifact.get("artifact_id") or "")
                 if artifact_key and self.database.delete_artifact(artifact_key):
                     deleted_artifacts.append(artifact_key)
 
-        for item in self.database.list_catalog():
+        for item in self.database.list_catalog(session_id=self.current_session_id):
             dataset_name = str(item.get("dataset_name") or "")
             dataset_path = Path(str(item.get("path") or "")).resolve(strict=False)
             if dataset_name and str(dataset_path).lower() in target_keys:
@@ -896,6 +1014,59 @@ class DataManager:
             "deleted_files": deleted_files,
             "deleted_artifacts": sorted(set(deleted_artifacts)),
             "deleted_datasets": sorted(set(deleted_datasets)),
+        }
+
+    def cleanup_session_data(self, session_id: str) -> dict[str, Any]:
+        clean_session = str(session_id or "").strip()
+        if not clean_session:
+            return {"ok": False, "session_id": "", "deleted_files": [], "deleted_artifacts": [], "deleted_datasets": [], "errors": ["missing session_id"]}
+
+        deleted_artifacts: list[str] = []
+        deleted_datasets: list[str] = []
+        errors: list[str] = []
+
+        for artifact in self.database.list_artifacts(session_id=clean_session, include_deleted=True, limit=10000):
+            artifact_id = str(artifact.get("artifact_id") or "")
+            if artifact_id and self.database.delete_artifact(artifact_id):
+                deleted_artifacts.append(artifact_id)
+
+        for item in self.database.list_catalog(session_id=clean_session):
+            dataset_name = str(item.get("dataset_name") or "")
+            if dataset_name:
+                try:
+                    self.database.drop_dataset(dataset_name)
+                except Exception as exc:
+                    errors.append(f"{dataset_name}: {exc}")
+                self.datasets.pop(dataset_name, None)
+                deleted_datasets.append(dataset_name)
+
+        for name, record in list(self.datasets.items()):
+            if str((record.meta or {}).get("session_id") or "") == clean_session:
+                self.datasets.pop(name, None)
+                if name not in deleted_datasets:
+                    deleted_datasets.append(name)
+
+        root = self.workdir / "sessions" / re.sub(r"[^A-Za-z0-9_.-]+", "_", clean_session)
+        deleted_files: list[str] = []
+        if root.exists():
+            for path in sorted(root.rglob("*"), reverse=True):
+                if path.is_file():
+                    deleted_files.append(str(path))
+            try:
+                shutil.rmtree(root)
+            except Exception as exc:
+                errors.append(f"{root}: {exc}")
+
+        if self.current_session_id == clean_session:
+            self.set_runtime_scope(self.current_user_id, "")
+
+        return {
+            "ok": not errors,
+            "session_id": clean_session,
+            "deleted_files": deleted_files,
+            "deleted_artifacts": sorted(set(deleted_artifacts)),
+            "deleted_datasets": sorted(set(deleted_datasets)),
+            "errors": errors,
         }
 
     def _enrich_registered_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:

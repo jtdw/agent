@@ -175,6 +175,20 @@ class NextDataProcessingMigrationTests(unittest.TestCase):
             self.assertEqual(result["tile_scheme"], "srtm_utm_5deg")
             self.assertEqual(result["tile_ids"], ["utm_srtm_57_06"])
 
+    def test_dem_tile_plan_dataset_id_overrides_default_product_key(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+
+            result = plan_gscloud_dem_tiles(
+                service.manager,
+                region="Chengdu",
+                output_name="chengdu_srtm90_tiles",
+                dataset_id="306",
+            )
+
+            self.assertEqual(result["product_key"], "srtmdemutm_90m")
+            self.assertEqual(result["tile_scheme"], "srtm_utm_5deg")
+
     def test_gcp_prompt_builds_and_executes_uncertainty_workflow_from_recent_model(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))

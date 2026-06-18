@@ -138,7 +138,7 @@ const toneStyles: Record<ProductTaskTone, string> = {
 function StatusBadge({ status }: { status?: string }) {
   const item = normalizeTaskStatus(status);
   return (
-    <span className={cn('inline-flex items-center rounded-md border px-2 py-1 text-xs font-semibold', toneStyles[item.tone])}>
+    <span className={cn('inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-bold shadow-sm', toneStyles[item.tone])}>
       {item.label}
     </span>
   );
@@ -146,18 +146,20 @@ function StatusBadge({ status }: { status?: string }) {
 
 function ProgressBar({ value = 0, tone = 'running' }: { value?: number; tone?: ProductTaskTone }) {
   const pct = formatPercent(value);
-  const color = tone === 'failed' ? 'bg-rose-500' : tone === 'succeeded' ? 'bg-emerald-500' : tone === 'blocked' ? 'bg-orange-500' : 'bg-blue-600';
+  const color = tone === 'failed' ? 'from-rose-500 to-rose-400' : tone === 'succeeded' ? 'from-emerald-500 to-teal-400' : tone === 'blocked' ? 'from-orange-500 to-amber-400' : 'from-blue-600 to-cyan-400';
   return (
-    <div className="h-2 overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-      <div className={cn('h-full rounded-full transition-all', color)} style={{ width: `${pct}%` }} />
+    <div className="h-2.5 overflow-hidden rounded-full bg-slate-200/80 ring-1 ring-slate-900/5 dark:bg-slate-800 dark:ring-white/5">
+      <div className={cn('h-full rounded-full bg-gradient-to-r transition-all duration-500 ease-out', color)} style={{ width: `${pct}%` }} />
     </div>
   );
 }
 
 function EmptyState({ icon: Icon, title, description, action }: { icon: typeof FileText; title: string; description: string; action?: ReactNode }) {
   return (
-    <div className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-center dark:border-slate-700 dark:bg-slate-900">
-      <Icon className="mx-auto mb-3 text-slate-400" size={28} strokeWidth={1.6} />
+    <div className="rounded-2xl border border-dashed border-slate-300/90 bg-white/80 p-7 text-center shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/70">
+      <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-cyan-50 text-cyan-700 dark:bg-cyan-950/40 dark:text-cyan-300">
+        <Icon size={26} strokeWidth={1.6} />
+      </div>
       <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
       <p className="mx-auto mt-1 max-w-md text-sm leading-6 text-slate-500 dark:text-slate-400">{description}</p>
       {action && <div className="mt-4">{action}</div>}
@@ -167,8 +169,8 @@ function EmptyState({ icon: Icon, title, description, action }: { icon: typeof F
 
 function LoadingState({ label = '正在加载' }: { label?: string }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
-      <Loader2 className="animate-spin text-blue-600" size={16} />
+    <div className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white/85 px-4 py-3 text-sm font-semibold text-slate-600 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300">
+      <Loader2 className="animate-spin text-cyan-600" size={16} />
       {label}
     </div>
   );
@@ -180,7 +182,7 @@ function StateMessage({ tone, children }: { tone: 'success' | 'error' | 'info'; 
     error: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/35 dark:text-rose-200',
     info: 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900/60 dark:bg-blue-950/35 dark:text-blue-200'
   }[tone];
-  return <div className={cn('rounded-lg border px-4 py-3 text-sm leading-6', styles)}>{children}</div>;
+  return <div className={cn('rounded-2xl border px-4 py-3 text-sm font-semibold leading-6 shadow-sm', styles)}>{children}</div>;
 }
 
 function SectionHeader({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
@@ -197,7 +199,7 @@ function SectionHeader({ title, description, action }: { title: string; descript
 
 function Panel({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <section className={cn('rounded-lg border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-slate-900', className)}>
+    <section className={cn('rounded-2xl border border-slate-200/90 bg-white/86 shadow-[0_16px_42px_rgba(15,23,42,.07)] backdrop-blur transition-colors dark:border-slate-800 dark:bg-slate-900/78', className)}>
       {children}
     </section>
   );
@@ -211,7 +213,7 @@ function MetricCard({ label, value, hint, icon: Icon }: { label: string; value: 
           <div className="text-sm font-medium text-slate-500 dark:text-slate-400">{label}</div>
           <div className="mt-2 text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50">{value}</div>
         </div>
-        <div className="grid h-10 w-10 place-items-center rounded-lg bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-200">
+        <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-blue-50 to-cyan-50 text-blue-700 shadow-inner dark:from-blue-950/45 dark:to-cyan-950/30 dark:text-cyan-200">
           <Icon size={19} strokeWidth={1.7} />
         </div>
       </div>
@@ -272,10 +274,17 @@ export function ProductConsole({
 
   const refresh = useCallback(async () => {
     setError('');
+    if (!userId) {
+      setDashboard(null);
+      setJobs([]);
+      setSelectedJobId('');
+      setLoading(false);
+      return;
+    }
     try {
       const [dashboardData, jobsData] = await Promise.all([
         api.dashboard(userId),
-        userId ? api.jobs(userId) : Promise.resolve({ jobs: [] as DownloadJob[] })
+        api.jobs(userId)
       ]);
       setDashboard(dashboardData);
       setJobs(jobsData.jobs || []);
@@ -566,7 +575,7 @@ export function ProductConsole({
 
   const renderOverview = () => (
     <div className="space-y-6">
-      <section className="rounded-lg border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <section className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white/88 p-6 shadow-[0_18px_48px_rgba(15,23,42,.08)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78">
         <div className="grid gap-6 lg:grid-cols-[1.35fr_1fr]">
           <div>
             <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50">GIS Agent 智能体管理后台</h1>
@@ -585,7 +594,7 @@ export function ProductConsole({
               </button>
             </div>
           </div>
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
+          <div className="rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-50 to-cyan-50/60 p-4 shadow-inner dark:border-slate-800 dark:from-slate-950 dark:to-cyan-950/20">
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-semibold text-slate-700 dark:text-slate-200">当前运行状态</div>
               <StatusBadge status={dashboard?.runtime_status?.phase ? String(dashboard.runtime_status.phase) : summary.active ? 'running' : 'completed'} />
@@ -603,7 +612,7 @@ export function ProductConsole({
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {capabilityCards.map(({ title, description, icon: Icon }) => (
           <Panel key={title} className="p-4">
-            <div className="mb-4 grid h-10 w-10 place-items-center rounded-lg bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+            <div className="mb-4 grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-slate-100 to-cyan-50 text-slate-700 shadow-inner dark:from-slate-800 dark:to-cyan-950/25 dark:text-slate-200">
               <Icon size={19} strokeWidth={1.7} />
             </div>
             <div className="text-sm font-bold text-slate-950 dark:text-slate-50">{title}</div>
@@ -707,7 +716,7 @@ export function ProductConsole({
             ['导出结果', '成功后下载成果文件或打包整个工作区。']
           ].map(([title, desc], index) => (
             <li key={title} className="flex gap-3">
-              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-blue-600 text-xs font-bold text-white">{index + 1}</div>
+              <div className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-blue-600 to-cyan-500 text-xs font-bold text-white shadow-md">{index + 1}</div>
               <div>
                 <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</div>
                 <p className="text-sm leading-6 text-slate-500 dark:text-slate-400">{desc}</p>
@@ -801,7 +810,7 @@ export function ProductConsole({
               <button
                 key={job.job_id}
                 onClick={() => fetchJobLog(job)}
-                className={cn('w-full rounded-lg border p-3 text-left transition hover:border-blue-300 hover:bg-blue-50/60 dark:hover:border-blue-800 dark:hover:bg-blue-950/25', selectedJob?.job_id === job.job_id ? 'border-blue-300 bg-blue-50 dark:border-blue-800 dark:bg-blue-950/35' : 'border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900')}
+                className={cn('w-full rounded-2xl border p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25', selectedJob?.job_id === job.job_id ? 'border-cyan-300 bg-cyan-50/70 ring-4 ring-cyan-100/60 dark:border-cyan-800 dark:bg-cyan-950/35 dark:ring-cyan-950/40' : 'border-slate-200/90 bg-white/86 dark:border-slate-800 dark:bg-slate-900/78')}
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="truncate text-sm font-semibold">{getJobName(job)}</span>
@@ -830,7 +839,7 @@ export function ProductConsole({
               <InfoItem label="场景日志" value={logData.scene_jobs.length} />
               <InfoItem label="审计事件" value={logData.audit_events.length} />
             </div>
-            <div className="rounded-lg border border-slate-200 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 dark:border-slate-800">
+            <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 shadow-inner dark:border-slate-700">
               <div>job_id: {logData.job.job_id}</div>
               <div>status: {logData.job.status || '--'}</div>
               <div>stage: {logData.job.stage || '--'}</div>
@@ -875,7 +884,7 @@ export function ProductConsole({
             {resultPanel.recommendations?.length ? (
               <div className="space-y-2">
                 {resultPanel.recommendations.map((item, index) => (
-                  <div key={`${item}-${index}`} className="rounded-lg bg-blue-50 px-3 py-2 text-sm leading-6 text-blue-800 dark:bg-blue-950/35 dark:text-blue-200">{item}</div>
+                    <div key={`${item}-${index}`} className="rounded-2xl border border-blue-100 bg-blue-50/85 px-3 py-2 text-sm font-semibold leading-6 text-blue-800 shadow-sm dark:border-blue-900/55 dark:bg-blue-950/35 dark:text-blue-200">{item}</div>
                 ))}
               </div>
             ) : <p className="text-sm text-slate-500 dark:text-slate-400">暂无建议。</p>}
@@ -892,7 +901,7 @@ export function ProductConsole({
               {panelFiles.length > 0 && (
                 <div className="space-y-2">
                   {panelFiles.map((file) => (
-                    <button key={file.download_url} onClick={() => downloadArtifact(file.download_url || '', file.label || 'result')} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+                    <button key={file.download_url} onClick={() => downloadArtifact(file.download_url || '', file.label || 'result')} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
                       <span className="min-w-0 truncate font-semibold">{file.label || file.path || '结果文件'}</span>
                       <Download className="shrink-0 text-slate-400" size={16} />
                     </button>
@@ -1007,10 +1016,10 @@ export function ProductConsole({
   };
 
   return (
-    <div className="no-drag fixed inset-0 z-20 flex bg-slate-100 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
-      <aside className="hidden w-64 shrink-0 border-r border-slate-200 bg-white px-4 py-5 dark:border-slate-800 dark:bg-slate-900 lg:block">
+    <div className="no-drag fixed inset-0 z-20 flex bg-[radial-gradient(circle_at_18%_10%,rgba(8,199,232,.16),transparent_24%),linear-gradient(135deg,#f8fbff_0%,#eef5fb_52%,#eaf3ff_100%)] text-slate-950 dark:bg-[radial-gradient(circle_at_18%_10%,rgba(8,199,232,.11),transparent_26%),linear-gradient(135deg,#020617_0%,#0f172a_58%,#111827_100%)] dark:text-slate-50">
+      <aside className="hidden w-64 shrink-0 border-r border-slate-200/80 bg-white/82 px-4 py-5 shadow-[12px_0_40px_rgba(15,23,42,.05)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/70 lg:block">
         <div className="mb-7 flex items-center gap-3">
-          <div className="grid h-10 w-10 place-items-center rounded-lg bg-blue-600 text-white">
+          <div className="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-[0_14px_30px_rgba(15,98,254,.26)]">
             <Bot size={20} strokeWidth={1.7} />
           </div>
           <div>
@@ -1025,7 +1034,7 @@ export function ProductConsole({
             <button
               key={id}
               onClick={() => activateNavItem(item)}
-              className={cn('flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold transition', activeTab === id ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-950 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-white')}
+              className={cn('flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-bold transition', activeTab === id ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow-[0_12px_28px_rgba(15,98,254,.22)]' : 'text-slate-600 hover:bg-white/80 hover:text-slate-950 hover:shadow-sm dark:text-slate-300 dark:hover:bg-slate-800/70 dark:hover:text-white')}
             >
               <Icon size={17} strokeWidth={1.7} />
               {label}
@@ -1036,7 +1045,7 @@ export function ProductConsole({
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="shrink-0 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-900/95 sm:px-6">
+        <header className="shrink-0 border-b border-slate-200/80 bg-white/78 px-4 py-3 shadow-[0_12px_36px_rgba(15,23,42,.04)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/72 sm:px-6">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="min-w-0">
               <div className="flex items-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400">
@@ -1063,7 +1072,7 @@ export function ProductConsole({
               <button
                 key={id}
                 onClick={() => activateNavItem(item)}
-                className={cn('inline-flex shrink-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold', activeTab === id ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300')}
+                className={cn('inline-flex shrink-0 items-center gap-2 rounded-xl border px-3 py-2 text-xs font-bold shadow-sm transition', activeTab === id ? 'border-blue-600 bg-gradient-to-r from-blue-600 to-cyan-600 text-white' : 'border-slate-200 bg-white/82 text-slate-600 hover:border-cyan-300 hover:bg-cyan-50/70 dark:border-slate-800 dark:bg-slate-900/78 dark:text-slate-300')}
               >
                 <Icon size={14} /> {label}
               </button>
@@ -1083,7 +1092,7 @@ export function ProductConsole({
 function JobCompactRow({ job, onSelect }: { job: DownloadJob; onSelect: () => void }) {
   const status = normalizeTaskStatus(job.status);
   return (
-    <button onClick={onSelect} className="w-full rounded-lg border border-slate-200 bg-white p-3 text-left transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+    <button onClick={onSelect} className="w-full rounded-2xl border border-slate-200/90 bg-white/86 p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{getJobName(job)}</div>
@@ -1101,7 +1110,7 @@ function JobCompactRow({ job, onSelect }: { job: DownloadJob; onSelect: () => vo
 function JobDetailRow({ job, selected, onSelect, actions }: { job: DownloadJob; selected: boolean; onSelect: () => void; actions: ReactNode }) {
   const status = normalizeTaskStatus(job.status);
   return (
-    <div className={cn('rounded-lg border bg-white p-4 transition dark:bg-slate-900', selected ? 'border-blue-300 ring-2 ring-blue-100 dark:border-blue-800 dark:ring-blue-950' : 'border-slate-200 dark:border-slate-800')}>
+    <div className={cn('rounded-2xl border bg-white/86 p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:bg-slate-900/78', selected ? 'border-cyan-300 ring-4 ring-cyan-100/80 dark:border-cyan-800 dark:ring-cyan-950/45' : 'border-slate-200/90 dark:border-slate-800')}>
       <div className="grid gap-4 xl:grid-cols-[1fr_220px_auto] xl:items-center">
         <button onClick={onSelect} className="min-w-0 text-left">
           <div className="flex flex-wrap items-center gap-2">
@@ -1128,7 +1137,7 @@ function JobDetailRow({ job, selected, onSelect, actions }: { job: DownloadJob; 
 
 function InfoItem({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-slate-800 dark:bg-slate-950">
+    <div className="rounded-2xl border border-slate-200/90 bg-slate-50/84 px-3 py-2 shadow-inner dark:border-slate-800 dark:bg-slate-950/78">
       <div className="text-xs font-medium text-slate-500 dark:text-slate-400">{label}</div>
       <div className="mt-1 min-w-0 break-words text-sm font-semibold text-slate-900 dark:text-slate-100">{value}</div>
     </div>
@@ -1141,7 +1150,7 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
       {artifacts.map((artifact) => {
         const Icon = artifactIcon(artifact.kind);
         return (
-          <div key={artifact.artifactId || artifact.path || artifact.url} className="flex w-full items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-left text-sm transition hover:border-blue-300 hover:bg-blue-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-blue-800 dark:hover:bg-blue-950/25">
+          <div key={artifact.artifactId || artifact.path || artifact.url} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
             <span className="flex min-w-0 items-center gap-3">
               <Icon className="shrink-0 text-slate-400" size={17} />
               <span className="min-w-0 truncate font-semibold">{artifact.label}</span>
@@ -1163,14 +1172,14 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
 
 function LogGroup({ title, items, empty }: { title: string; items: Array<Record<string, unknown>>; empty: string }) {
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+    <div className="rounded-2xl border border-slate-200/90 bg-white/86 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/78">
       <div className="mb-3 text-sm font-bold text-slate-900 dark:text-slate-100">{title}</div>
       {items.length === 0 ? (
         <p className="text-sm text-slate-500 dark:text-slate-400">{empty}</p>
       ) : (
         <div className="space-y-2">
           {items.slice(0, 12).map((item, index) => (
-            <div key={index} className="rounded-lg bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600 dark:bg-slate-950 dark:text-slate-300">
+            <div key={index} className="rounded-xl border border-slate-200/70 bg-slate-50/86 px-3 py-2 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950/78 dark:text-slate-300">
               {Object.entries(item).slice(0, 5).map(([key, value]) => (
                 <span key={key} className="mr-3"><b>{key}</b>: {String(value || '--')}</span>
               ))}

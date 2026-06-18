@@ -18,6 +18,7 @@ from .gscloud_adapter import (
     assert_valid_gscloud_tile_downloads,
     extract_astgtm_tile_id_from_name,
 )
+from .gscloud_download_recovery import recover_gscloud_download_from_error_page
 from .registry import get_source
 
 
@@ -26,7 +27,7 @@ def _now() -> str:
 
 
 def per_tile_download_timeout_ms(timeout_seconds: int) -> int:
-    return min(120, max(30, int(timeout_seconds or 30))) * 1000
+    return min(45, max(30, int(timeout_seconds or 30))) * 1000
 
 
 def normalize_gscloud_tile_id(tile_id: str, *, tile_scheme: str = "astgtm_1deg") -> str:
@@ -378,6 +379,25 @@ def download_gscloud_tiles_by_identifier_search(
     step_records: list[dict[str, Any]] = []
     started_at = _now()
 
+    def _record_download(download, tile_id: str, status: str, attempt: int) -> Path:
+        saved = _save_download(download, target_dir, tile_id)
+        detected = extract_gscloud_tile_id_from_name(saved.name, tile_scheme=tile_scheme)
+        if detected != tile_id:
+            raise RuntimeError(f"下载文件校验失败：目标 {tile_id}，实际 {saved.name}，识别为 {detected or '无法识别'}。")
+        downloaded.append(saved)
+        downloaded_tiles.add(tile_id)
+        step_records.append({"tile_id": tile_id, "status": status, "attempt": attempt, "file": str(saved)})
+        _update_status(
+            status_path,
+            state="IDENTIFIER_SEARCH_DOWNLOADING",
+            message=f"已下载 {len(downloaded_tiles)}/{len(expected)}：{tile_id}",
+            current_tile=tile_id,
+            downloaded_count=len(downloaded_tiles),
+            remaining_count=len(expected) - len(downloaded_tiles),
+            last_download=str(saved),
+        )
+        return saved
+
     _update_status(
         status_path,
         state="IDENTIFIER_SEARCH_DOWNLOADING",
@@ -427,24 +447,22 @@ def download_gscloud_tiles_by_identifier_search(
                         if not clicked:
                             raise RuntimeError("找到目标行，但未找到可点击下载按钮。")
                     download = dl_info.value
-                    saved = _save_download(download, target_dir, tile_id)
-                    detected = extract_gscloud_tile_id_from_name(saved.name, tile_scheme=tile_scheme)
-                    if detected != tile_id:
-                        raise RuntimeError(f"下载文件校验失败：目标 {tile_id}，实际 {saved.name}，识别为 {detected or '无法识别'}。")
-                    downloaded.append(saved)
-                    downloaded_tiles.add(tile_id)
-                    step_records.append({"tile_id": tile_id, "status": "downloaded", "attempt": attempt, "file": str(saved)})
-                    _update_status(
-                        status_path,
-                        state="IDENTIFIER_SEARCH_DOWNLOADING",
-                        message=f"已下载 {len(downloaded_tiles)}/{len(expected)}：{tile_id}",
-                        current_tile=tile_id,
-                        downloaded_count=len(downloaded_tiles),
-                        remaining_count=len(expected) - len(downloaded_tiles),
-                        last_download=str(saved),
-                    )
+                    _record_download(download, tile_id, "downloaded", attempt)
                     break
                 except PlaywrightTimeoutError:
+                    recovered = recover_gscloud_download_from_error_page(
+                        page,
+                        timeout_ms=timeout_ms,
+                        playwright_timeout_error=PlaywrightTimeoutError,
+                    )
+                    if recovered is not None:
+                        try:
+                            _record_download(recovered, tile_id, "downloaded_after_refresh", attempt)
+                            break
+                        except Exception as exc:
+                            tile_errors.append(str(exc))
+                            step_records.append({"tile_id": tile_id, "status": "refresh_recovery_error", "attempt": attempt, "error": str(exc)})
+                            continue
                     tile_errors.append(f"第 {attempt} 次等待下载超时")
                     step_records.append({"tile_id": tile_id, "status": "download_timeout", "attempt": attempt})
                 except Exception as exc:

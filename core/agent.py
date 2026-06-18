@@ -24,7 +24,7 @@ from .llm_config import validate_llm_config
 if TYPE_CHECKING:
     from .data_manager import DataManager
 try:
-    from .gis_tools import build_tools
+    from .tools.registry import build_tools
 except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
     build_tools = None  # type: ignore[assignment]
     _GIS_TOOLS_IMPORT_ERROR = exc
@@ -952,7 +952,7 @@ class GISAgent:
             job_id = job_match.group(1) if job_match else self._resolve_latest_gscloud_job_id(commercial)
             job = commercial.get_job(job_id)
             max_tiles = self._extract_max_tiles(text, default=0)
-            region = "???" if ("??" in text or not job.get("region")) else str(job.get("region") or "???")
+            region = "未知区域" if ("??" in text or not job.get("region")) else str(job.get("region") or "未知区域")
             confirmation = self._direct_confirmation_reply(
                 "start_gscloud_dem_auto_tile_job",
                 text,

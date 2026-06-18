@@ -13,13 +13,14 @@ from ..domestic_sources.downloader import download_direct_url, postprocess_downl
 from ..domestic_sources.gscloud_adapter import (
     GSCLOUD_ASTER_GDEM30_ACCESS_URL,
     GSCLOUD_DEM_DATASETS,
-    auto_download_gscloud_tiles,
     capture_gscloud_downloads,
     gscloud_platform_state_path,
     gscloud_user_state_path,
     open_login_and_save_state,
     parse_tile_ids,
     plan_aster_gdem_tiles,
+    plan_gscloud_dem_tiles,
+    resolve_gscloud_dem_product,
 )
 from ..domestic_sources.registry import get_source
 from ..domestic_sources.gscloud_indexer import (
@@ -27,6 +28,7 @@ from ..domestic_sources.gscloud_indexer import (
     download_gscloud_tiles_by_full_scan,
     query_index_for_tiles,
 )
+from ..domestic_sources.gscloud_stable_downloader import download_gscloud_tiles_by_identifier_search
 from .security import generate_fernet_key
 from .service import CommercialService
 from .login_jobs import list_gscloud_login_jobs, read_gscloud_login_job, start_gscloud_login_process
@@ -462,10 +464,13 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError("未找到可用登录态，请先完成用户或平台账号登录保存 Cookie。")
             commercial._update_job(job_id, status="running", progress=25, stage="auto_filtering_tiles")
-            result = auto_download_gscloud_tiles(
+            _, product = resolve_gscloud_dem_product(dataset_id=dataset_id)
+            result = download_gscloud_tiles_by_identifier_search(
                 manager=manager,
                 tile_ids=ids,
-                dataset_id=dataset_id,
+                dataset_id=str(product.get("dataset_id") or dataset_id),
+                pid=str(product.get("pid") or "1"),
+                tile_scheme=str(product.get("tile_scheme") or "astgtm_1deg"),
                 storage_state_path=state_path,
                 output_name=job.get("output_name") or "gscloud_dem_tiles",
                 timeout_seconds=timeout_seconds,
@@ -602,13 +607,14 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             state_path = commercial.resolve_job_storage_state_path(job_id)
             if not state_path or not Path(state_path).exists():
                 raise RuntimeError("未找到可用登录态，请先完成用户或平台账号登录保存 Cookie。")
-            plan = plan_aster_gdem_tiles(
+            plan = plan_gscloud_dem_tiles(
                 manager=manager,
                 region=region or job.get("region") or "四川省",
                 region_dataset=region_dataset,
                 output_name=(job.get("output_name") or "gscloud_dem") + "_tile_plan",
                 bbox_only=False,
                 save_preview=True,
+                dataset_id=dataset_id,
             )
             ids = list(plan.get("tile_ids") or [])
             if int(max_tiles or 0) > 0:
@@ -616,10 +622,12 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             if not ids:
                 raise RuntimeError("没有计算出可下载分幅。")
             commercial._update_job(job_id, status="running", progress=20, stage="planned_tiles")
-            result = download_gscloud_tiles_by_full_scan(
+            result = download_gscloud_tiles_by_identifier_search(
                 manager=manager,
                 tile_ids=ids,
-                dataset_id=dataset_id,
+                dataset_id=str(plan.get("dataset_id") or dataset_id),
+                pid=str(plan.get("pid") or "1"),
+                tile_scheme=str(plan.get("tile_scheme") or "astgtm_1deg"),
                 storage_state_path=state_path,
                 output_name=job.get("output_name") or f"{region}_gscloud_dem",
                 timeout_seconds=timeout_seconds,

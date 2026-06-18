@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .gis_tools import build_tools
+from .tools.registry import build_tools
+from .tool_context import ToolRuntimeContext
 from .tool_contracts import parse_tool_result, tool_result_error, tool_result_ok
 from .tool_preconditions import validate_output_file_path
 
@@ -332,13 +333,15 @@ def _skip_remaining(steps: list[WorkflowStep], start_index: int, completed: dict
             completed[step.step_id] = step
 
 
-def execute_workflow_plan(manager: Any, plan: dict[str, Any]) -> dict[str, Any]:
+def execute_workflow_plan(manager: Any, plan: dict[str, Any], context: ToolRuntimeContext | None = None) -> dict[str, Any]:
     steps = _workflow_steps(plan)
     if not steps:
         return {"executed": False, "ok": False, "raw_reply": "", "workflow_result": None, "executed_steps": [], "failed_step": ""}
 
     workflow_id = f"workflow_{uuid4().hex[:10]}"
-    tool_map = {tool.name: tool for tool in build_tools(manager)}
+    if context is not None and hasattr(manager, "set_runtime_scope"):
+        manager.set_runtime_scope(context.current_user_id, context.current_session_id)
+    tool_map = {tool.name: tool for tool in build_tools(manager, context=context)}
     completed: dict[str, WorkflowStep] = {}
     final_artifacts: list[dict[str, Any]] = []
     failed_step = ""

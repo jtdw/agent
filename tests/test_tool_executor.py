@@ -16,10 +16,25 @@ from core.conversation_state import ConversationState
 from core.service import GISWorkspaceService
 from core.task_planner import build_task_plan
 from core.tool_contracts import parse_tool_result
-from core.tool_executor import execute_validated_tool_plan
+from core.tool_executor import DEFAULT_DETERMINISTIC_TOOLS, execute_validated_tool_plan
 
 
 class ToolExecutorTests(unittest.TestCase):
+    def test_default_deterministic_tools_cover_common_gis_tasks(self) -> None:
+        expected = {
+            "describe_dataset",
+            "plot_dataset",
+            "vector_clip_by_vector",
+            "table_to_points",
+            "raster_zonal_stats",
+            "extract_raster_values_to_points",
+            "dem_terrain_derivatives",
+            "raster_reproject",
+            "export_dataset",
+        }
+
+        self.assertTrue(expected.issubset(DEFAULT_DETERMINISTIC_TOOLS))
+
     def make_service(self, root: Path) -> GISWorkspaceService:
         settings = Settings(api_key="", workdir=root / "workspace")
         settings.ensure_dirs()
@@ -198,7 +213,7 @@ class ToolExecutorTests(unittest.TestCase):
                     frontend_context={"active_dataset_id": "points", "selected_layer_id": "study_area"},
                 )
 
-            self.assertEqual(result["mode"], "deterministic_tool")
+            self.assertEqual(result["mode"], "deterministic_workflow")
             self.assertIn("points_clipped", service.manager.datasets)
 
 

@@ -292,7 +292,6 @@ export function ChatWorkspace({
           return;
         }
         if (job.status === 'failed' || job.status === 'canceled' || job.status === 'cancelled') {
-          setMessages((current) => [...current, { role: 'assistant', content: job.error_message || '下载任务未完成。', meta: { reason: 'download_failed' } }]);
           return;
         }
       } catch {
@@ -692,7 +691,7 @@ export function ChatWorkspace({
   const currentSession = sessions.find((session) => session.session_id === currentSessionId);
   const workspaceBody = (
     <>
-        <header data-testid="chat-conversation-header" className={cn('relative border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900', isPage ? 'flex min-h-14 items-center gap-3 px-4 lg:col-start-2 lg:row-start-1' : 'flex flex-col gap-2 px-3 py-3')}>
+        <header data-testid="chat-conversation-header" className={cn('relative border-b border-slate-200/80 bg-white/82 shadow-[0_10px_30px_rgba(15,23,42,.04)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/78', isPage ? 'flex min-h-14 items-center gap-3 px-4 lg:col-start-2 lg:row-start-1' : 'flex flex-col gap-2 px-3 py-3')}>
           {!isPage ? (
             <>
               <div className="flex min-w-0 items-center gap-2">
@@ -814,12 +813,12 @@ export function ChatWorkspace({
             const target = event.currentTarget;
             stickToBottomRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 96;
           }}
-          className={cn('chat-scroll relative flex-1 space-y-4 overflow-y-auto px-4 pb-24 pt-5 lg:pb-5', isPage && 'min-h-0 bg-white px-6 dark:bg-slate-900 lg:col-start-2 lg:row-start-2')}
+          className={cn('chat-scroll relative flex-1 space-y-4 overflow-y-auto bg-gradient-to-b from-slate-50/35 to-white/35 px-4 pb-24 pt-5 lg:pb-5 dark:from-slate-950/20 dark:to-slate-900/20', isPage && 'min-h-0 px-6 lg:col-start-2 lg:row-start-2')}
         >
           {messages.length === 0 && (
             <div data-testid="chat-empty-state" className="mx-auto flex min-h-full max-w-3xl flex-col justify-center py-8">
               <div className="flex items-center gap-3">
-                <div className="grid h-11 w-11 place-items-center rounded-xl bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-300"><Sparkles size={20} strokeWidth={1.8} /></div>
+                <div className="grid h-11 w-11 place-items-center rounded-2xl bg-gradient-to-br from-blue-50 to-cyan-50 text-blue-600 shadow-inner dark:from-blue-950/50 dark:to-cyan-950/30 dark:text-cyan-300"><Sparkles size={20} strokeWidth={1.8} /></div>
                 <div><h2 className="text-xl font-bold tracking-tight text-slate-950 dark:text-slate-50">今天想处理什么？</h2><p className="mt-1 text-sm text-slate-500 dark:text-slate-400">直接描述目标，我会结合当前工作区完成 GIS 任务。</p></div>
               </div>
               <div className="mt-7 grid gap-3 sm:grid-cols-2">
@@ -843,10 +842,10 @@ export function ChatWorkspace({
               return (
                 <motion.div key={messageKey(m)} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
                   <div className={cn(
-                    'group min-w-0 max-w-[92%] whitespace-pre-wrap break-words rounded-[22px] px-4 py-3 text-sm leading-6 shadow-lg',
-                    isUser && 'bg-gradient-to-br from-ocean to-cyan-glow text-white',
-                    !isUser && !isSystem && 'border border-white/40 bg-white/55 text-slate-700 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/45 dark:text-slate-200',
-                    isSystem && 'border border-emerald-300/30 bg-emerald-400/10 text-emerald-700 backdrop-blur-xl dark:text-emerald-200'
+                    'group min-w-0 max-w-[92%] whitespace-pre-wrap break-words rounded-[22px] px-4 py-3 text-sm leading-6 shadow-[0_14px_32px_rgba(15,23,42,.09)]',
+                    isUser && 'bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-[0_16px_36px_rgba(15,98,254,.22)]',
+                    !isUser && !isSystem && 'border border-slate-200/80 bg-white/78 text-slate-700 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/55 dark:text-slate-200',
+                    isSystem && 'border border-emerald-300/35 bg-emerald-50/80 text-emerald-700 backdrop-blur-xl dark:bg-emerald-950/30 dark:text-emerald-200'
                   )}>
                     {isSystem && <FileUp className="mr-2 inline" size={15} strokeWidth={1.7} />}
                     {isEditing ? (
@@ -894,12 +893,12 @@ export function ChatWorkspace({
               );
             })}
           </AnimatePresence>
-          {thinking && <div className="flex justify-start"><div className="rounded-2xl border border-white/40 bg-white/50 px-4 py-3 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/45"><ThinkingDots /></div></div>}
+          {thinking && <div className="flex justify-start"><div className="rounded-2xl border border-slate-200/80 bg-white/72 px-4 py-3 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/55"><ThinkingDots /></div></div>}
           {error && <div className="rounded-2xl border border-coral/30 bg-coral/10 px-4 py-3 text-sm text-coral">{error}</div>}
         </div>
 
         <div
-          className={cn('shrink-0 border-t border-slate-200 bg-white px-4 pt-4 dark:border-slate-800 dark:bg-slate-900', isPage && 'lg:col-start-2 lg:row-start-3')}
+          className={cn('shrink-0 border-t border-slate-200/80 bg-white/86 px-4 pt-4 shadow-[0_-12px_34px_rgba(15,23,42,.04)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/82', isPage && 'lg:col-start-2 lg:row-start-3')}
           style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
         >
           <div className="mb-2 flex flex-wrap gap-2">
@@ -948,7 +947,7 @@ export function ChatWorkspace({
     return (
       <section
         data-testid="chat-page-workspace"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-[0_18px_50px_rgba(51,65,85,.10)] dark:border-slate-800 dark:bg-slate-900 lg:grid lg:h-[calc(100vh-11rem)] lg:min-h-[620px] lg:grid-cols-[240px_minmax(0,1fr)] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white/82 shadow-[0_22px_60px_rgba(51,65,85,.10)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78 lg:grid lg:h-[calc(100vh-11rem)] lg:min-h-[620px] lg:grid-cols-[240px_minmax(0,1fr)] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
       >
         {workspaceBody}
       </section>

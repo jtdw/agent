@@ -116,6 +116,8 @@ def start_gscloud_login_process(
     env = os.environ.copy()
     # Ensure the project root is importable when launched from desktop/web UI.
     env["PYTHONPATH"] = str(project_root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONIOENCODING", "utf-8")
 
     log_fh = open(log_path, "a", encoding="utf-8")
     creationflags = 0

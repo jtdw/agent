@@ -165,6 +165,49 @@ def resolve_followup(prompt: str, state: Any, dashboard: Any) -> dict[str, Any]:
     selected_model = _as_dict(state_dict.get("selected_model_result"))
     active_task = _as_dict(state_dict.get("active_task"))
     front_context = _as_dict(state_dict.get("frontend_context"))
+    selected_layer = _as_dict(state_dict.get("selected_layer"))
+
+    if _has_any(text, ("当前图层", "这个图层", "该图层")):
+        layer_or_bounds = _frontend_layer_or_bounds_object(state_dict)
+        if layer_or_bounds:
+            return {"resolved": True, "reason": "matched_frontend_selected_layer", "referenced_object": layer_or_bounds}
+
+    if _has_any(text, ("刚才的结果", "刚才生成的结果", "刚才下载的", "上一个结果", "这个结果", "下载刚才生成的结果")):
+        if selected_model and _has_any(text, ("模型", "指标")):
+            return {"resolved": True, "reason": "matched_frontend_selected_model_result", "referenced_object": _frontend_model_object(selected_model, dashboard_dict)}
+        model = _first_model_result(state_dict, dashboard_dict)
+        if model and not _has_any(text, ("下载", "文件", "图", "地图")):
+            return {
+                "resolved": True,
+                "reason": "matched_recent_model_result",
+                "referenced_object": {
+                    "type": "model_result",
+                    "label": str(model.get("model") or model.get("output_prefix") or "模型结果"),
+                    "data": model,
+                },
+            }
+        if selected_artifact:
+            return {"resolved": True, "reason": "matched_frontend_selected_artifact", "referenced_object": _frontend_artifact_object(selected_artifact, dashboard_dict)}
+        artifact = _first_artifact(state_dict, dashboard_dict)
+        if artifact:
+            return {"resolved": True, "reason": "matched_recent_artifact", "referenced_object": _object_from_artifact(artifact)}
+
+    if _has_any(text, ("这个数据", "当前数据", "刚才的数据", "刚才下载的 DEM", "刚才下载的DEM")):
+        active_dataset = _as_dict(state_dict.get("active_dataset"))
+        if active_dataset:
+            return {
+                "resolved": True,
+                "reason": "matched_active_dataset",
+                "referenced_object": {
+                    "type": "dataset",
+                    "label": str(active_dataset.get("name") or active_dataset.get("id") or "当前数据"),
+                    "id": str(active_dataset.get("id") or active_dataset.get("name") or ""),
+                    "data": active_dataset,
+                    "source": "conversation_state",
+                },
+            }
+        if selected_layer:
+            return {"resolved": True, "reason": "matched_frontend_selected_layer", "referenced_object": _frontend_layer_or_bounds_object(state_dict)}
 
     if selected_model and _has_any(text, ("模型效果", "模型结果", "这个模型", "指标", "效果怎么样")):
         return {"resolved": True, "reason": "matched_frontend_selected_model_result", "referenced_object": _frontend_model_object(selected_model, dashboard_dict)}

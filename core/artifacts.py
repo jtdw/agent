@@ -8,6 +8,7 @@ from domain.artifacts.policies import (
     SHAPE_SIDE_EXTS,
     artifact_mime_type,
     assert_artifact_path_allowed,
+    content_disposition_attachment,
     safe_download_filename,
     shapefile_zip_path,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "artifact_meta_url",
     "artifact_mime_type",
     "assert_artifact_path_allowed",
+    "content_disposition_attachment",
     "public_artifact_payload",
     "safe_download_filename",
     "shapefile_zip_path",

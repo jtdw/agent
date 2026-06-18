@@ -26,6 +26,14 @@ REGION_ALIASES: dict[str, list[str]] = {
     "chengdu": ["成都", "成都市", "Chengdu"],
 }
 
+REGION_QUERY_PREFIX_RE = re.compile(
+    r"^(?:帮我|请|给我|为我|下载|获取|准备|预检|裁剪|覆盖|查询|计算|进行|处理|提取|生成|制作)+"
+)
+
+
+def clean_admin_region_query(region: str) -> str:
+    return REGION_QUERY_PREFIX_RE.sub("", str(region or "").strip()).strip()
+
 
 def _shared_workdir(workdir: Path) -> Path:
     path = Path(workdir)
@@ -76,7 +84,7 @@ def _cache_dir(manager: DataManager, archive: Path) -> Path:
 
 
 def _aliases(region: str) -> list[str]:
-    key = str(region or "").strip()
+    key = clean_admin_region_query(region)
     if not key or key in {"当前研究区", "current_region"}:
         return []
     values = REGION_ALIASES.get(key) or REGION_ALIASES.get(key.lower())
@@ -92,17 +100,25 @@ def _aliases(region: str) -> list[str]:
 
 
 def _text_match_mask(gdf: gpd.GeoDataFrame, aliases: list[str]) -> pd.Series:
+    exact_groups = [
+        ["省级", "NAME_1"],
+        ["地级", "NAME_2"],
+        ["地名", "县级", "ENG_NAME", "NAME_3"],
+    ]
+    for group in exact_groups:
+        exact_mask = pd.Series(False, index=gdf.index)
+        for col in group:
+            if col not in gdf.columns:
+                continue
+            values = gdf[col].astype(str)
+            for alias in aliases:
+                exact_mask = exact_mask | values.str.casefold().eq(str(alias).casefold())
+        if bool(exact_mask.any()):
+            return exact_mask
+
     preferred = ["地名", "县级", "地级", "省级", "曾用名", "ENG_NAME", "NAME_3", "NAME_2", "NAME_1"]
     text_candidates = [c for c in gdf.columns if c != "geometry"]
     text_cols = [c for c in preferred if c in text_candidates] + [c for c in text_candidates if c not in preferred]
-    exact_mask = pd.Series(False, index=gdf.index)
-    for col in text_cols:
-        values = gdf[col].astype(str)
-        for alias in aliases:
-            exact_mask = exact_mask | values.str.casefold().eq(str(alias).casefold())
-    if bool(exact_mask.any()):
-        return exact_mask
-
     mask = pd.Series(False, index=gdf.index)
     for col in text_cols:
         values = gdf[col].astype(str)
@@ -150,7 +166,8 @@ def extract_local_admin_boundary(manager: DataManager, region: str) -> tuple[gpd
     converts the matched boundary to EPSG:4326 and stores it in the workspace so
     later tasks can reuse the same dataset by name.
     """
-    aliases = _aliases(region)
+    clean_region = clean_admin_region_query(region)
+    aliases = _aliases(clean_region)
     if not aliases:
         return None, "", ""
 
@@ -174,7 +191,7 @@ def extract_local_admin_boundary(manager: DataManager, region: str) -> tuple[gpd
             if not bool(mask.any()):
                 continue
             selected = gdf.loc[mask].copy()
-            score = _score_candidate(shp, gdf, selected, str(region or ""))
+            score = _score_candidate(shp, gdf, selected, str(clean_region or ""))
             if best is None or score > best[0]:
                 best = (score, shp, selected)
 
@@ -190,11 +207,11 @@ def extract_local_admin_boundary(manager: DataManager, region: str) -> tuple[gpd
     if selected.empty:
         return None, "", ""
 
-    name_base = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "_", str(region or "region")).strip("_") or "region"
+    name_base = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "_", str(clean_region or "region")).strip("_") or "region"
     dataset_name = manager.put_vector(f"{name_base}_boundary", selected, filename=f"{name_base}_boundary.geojson")
     manager.log_operation(
         "从本地行政区划提取边界",
-        f"{region} -> {dataset_name} | source={shp.name} | features={len(selected)}",
+        f"{clean_region} -> {dataset_name} | source={shp.name} | features={len(selected)}",
         "local_library",
     )
     return selected, dataset_name, "local_library_admin_boundary"

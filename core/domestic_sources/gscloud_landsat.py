@@ -8,6 +8,7 @@ from typing import Any
 
 from ..data_manager import DataManager
 from .gscloud_adapter import _ensure_playwright, _postprocess_gscloud_files
+from .gscloud_download_recovery import recover_gscloud_download_from_error_page
 from .gscloud_products import LANDSAT8_OLI_TIRS
 from .gscloud_reliability import find_existing_scene_download, validate_download_artifact
 from .gscloud_scene_table import (
@@ -207,6 +208,13 @@ def _click_row_download(page, row, timeout_ms: int):
                 loc.first.click(timeout=5000)
             return dl_info.value
         except Exception as exc:
+            recovered = recover_gscloud_download_from_error_page(
+                page,
+                timeout_ms=timeout_ms,
+                playwright_timeout_error=type(exc),
+            )
+            if recovered is not None:
+                return recovered
             last_error = exc
             continue
     raise RuntimeError(f"未能定位当前行下载按钮：{last_error}")

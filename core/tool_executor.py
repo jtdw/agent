@@ -2,11 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
-from .gis_tools import build_tools
+from .tools.registry import build_tools
+from .tool_context import ToolRuntimeContext
 from .tool_contracts import parse_tool_result, tool_result_error, tool_result_ok
 
 
-DEFAULT_DETERMINISTIC_TOOLS = {"describe_dataset", "plot_dataset", "vector_clip_by_vector"}
+DEFAULT_DETERMINISTIC_TOOLS = {
+    "describe_dataset",
+    "plot_dataset",
+    "vector_clip_by_vector",
+    "table_to_points",
+    "raster_zonal_stats",
+    "extract_raster_values_to_points",
+    "dem_terrain_derivatives",
+    "raster_reproject",
+    "export_dataset",
+}
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -65,11 +76,13 @@ def _aggregate_result(results: list[dict[str, Any]], executed_tools: list[str]) 
     ).to_json()
 
 
-def execute_validated_tool_plan(manager: Any, plan: dict[str, Any], *, allow_tools: set[str] | list[str] | tuple[str, ...] | None = None) -> dict[str, Any]:
+def execute_validated_tool_plan(manager: Any, plan: dict[str, Any], *, allow_tools: set[str] | list[str] | tuple[str, ...] | None = None, context: ToolRuntimeContext | None = None) -> dict[str, Any]:
     allowed = set(allow_tools or DEFAULT_DETERMINISTIC_TOOLS)
     steps = _plan_steps(plan)
     validated_args = _as_dict(plan.get("validated_tool_args"))
-    tool_map = {tool.name: tool for tool in build_tools(manager)}
+    if context is not None and hasattr(manager, "set_runtime_scope"):
+        manager.set_runtime_scope(context.current_user_id, context.current_session_id)
+    tool_map = {tool.name: tool for tool in build_tools(manager, context=context)}
 
     tool_results: list[dict[str, Any]] = []
     executed_tools: list[str] = []

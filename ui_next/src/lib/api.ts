@@ -309,6 +309,17 @@ export type WorkspaceDashboard = {
   local_library?: LocalLibraryResponse;
 };
 
+const EMPTY_WORKSPACE_DASHBOARD: WorkspaceDashboard = {
+  summary: '',
+  datasets: [],
+  artifacts: [],
+  activity: [],
+  dataset_type_counts: {},
+  runtime_status: {},
+  capability_groups: {},
+  suggestions: []
+};
+
 export type LocalLibraryItem = {
   item_id: string;
   name: string;
@@ -397,6 +408,25 @@ async function multipart<T>(path: string, data: FormData): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export function filenameFromContentDisposition(disposition: string, fallbackName = 'download') {
+  const filenameStar = disposition.match(/filename\*\s*=\s*(?:UTF-8'')?([^;]+)/i);
+  if (filenameStar?.[1]) {
+    const raw = filenameStar[1].trim().replace(/^"|"$/g, '');
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw || fallbackName;
+    }
+  }
+  const filename = disposition.match(/filename\s*=\s*"?([^";]+)"?/i);
+  const raw = filename?.[1]?.trim() || fallbackName;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 async function downloadWithAuth(url: string, fallbackName = 'download') {
   const res = await fetch(`${API_BASE}${url}`, { headers: authHeaders(), credentials: 'include' });
   if (!res.ok) {
@@ -409,8 +439,7 @@ async function downloadWithAuth(url: string, fallbackName = 'download') {
   }
   const blob = await res.blob();
   const disposition = res.headers.get('content-disposition') || '';
-  const match = disposition.match(/filename="?([^";]+)"?/i);
-  const name = decodeURIComponent(match?.[1] || fallbackName);
+  const name = filenameFromContentDisposition(disposition, fallbackName);
   const href = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = href;
@@ -447,6 +476,7 @@ export const api = {
     return request<StationCollection>(`/api/map/stations${q}`);
   },
   async mapLayers(user_id?: string, session_id?: string) {
+    if (!user_id && !session_id) return { layers: [] as ResultMapLayer[] };
     const sp = new URLSearchParams();
     if (user_id) sp.set('user_id', user_id);
     if (session_id) sp.set('session_id', session_id);
@@ -574,6 +604,7 @@ export const api = {
     return multipart<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; upload_summaries?: UploadSummary[]; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/files/upload', fd);
   },
   async dashboard(user_id?: string, session_id?: string) {
+    if (!user_id && !session_id) return EMPTY_WORKSPACE_DASHBOARD;
     const sp = new URLSearchParams();
     if (user_id) sp.set('user_id', user_id);
     if (session_id) sp.set('session_id', session_id);

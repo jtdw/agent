@@ -92,9 +92,18 @@ class SecurityHardeningTests(unittest.TestCase):
                 artifact.parent.mkdir(parents=True, exist_ok=True)
                 artifact.write_bytes(b"png")
 
-                alice_ok = alice.get("/api/files/artifact", params={"user_id": alice_user, "path": "plots/alice_map.png"})
+                alice_service.manager.set_runtime_scope(alice_user, alice_service.current_session_id)
+                registered = alice_service.manager.register_artifact(path=str(artifact), type="image", title="alice map")
+
+                alice_ok = alice.get(
+                    f"/api/artifacts/{registered['artifact_id']}/download",
+                    params={"user_id": alice_user, "session_id": alice_service.current_session_id},
+                )
                 bob_no_user = bob.get("/api/files/artifact", params={"path": "plots/alice_map.png"})
-                bob_claims_alice = bob.get("/api/files/artifact", params={"user_id": alice_user, "path": "plots/alice_map.png"})
+                bob_claims_alice = bob.get(
+                    f"/api/artifacts/{registered['artifact_id']}/download",
+                    params={"user_id": alice_user, "session_id": alice_service.current_session_id},
+                )
 
                 self.assertEqual(alice_ok.status_code, 200)
                 self.assertEqual(bob_no_user.status_code, 404)
@@ -184,7 +193,8 @@ class SecurityHardeningTests(unittest.TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 self.assertFalse((root / "evil.csv").exists())
-                self.assertTrue((service.manager.upload_dir / "evil.csv").exists())
+                uploaded = list(service.manager.upload_dir.glob("*evil.csv"))
+                self.assertEqual(len(uploaded), 1)
             finally:
                 api_server._workspace_services.clear()
                 api_server._workspace_services.update(original_services)

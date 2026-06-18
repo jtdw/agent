@@ -22,6 +22,7 @@ from .gscloud_adapter import (
     assert_valid_gscloud_tile_downloads,
     extract_astgtm_tile_id_from_name,
 )
+from .gscloud_download_recovery import recover_gscloud_download_from_error_page
 from .registry import get_source
 
 
@@ -555,7 +556,33 @@ def _scan_and_download_expected_tiles(
                         missing_preview=sorted(expected_set - downloaded_tiles)[:30],
                     )
                 except PlaywrightTimeoutError:
-                    errors.append(f"{tile_id}: 等待下载超时")
+                    recovered = recover_gscloud_download_from_error_page(
+                        page,
+                        timeout_ms=timeout_ms,
+                        playwright_timeout_error=PlaywrightTimeoutError,
+                    )
+                    if recovered is not None:
+                        try:
+                            saved = _save_download(recovered, target_dir, tile_id)
+                            detected = extract_astgtm_tile_id_from_name(saved.name)
+                            if detected != tile_id:
+                                raise RuntimeError(f"下载文件名校验失败：目标 {tile_id}，实际文件 {saved.name}，识别为 {detected or '无法识别'}。")
+                            downloaded.append(saved)
+                            downloaded_tiles.add(tile_id)
+                            _update_status(
+                                status_path,
+                                state="DOWNLOADING",
+                                message=f"已从下载错误页刷新恢复并下载 {len(downloaded_tiles)}/{len(expected_set)} 个目标分幅。",
+                                pages_scanned=pages_scanned,
+                                found_count=len(found_tiles),
+                                downloaded_count=len(downloaded_tiles),
+                                last_download=str(saved),
+                                missing_preview=sorted(expected_set - downloaded_tiles)[:30],
+                            )
+                        except Exception as exc:
+                            errors.append(f"{tile_id}: {exc}")
+                    else:
+                        errors.append(f"{tile_id}: 等待下载超时")
                 except Exception as exc:
                     errors.append(f"{tile_id}: {exc}")
 

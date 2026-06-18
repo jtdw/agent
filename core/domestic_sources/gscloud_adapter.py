@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from ..admin_boundary import extract_local_admin_boundary
+from ..admin_boundary import clean_admin_region_query, extract_local_admin_boundary
 from ..data_manager import DataManager
 from .base import DomesticDownloadResult, DomesticSource
 from .downloader import find_loadable_file, postprocess_download, safe_extract_zip, safe_name, zip_result_folder
+from .gscloud_download_recovery import recover_gscloud_download_from_error_page
 from .registry import get_source
 
 
@@ -618,7 +619,15 @@ def auto_download_gscloud_tiles(
                 download = dl_info.value
                 downloaded.append(_save_download(download, target_dir, tile_id))
             except PlaywrightTimeoutError:
-                errors.append(f"{tile_id}: 等待下载超时")
+                recovered = recover_gscloud_download_from_error_page(
+                    page,
+                    timeout_ms=timeout_ms,
+                    playwright_timeout_error=PlaywrightTimeoutError,
+                )
+                if recovered is not None:
+                    downloaded.append(_save_download(recovered, target_dir, tile_id))
+                else:
+                    errors.append(f"{tile_id}: 等待下载超时")
             except Exception as exc:
                 errors.append(f"{tile_id}: {exc}")
         if storage_state_path:
@@ -681,12 +690,12 @@ def _format_srtm_utm_tile_id(row: int, strip: int) -> str:
 def resolve_gscloud_dem_product(product_key: str = "", dataset_id: str = "") -> tuple[str, dict[str, Any]]:
     key = str(product_key or "").strip().lower()
     dataset = str(dataset_id or "").strip()
-    if key and key in GSCLOUD_DEM_DATASETS:
-        return key, GSCLOUD_DEM_DATASETS[key]
     if dataset:
         for candidate_key, product in GSCLOUD_DEM_DATASETS.items():
             if str(product.get("dataset_id") or "") == dataset:
                 return candidate_key, product
+    if key and key in GSCLOUD_DEM_DATASETS:
+        return key, GSCLOUD_DEM_DATASETS[key]
     return "aster_gdem_30m", GSCLOUD_DEM_DATASETS["aster_gdem_30m"]
 
 
@@ -721,6 +730,15 @@ def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", regio
     """优先从工作区边界数据集获取区域；找不到时返回 None。"""
     import geopandas as gpd
 
+    region = clean_admin_region_query(region)
+
+    def _is_generated_tile_grid(name: str, gdf: gpd.GeoDataFrame) -> bool:
+        lower_name = str(name or "").lower()
+        if "tile_plan" not in lower_name and not lower_name.endswith("_grid"):
+            return False
+        tile_columns = {"tile_id", "expected_filename", "row", "strip", "lat_floor", "lon_floor"}
+        return bool(tile_columns.intersection({str(col) for col in gdf.columns}))
+
     candidates: list[str] = []
     if region_dataset:
         candidates.append(region_dataset)
@@ -741,6 +759,8 @@ def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", regio
         try:
             gdf = manager.get_vector(name)
             if gdf.empty:
+                continue
+            if _is_generated_tile_grid(name, gdf):
                 continue
             if gdf.crs is None:
                 gdf = gdf.set_crs("EPSG:4326", allow_override=True)

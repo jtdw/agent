@@ -4,6 +4,7 @@ import mimetypes
 import re
 import zipfile
 from pathlib import Path
+from urllib.parse import quote
 
 
 SENSITIVE_EXACT_NAMES = {".env", "workspace.db", "cookies.json", "cookie.json", "storage_state.json"}
@@ -17,6 +18,14 @@ def safe_download_filename(filename: str) -> str:
     clean = re.sub(r"[\r\n]+", "", clean)
     clean = re.sub(r'[<>:"/\\|?*]+', "_", clean).strip(" .")
     return clean[:160] or "artifact"
+
+
+def content_disposition_attachment(filename: str) -> str:
+    clean = safe_download_filename(filename)
+    ascii_name = clean.encode("ascii", errors="ignore").decode("ascii")
+    ascii_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", ascii_name).strip("._") or "artifact"
+    encoded = quote(clean, safe="")
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{encoded}'
 
 
 def artifact_mime_type(path: str | Path, artifact_type: str = "") -> str:

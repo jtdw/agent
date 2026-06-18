@@ -32,7 +32,7 @@ export function MapControls({
           whileHover={{ scale: 1.08, y: -1 }}
           whileTap={{ scale: 0.97 }}
           title={label}
-          className={active ? 'grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow' : 'glass-panel grid h-12 w-12 place-items-center rounded-full text-slate-700 transition dark:text-slate-200'}
+          className={active ? 'grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow ring-1 ring-white/60' : 'glass-panel grid h-12 w-12 place-items-center rounded-2xl text-slate-700 transition hover:text-ocean dark:text-slate-200 dark:hover:text-cyan-glow'}
         >
           <Icon size={20} strokeWidth={1.5} />
         </motion.button>
@@ -42,7 +42,7 @@ export function MapControls({
         whileHover={{ scale: 1.08, y: -1 }}
         whileTap={{ scale: 0.97 }}
         title="主题切换"
-        className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow"
+        className="grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-ocean to-cyan-glow text-white shadow-glow ring-1 ring-white/60"
       >
         {theme === 'dark' ? <Sun size={20} strokeWidth={1.5} /> : <Moon size={20} strokeWidth={1.5} />}
       </motion.button>
