@@ -114,9 +114,12 @@ function MessageSourceBadge({ message }: { message: ChatMessage }) {
 }
 
 function renderInlineMarkdown(text: string) {
-  return String(text || '').split(/(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*)/g).map((part, idx) => {
+  let offset = 0;
+  return String(text || '').split(/(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*)/g).map((part) => {
     const bold = part.match(/^\*{2,3}(.+)\*{2,3}$/);
-    return bold ? <strong key={idx} className="font-black text-inherit">{bold[1]}</strong> : <span key={idx}>{part}</span>;
+    const key = `inline-${offset}-${hashString(part)}`;
+    offset += part.length;
+    return bold ? <strong key={key} className="font-black text-inherit">{bold[1]}</strong> : <span key={key}>{part}</span>;
   });
 }
 
@@ -158,19 +161,22 @@ function mergeStableClientMessageIds(current: ChatMessage[], incoming: ChatMessa
 
 function MarkdownMessage({ content }: { content: string }) {
   const lines = String(content || '').split(/\r?\n/);
+  let offset = 0;
   return (
     <div className="chat-markdown">
-      {lines.map((line, idx) => {
+      {lines.map((line) => {
+        const key = `line-${offset}-${hashString(line)}`;
+        offset += line.length + 1;
         const trimmed = line.trim();
-        if (!trimmed) return <div key={idx} className="h-2" />;
+        if (!trimmed) return <div key={key} className="h-2" />;
         const heading = trimmed.match(/^#{1,6}\s+(.+)$/);
-        if (heading) return <div key={idx} className="chat-md-heading">{renderInlineMarkdown(heading[1])}</div>;
-        if (/^\*{3,}$/.test(trimmed) || /^-{3,}$/.test(trimmed)) return <div key={idx} className="chat-md-rule" />;
+        if (heading) return <div key={key} className="chat-md-heading">{renderInlineMarkdown(heading[1])}</div>;
+        if (/^\*{3,}$/.test(trimmed) || /^-{3,}$/.test(trimmed)) return <div key={key} className="chat-md-rule" />;
         const bullet = trimmed.match(/^[-*]\s+(.+)$/);
-        if (bullet) return <div key={idx} className="chat-md-list"><span>•</span><span>{renderInlineMarkdown(bullet[1])}</span></div>;
+        if (bullet) return <div key={key} className="chat-md-list"><span>•</span><span>{renderInlineMarkdown(bullet[1])}</span></div>;
         const numbered = trimmed.match(/^(\d+)[.)]\s+(.+)$/);
-        if (numbered) return <div key={idx} className="chat-md-list"><span>{numbered[1]}.</span><span>{renderInlineMarkdown(numbered[2])}</span></div>;
-        return <div key={idx}>{renderInlineMarkdown(line)}</div>;
+        if (numbered) return <div key={key} className="chat-md-list"><span>{numbered[1]}.</span><span>{renderInlineMarkdown(numbered[2])}</span></div>;
+        return <div key={key}>{renderInlineMarkdown(line)}</div>;
       })}
     </div>
   );
@@ -203,6 +209,29 @@ export function ChatWorkspace({
   const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
   const [chatModels, setChatModels] = useState<ChatModelState | null>(null);
   const [modelLoading, setModelLoading] = useState(false);
+  const visibleSessions = useMemo(() => {
+    const byId = new Map<string, ChatSession>();
+    sessions.forEach((session) => {
+      const id = String(session.session_id || '').trim();
+      if (id) byId.set(id, session);
+    });
+    return Array.from(byId.values());
+  }, [sessions]);
+  const visibleModels = useMemo(() => {
+    const byId = new Map<string, NonNullable<ChatModelState['models']>[number]>();
+    (chatModels?.models || []).forEach((model) => {
+      const id = String(model.id || '').trim();
+      if (id) byId.set(id, model);
+    });
+    return Array.from(byId.values());
+  }, [chatModels?.models]);
+  const renderMessages = useMemo(() => {
+    const byKey = new Map<string, ChatMessage>();
+    messages.forEach((message) => {
+      byKey.set(messageKey(message), message);
+    });
+    return Array.from(byKey.values());
+  }, [messages]);
   const [modelNotice, setModelNotice] = useState('');
   const [modelError, setModelError] = useState('');
   const [workspaceMentions, setWorkspaceMentions] = useState<WorkspaceMention[]>(() => normalizeWorkspaceMentions(mentionDatasets));
@@ -280,18 +309,20 @@ export function ChatWorkspace({
       if (!mountedRef.current) return;
       try {
         const result = await api.jobs(userId, currentSessionId);
-        const job = result.jobs.find((item) => item.job_id === jobId);
-        if (!job) continue;
-        if ((job.status === 'completed' || job.status === 'success') && !announcedDownloadJobsRef.current.has(jobId)) {
+        const view = result.management_views?.find((item) => item.task_id === jobId);
+        const job = (result.jobs || []).find((item) => item.job_id === jobId);
+        const status = view?.status || job?.status || '';
+        if (!job && !view) continue;
+        if ((status === 'completed' || status === 'success' || status === 'succeeded') && !announcedDownloadJobsRef.current.has(jobId)) {
           announcedDownloadJobsRef.current.add(jobId);
           setMessages((current) => [...current, {
             role: 'assistant',
             content: '下载完成。结果文件已注册，可以直接下载。',
-            meta: { artifacts: job.artifacts || [], reason: 'download_success' }
+            meta: { artifacts: job?.artifacts || view?.artifact_refs || [], reason: 'download_success' }
           }]);
           return;
         }
-        if (job.status === 'failed' || job.status === 'canceled' || job.status === 'cancelled') {
+        if (status === 'failed' || status === 'canceled' || status === 'cancelled') {
           return;
         }
       } catch {
@@ -469,7 +500,7 @@ export function ChatWorkspace({
     try {
       const r = await api.ask(text, userId, currentSessionId, { ...chatContext, session_id: currentSessionId }, controller.signal, taskId);
       if (r.messages) setMessages((current) => mergeStableClientMessageIds(current, normalizeChatMessages(r.messages)));
-      else setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason } }]);
+      else setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason, artifacts: r.artifacts || r.files || [], presentation_result: r.presentation_result, execution_summary: r.execution_summary, user_facing_result: r.user_facing_result } }]);
       if (r.sessions) setSessions(r.sessions);
       if (r.result_panel) onResultPanel?.(r.result_panel);
       const nextSessionId = r.current_session_id || currentSessionId;
@@ -488,6 +519,13 @@ export function ChatWorkspace({
       if (abortRef.current === controller) abortRef.current = null;
       if (activeTaskIdRef.current === taskId) activeTaskIdRef.current = '';
     }
+  };
+
+  const confirmAction = (confirmationPrompt: string, confirmedActionId: string) => {
+    const prompt = confirmationPrompt.trim();
+    const token = confirmedActionId.trim();
+    if (!prompt || !token) return;
+    sendPrompt(`${prompt} confirmed_action_id=${token}`);
   };
 
   const send = () => sendPrompt(input);
@@ -688,7 +726,7 @@ export function ChatWorkspace({
   }), [width]);
 
   const isPage = mode === 'page';
-  const currentSession = sessions.find((session) => session.session_id === currentSessionId);
+  const currentSession = visibleSessions.find((session) => session.session_id === currentSessionId);
   const workspaceBody = (
     <>
         <header data-testid="chat-conversation-header" className={cn('relative border-b border-slate-200/80 bg-white/82 shadow-[0_10px_30px_rgba(15,23,42,.04)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/78', isPage ? 'flex min-h-14 items-center gap-3 px-4 lg:col-start-2 lg:row-start-1' : 'flex flex-col gap-2 px-3 py-3')}>
@@ -704,9 +742,9 @@ export function ChatWorkspace({
                 </button>
               </div>
               <div data-testid="floating-chat-toolbar" className="grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto] gap-2">
-                {sessions.length > 0 ? (
+                {visibleSessions.length > 0 ? (
                   <select value={currentSessionId} onChange={(event) => switchSession(event.target.value)} disabled={thinking || modelLoading} className="chat-compact-select min-w-0">
-                    {sessions.map((session) => <option key={session.session_id} value={session.session_id}>{session.title || '新对话'}</option>)}
+                    {visibleSessions.map((session) => <option key={session.session_id} value={session.session_id}>{session.title || '新对话'}</option>)}
                   </select>
                 ) : (
                   <button onClick={newSession} disabled={thinking || modelLoading || !userId} className="chat-compact-select min-w-0 text-left">新对话</button>
@@ -721,7 +759,7 @@ export function ChatWorkspace({
                     title={chatModels?.selected_model === 'auto' ? '自动选择：根据任务内容选择模型' : chatModels?.selected_model || '自动选择'}
                   >
                     <option value="auto">自动选择</option>
-                    {(chatModels?.models || []).map((model) => (
+                    {visibleModels.map((model) => (
                       <option key={model.id} value={model.id}>{model.id} · {model.capability === 'vision' ? '视觉' : '文本'}</option>
                     ))}
                   </select>
@@ -737,9 +775,9 @@ export function ChatWorkspace({
                 <h1 className="truncate text-sm font-bold text-slate-950 dark:text-slate-50">{currentSession?.title || '新对话'}</h1>
                 <p className="mt-0.5 text-[11px] font-medium text-slate-400">{messages.length} 条消息</p>
               </div>
-              {sessions.length > 0 && (
+              {visibleSessions.length > 0 && (
                 <select value={currentSessionId} onChange={(event) => switchSession(event.target.value)} disabled={thinking || modelLoading} className="chat-compact-select max-w-40 lg:hidden">
-                  {sessions.map((session) => <option key={session.session_id} value={session.session_id}>{session.title || '新对话'}</option>)}
+                  {visibleSessions.map((session) => <option key={session.session_id} value={session.session_id}>{session.title || '新对话'}</option>)}
                 </select>
               )}
               <button data-testid="chat-new-session-compact" onClick={newSession} disabled={thinking || modelLoading || !userId} className="chat-icon-action lg:hidden" title="新建对话"><Plus size={17} /></button>
@@ -753,7 +791,7 @@ export function ChatWorkspace({
                   title={chatModels?.selected_model === 'auto' ? '自动选择：根据任务内容选择模型' : chatModels?.selected_model || '自动选择'}
                 >
                   <option value="auto">自动选择</option>
-                  {(chatModels?.models || []).map((model) => (
+                  {visibleModels.map((model) => (
                     <option key={model.id} value={model.id}>{model.id} · {model.capability === 'vision' ? '视觉' : '文本'}</option>
                   ))}
                 </select>
@@ -784,10 +822,10 @@ export function ChatWorkspace({
               <Plus size={16} strokeWidth={2} /> 新建对话
             </button>
             <div className="mt-5 flex items-center justify-between px-2 text-[11px] font-bold uppercase tracking-[0.08em] text-slate-400">
-              <span>最近对话</span><span>{sessions.length}</span>
+              <span>最近对话</span><span>{visibleSessions.length}</span>
             </div>
             <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
-              {sessions.map((session) => {
+              {visibleSessions.map((session) => {
                 const active = session.session_id === currentSessionId;
                 return (
                   <button key={session.session_id} onClick={() => switchSession(session.session_id)} disabled={thinking || modelLoading} className={cn('chat-session-row group', active && 'is-active')}>
@@ -835,7 +873,7 @@ export function ChatWorkspace({
             </div>
           )}
           <AnimatePresence initial={false}>
-            {messages.map((m, idx) => {
+            {renderMessages.map((m) => {
               const isUser = m.role === 'user';
               const isSystem = m.role === 'system';
               const isEditing = isUser && m.message_id && editingId === m.message_id;
@@ -874,6 +912,7 @@ export function ChatWorkspace({
                           onResume={resumeDownload}
                           onCancel={cancelDownload}
                           onClarification={chooseClarification}
+                          onConfirmAction={confirmAction}
                           sessionId={currentSessionId}
                         />
                         {!isUser && !isSystem && m.meta?.reason === 'error' && lastFailedPrompt && (

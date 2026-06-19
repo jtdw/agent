@@ -13,6 +13,10 @@ def normalize_refresh_attempts(value: Any, default: int = 3, maximum: int = 8) -
 
 
 def is_gscloud_transient_download_error(url: str = "", title: str = "", text: str = "") -> bool:
+    url_text = str(url or "").lower()
+    if "bjdl.gscloud.cn" in url_text and "/sources/download" in url_text:
+        return True
+
     haystack = "\n".join(str(part or "") for part in (url, title, text))
     lowered = haystack.lower()
     if "gscloud.cn" not in lowered:

@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS commercial_users (
 CREATE TABLE IF NOT EXISTS source_credentials (
     credential_id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
+    session_id TEXT,
     source_key TEXT NOT NULL,
     credential_type TEXT NOT NULL DEFAULT 'username_password',
     encrypted_username TEXT,
@@ -171,6 +172,7 @@ COMMERCIAL_USER_MIGRATIONS = {
 
 
 DOWNLOAD_JOB_MIGRATIONS = {
+    "session_id": "ALTER TABLE download_jobs ADD COLUMN session_id TEXT",
     "quota_reserved": "ALTER TABLE download_jobs ADD COLUMN quota_reserved INTEGER NOT NULL DEFAULT 0",
     "retried_from_job_id": "ALTER TABLE download_jobs ADD COLUMN retried_from_job_id TEXT",
     "canceled_at": "ALTER TABLE download_jobs ADD COLUMN canceled_at TEXT",

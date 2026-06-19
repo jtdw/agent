@@ -14,14 +14,14 @@ class ChatSessionResilienceTests(unittest.TestCase):
         settings.ensure_dirs()
         return GISWorkspaceService(settings)
 
-    def test_missing_chat_session_falls_back_to_active_session(self) -> None:
+    def test_missing_chat_session_is_rejected_without_switching_current_session(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             original = service.current_session_id
 
-            recovered = service.use_session_or_current("session_missing")
+            with self.assertRaises(FileNotFoundError):
+                service.use_session_or_current("session_missing")
 
-            self.assertFalse(recovered)
             self.assertEqual(service.current_session_id, original)
             self.assertIn(original, {item["session_id"] for item in service.list_sessions()})
 

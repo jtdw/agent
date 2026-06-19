@@ -8,7 +8,7 @@ import { api, ResultMapLayer, StationCollection, StationPoint, TiandituConfig } 
 import type { ChatContextPayload } from '@/lib/chatContext';
 import { sanitizeFeatureProperties } from '@/lib/chatContext';
 import { cn } from '@/lib/cn';
-import { getOverlayVisibilityPlan, type LayerOpacity, type LayerVisibility } from './mapLayerPolicy';
+import { getOverlayVisibilityPlan, type LayerVisibility } from './mapLayerPolicy';
 import type { MapCommand } from './mapCommands';
 import { drawGeoJson, type DrawPoint, type DrawTool, measurementLabel } from './mapGeometry';
 type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
@@ -183,12 +183,12 @@ function removeStationCircleLayers(map: MapLibreMap) {
   if (map.getSource('station_points')) map.removeSource('station_points');
 }
 
-function setStationMarkerVisibility(map: MapLibreMap, visible: boolean, opacity: number) {
+function setStationMarkerVisibility(map: MapLibreMap, visible: boolean) {
   const markers = (((map as unknown as Record<string, unknown>).__stationMarkers || []) as maplibregl.Marker[]);
   for (const marker of markers) {
     const element = marker.getElement();
     element.style.display = visible ? '' : 'none';
-    element.style.opacity = String(Math.max(0, Math.min(1, opacity)));
+    element.style.opacity = visible ? '1' : '0';
   }
 }
 
@@ -254,10 +254,6 @@ function fitToStations(map: MapLibreMap, collection: StationCollection | null) {
   map.setZoom(8.2);
 }
 
-function setLayerPaintIfPresent(map: MapLibreMap, layer: string, property: string, value: unknown) {
-  if (map.getLayer(layer)) map.setPaintProperty(layer, property, value);
-}
-
 function raiseStationLayers(map: MapLibreMap) {
   for (const layerId of ['station_points_outer', 'station_points_halo', 'station_points_core']) {
     if (!map.getLayer(layerId)) continue;
@@ -269,7 +265,7 @@ function raiseStationLayers(map: MapLibreMap) {
   }
 }
 
-function setDrawLayer(map: MapLibreMap, points: DrawPoint[], tool: DrawTool, opacity: number) {
+function setDrawLayer(map: MapLibreMap, points: DrawPoint[], tool: DrawTool) {
   if (!map.isStyleLoaded()) return;
   const data = drawGeoJson(points, tool);
   const source = map.getSource('draw_features') as GeoJSONSource | undefined;
@@ -287,9 +283,6 @@ function setDrawLayer(map: MapLibreMap, points: DrawPoint[], tool: DrawTool, opa
   if (!map.getLayer('draw_points')) {
     map.addLayer({ id: 'draw_points', type: 'circle', source: 'draw_features', filter: ['==', ['get', 'kind'], 'point'], paint: { 'circle-radius': 6, 'circle-color': '#22D3EE', 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
   }
-  setLayerPaintIfPresent(map, 'draw_polygon', 'fill-opacity', 0.2 * opacity);
-  setLayerPaintIfPresent(map, 'draw_line', 'line-opacity', opacity);
-  setLayerPaintIfPresent(map, 'draw_points', 'circle-opacity', opacity);
 }
 
 function raiseDrawLayers(map: MapLibreMap) {
@@ -366,7 +359,7 @@ function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLaye
   (map as unknown as Record<string, unknown>)[key] = true;
 }
 
-function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, opacity: LayerOpacity, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
+function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
   if (!map.isStyleLoaded()) return;
   const activeIds = new Set<string>();
   layers.forEach((layer, index) => {
@@ -374,7 +367,6 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
     activeIds.add(id);
     const kind = (layer.kind || 'boundary') as keyof LayerVisibility;
     const visible = visibility[kind] ?? true;
-    const layerOpacity = opacity[(layer.kind || 'boundary') as keyof LayerOpacity] ?? 1;
     const color = layerColor(layer.kind || '', index);
 
     if (layer.type === 'raster' && layer.preview_url && layer.bounds?.length === 4) {
@@ -387,7 +379,6 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
       if (!map.getLayer(rasterId)) {
         map.addLayer({ id: rasterId, type: 'raster', source: id, paint: { 'raster-opacity': 0.72, 'raster-fade-duration': 240 } });
       }
-      setLayerPaintIfPresent(map, rasterId, 'raster-opacity', 0.72 * layerOpacity);
       setLayerVisibility(map, [rasterId], visible);
       bindResultQuery(map, rasterId, layer, onChatContextChange);
       return;
@@ -409,9 +400,6 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
     if (!map.getLayer(pointId)) {
       map.addLayer({ id: pointId, type: 'circle', source: id, filter: ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]], paint: { 'circle-radius': 5, 'circle-color': color, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5, 'circle-opacity': 0.9 } });
     }
-    setLayerPaintIfPresent(map, fillId, 'fill-opacity', (layer.kind === 'boundary' ? 0.08 : 0.22) * layerOpacity);
-    setLayerPaintIfPresent(map, lineId, 'line-opacity', 0.82 * layerOpacity);
-    setLayerPaintIfPresent(map, pointId, 'circle-opacity', 0.9 * layerOpacity);
     [fillId, lineId, pointId].forEach((queryLayerId) => bindResultQuery(map, queryLayerId, layer, onChatContextChange));
     setLayerVisibility(map, [fillId, lineId, pointId], visible);
   });
@@ -440,7 +428,6 @@ export function MapStage({
   drawMode,
   setDrawMode,
   layerVisibility,
-  layerOpacity,
   mapCommand,
   onChatContextChange
 }: {
@@ -450,7 +437,6 @@ export function MapStage({
   drawMode: boolean;
   setDrawMode: (value: boolean) => void;
   layerVisibility: LayerVisibility;
-  layerOpacity: LayerOpacity;
   mapCommand?: MapCommand | null;
   onChatContextChange?: (patch: Partial<ChatContextPayload>) => void;
 }) {
@@ -471,15 +457,15 @@ export function MapStage({
     setLayerVisibility(map, plan.stations.layers, plan.stations.visible);
     setLayerVisibility(map, plan.boundary.layers, plan.boundary.visible);
     setLayerVisibility(map, plan.draw.layers, plan.draw.visible);
-    setStationMarkerVisibility(map, plan.stations.visible, layerOpacity.stations);
+    setStationMarkerVisibility(map, plan.stations.visible);
   };
 
   const refreshMapOverlays = (map: MapLibreMap, collection: StationCollection | null, fit: boolean = false) => {
     if (!map.isStyleLoaded()) return;
     try {
-      setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+      setResultMapLayers(map, resultLayers, layerVisibility, onChatContextChange);
       setStationLayer(map, collection?.stations || [], onChatContextChange);
-      setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
+      setDrawLayer(map, drawPoints, drawTool);
       raiseStationLayers(map);
       raiseDrawLayers(map);
       applyOverlayVisibility(map);
@@ -664,7 +650,7 @@ export function MapStage({
       refreshMapOverlaysWhenReady(false);
       return;
     }
-    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+    setResultMapLayers(map, resultLayers, layerVisibility, onChatContextChange);
     setStationLayer(map, stationCollection?.stations || [], onChatContextChange);
     raiseStationLayers(map);
     raiseDrawLayers(map);
@@ -673,7 +659,7 @@ export function MapStage({
     if (resultLayers.length && !hasFitRef.current && fitToResultLayers(map, resultLayers)) {
       hasFitRef.current = true;
     }
-  }, [resultLayers, layerVisibility, layerOpacity, stationCollection]);
+  }, [resultLayers, layerVisibility, stationCollection]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -682,11 +668,11 @@ export function MapStage({
       refreshMapOverlaysWhenReady(false);
       return;
     }
-    setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
+    setDrawLayer(map, drawPoints, drawTool);
     raiseDrawLayers(map);
     applyOverlayVisibility(map);
     publishMapDebugState(map, stationCollection, resultLayers);
-  }, [drawPoints, drawTool, layerOpacity]);
+  }, [drawPoints, drawTool]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -696,13 +682,13 @@ export function MapStage({
       return;
     }
     setStationLayer(map, stationCollection?.stations || [], onChatContextChange);
-    setDrawLayer(map, drawPoints, drawTool, layerOpacity.draw);
+    setDrawLayer(map, drawPoints, drawTool);
     raiseStationLayers(map);
     raiseDrawLayers(map);
     applyOverlayVisibility(map);
-    setResultMapLayers(map, resultLayers, layerVisibility, layerOpacity, onChatContextChange);
+    setResultMapLayers(map, resultLayers, layerVisibility, onChatContextChange);
     publishMapDebugState(map, stationCollection, resultLayers);
-  }, [layerVisibility, layerOpacity]);
+  }, [layerVisibility]);
 
   useEffect(() => {
     const map = mapRef.current;

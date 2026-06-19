@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import re
 from typing import Any
 
 
@@ -74,6 +75,13 @@ _TEMPLATES: tuple[WorkflowTemplate, ...] = (
         ("generate_stage_report",),
         "汇总处理过程、输出和下一步建议。",
     ),
+    WorkflowTemplate(
+        "stm_soil_moisture_xgboost",
+        "STM soil moisture XGBoost workflow",
+        ("stm", "smn-sdr", "ismn", "soil moisture", "xgboost", "station modeling", "土壤水分", "站点建模"),
+        ("run_stm_soil_moisture_xgboost_workflow",),
+        "Convert STM station archives into a training table, sample raster features, and run XGBoost when inputs are ready.",
+    ),
 )
 
 
@@ -96,11 +104,20 @@ def list_workflow_templates() -> list[dict[str, Any]]:
     return [item.to_dict() for item in _TEMPLATES]
 
 
+def _term_matches(text: str, term: str) -> bool:
+    lowered = term.lower()
+    if re.fullmatch(r"[a-z0-9_.-]+", lowered):
+        if lowered in {"shp", "geojson", "tif", "tiff"}:
+            return bool(re.search(rf"(?:^|[^a-z0-9_])(?:[\w.-]+\.{re.escape(lowered)}|{re.escape(lowered)})(?![a-z0-9_])", text))
+        return bool(re.search(rf"(?<![a-z0-9_]){re.escape(lowered)}(?![a-z0-9_])", text))
+    return lowered in text
+
+
 def match_workflow_template(prompt: str) -> dict[str, Any] | None:
     text = str(prompt or "").lower()
     best: tuple[int, int, WorkflowTemplate] | None = None
     for template in _TEMPLATES:
-        hits = [term for term in template.trigger_terms if term.lower() in text]
+        hits = [term for term in template.trigger_terms if _term_matches(text, term)]
         if not hits:
             continue
         score = (len(hits), max(len(term) for term in hits), template)
@@ -189,6 +206,7 @@ def build_executable_workflow(workflow_id: str, params: dict[str, Any] | None = 
         "raster_statistics": ("raster_name",),
         "map_export": ("dataset_name", "output_name"),
         "processing_report": ("report_title",),
+        "stm_soil_moisture_xgboost": (),
     }
     required_params = required.get(workflow_id, ())
     missing = _missing(payload, required_params)
@@ -210,7 +228,7 @@ def build_executable_workflow(workflow_id: str, params: dict[str, Any] | None = 
     elif workflow_id == "upload_raster_profile":
         steps = [
             _step("describe", "describe_dataset", {"dataset_name": payload["dataset_name"]}, expected_outputs=["dataset_summary"]),
-            _step("stats", "raster_basic_stats", {"raster_name": payload["dataset_name"], "output_name": payload.get("output_name", "")}, depends_on=["describe"], expected_outputs=["raster_statistics"]),
+            _step("stats", "raster_basic_stats", {"dataset_name": payload["dataset_name"], "output_name": payload.get("output_name", "")}, depends_on=["describe"], expected_outputs=["raster_statistics"]),
         ]
     elif workflow_id == "vector_clip_vector":
         steps = [
@@ -229,7 +247,7 @@ def build_executable_workflow(workflow_id: str, params: dict[str, Any] | None = 
         ]
     elif workflow_id == "raster_statistics":
         steps = [
-            _step("stats", "raster_basic_stats", {"raster_name": payload["raster_name"], "output_name": payload.get("output_name", "")}, expected_outputs=["raster_statistics"]),
+            _step("stats", "raster_basic_stats", {"dataset_name": payload["raster_name"], "output_name": payload.get("output_name", "")}, expected_outputs=["raster_statistics"]),
         ]
     elif workflow_id == "map_export":
         steps = [
@@ -237,7 +255,34 @@ def build_executable_workflow(workflow_id: str, params: dict[str, Any] | None = 
         ]
     elif workflow_id == "processing_report":
         steps = [
-            _step("report", "generate_stage_report", {"report_title": payload["report_title"], "output_name": payload.get("output_name", "")}, expected_outputs=["report_artifact"]),
+            _step(
+                "report",
+                "generate_stage_report",
+                {
+                    "stage": payload.get("stage") or "proposal",
+                    "topic": payload["report_title"],
+                    "output_prefix": payload.get("output_name") or "stage_pack",
+                },
+                expected_outputs=["report_artifact"],
+            ),
+        ]
+    elif workflow_id == "stm_soil_moisture_xgboost":
+        steps = [
+            _step(
+                "stm_xgb",
+                "run_stm_soil_moisture_xgboost_workflow",
+                {
+                    "archive_path": payload.get("archive_path") or "",
+                    "raster_names": payload.get("raster_names") or "",
+                    "preferred_depth": payload.get("preferred_depth") or "0.050000",
+                    "year": payload.get("year") or "2019",
+                    "output_prefix": payload.get("output_prefix") or "stm_soil_moisture",
+                    "aggregate": payload.get("aggregate") or "daily",
+                    "min_samples": payload.get("min_samples") or 8,
+                    "encode_aspect_circular": payload.get("encode_aspect_circular", True),
+                },
+                expected_outputs=["training_table", "point_layer", "raster_features", "xgboost_model"],
+            ),
         ]
     else:
         steps = []

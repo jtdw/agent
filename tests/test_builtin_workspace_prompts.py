@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
@@ -30,55 +31,70 @@ class BuiltinWorkspacePromptTests(unittest.TestCase):
             ),
         )
 
-    def test_builtin_summary_prompt_returns_workspace_answer_without_model(self) -> None:
+    def ask_with_unavailable_planner(self, service: GISWorkspaceService, prompt: str) -> dict:
+        with mock.patch("core.service.execute_workflow_plan") as workflow_mock:
+            with mock.patch("core.service.execute_validated_tool_plan") as tool_mock:
+                with mock.patch(
+                    "core.service.build_llm_task_plan",
+                    return_value={
+                        "status": "unavailable",
+                        "plan": {"clarification_question": "需要 LLM Planner 生成计划。"},
+                    },
+                ):
+                    result = service.ask(prompt)
+        workflow_mock.assert_not_called()
+        tool_mock.assert_not_called()
+        return result
+
+    def assert_zero_tool_clarification(self, result: dict) -> None:
+        self.assertEqual(result["model"], "conversation-coordinator")
+        self.assertEqual(result["mode"], "clarification")
+        self.assertEqual(result["reason"], "unavailable")
+        self.assertIn("LLM Planner", result["reply"])
+
+    def test_workspace_summary_prompt_does_not_fallback_without_llm_plan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             self.seed_table(service)
 
-            result = service.ask("概括当前工作区数据，并判断哪些数据可直接用于制图、建模或结果分析。")
+            result = self.ask_with_unavailable_planner(
+                service,
+                "概括当前工作区数据，并判断哪些数据可直接用于制图、建模或结果分析。",
+            )
 
-            self.assertEqual(result["model"], "builtin-workspace")
-            self.assertIn("soil_station", result["reply"])
-            self.assertIn("可直接用于制图", result["reply"])
-            self.assertIn("可用于建模", result["reply"])
+            self.assert_zero_tool_clarification(result)
 
-    def test_builtin_field_check_prompt_reports_columns_coordinates_time_and_missing_values(self) -> None:
+    def test_field_check_prompt_does_not_execute_tool_without_llm_plan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             self.seed_table(service)
 
-            result = service.ask("检查当前上传数据的字段、坐标、时间和缺失值，给出下一步处理计划。")
+            result = self.ask_with_unavailable_planner(
+                service,
+                "检查当前上传数据的字段、坐标、时间和缺失值，给出下一步处理计划。",
+            )
 
-            self.assertEqual(result["model"], "conversation-coordinator")
-            self.assertEqual(result["mode"], "deterministic_tool")
-            self.assertIn("字段", result["reply"])
-            self.assertIn("longitude", result["reply"])
-            self.assertIn("latitude", result["reply"])
-            self.assertIn("time", result["reply"])
-            self.assertIn("缺失值", result["reply"])
-            self.assertIn("下一步", result["reply"])
+            self.assert_zero_tool_clarification(result)
 
-    def test_builtin_download_readiness_prompt_reports_available_context(self) -> None:
+    def test_download_readiness_prompt_does_not_trigger_keyword_download_without_llm_plan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             self.seed_table(service)
 
-            result = service.ask("根据当前工作区数据，检查是否可以下载 DEM、Sentinel-2 或土壤水分相关数据。")
+            result = self.ask_with_unavailable_planner(
+                service,
+                "根据当前工作区数据，检查是否可以下载 DEM、Sentinel-2 或土壤水分相关数据。",
+            )
 
-            self.assertEqual(result["model"], "builtin-workspace")
-            self.assertIn("下载准备", result["reply"])
-            self.assertIn("soil_station", result["reply"])
-            self.assertIn("下一步", result["reply"])
+            self.assert_zero_tool_clarification(result)
 
-    def test_builtin_capability_prompt_is_non_model_answer(self) -> None:
+    def test_capability_prompt_does_not_bypass_planner(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
 
-            result = service.ask("你能做什么？")
+            result = self.ask_with_unavailable_planner(service, "你能做什么？")
 
-            self.assertEqual(result["model"], "builtin-workspace")
-            self.assertIn("数据检查", result["reply"])
-            self.assertIn("制图", result["reply"])
+            self.assert_zero_tool_clarification(result)
 
 
 if __name__ == "__main__":

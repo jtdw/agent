@@ -10,6 +10,7 @@ from core.tools.common_helpers import (
     RandomForestRegressor,
     SimpleImputer,
     TensorDataset,
+    XGBRegressor,
     _FusionLSTM,
     _append_spatial_coordinates,
     _artifact_safe_name,

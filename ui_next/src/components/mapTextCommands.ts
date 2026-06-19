@@ -13,6 +13,7 @@ function hasAny(text: string, values: string[]) {
 export function parseMapTextCommand(input: string): ParsedMapTextCommand | null {
   const text = input.trim().toLowerCase();
   if (!text) return null;
+  if (hasAny(text, ['xgboost', 'xgb', '@{', 'target_col', 'feature_cols', 'spatial_block'])) return null;
   if (hasAny(text, ['放大', 'zoom in'])) return { kind: 'map', command: 'zoomIn', reply: '已放大地图。' };
   if (hasAny(text, ['缩小', 'zoom out'])) return { kind: 'map', command: 'zoomOut', reply: '已缩小地图。' };
   if (hasAny(text, ['定位', '回到研究区', '站点区域', 'locate'])) return { kind: 'map', command: 'locate', reply: '已定位到可用区域。' };

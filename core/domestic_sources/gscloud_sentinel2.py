@@ -10,7 +10,7 @@ from .gscloud_adapter import _ensure_playwright, _postprocess_gscloud_files
 from .gscloud_modnd1d import _click_row_download, _row_cells, _safe_float, _try_select_data_available
 from .gscloud_products import SENTINEL2_MSI
 from .gscloud_reliability import find_existing_scene_download, validate_download_artifact
-from .gscloud_scene_table import find_scene_row_by_id, get_scene_table_rows, goto_scene_page, scan_scene_table_pages, select_scene_records, update_scene_status
+from .gscloud_scene_table import find_scene_row_by_id, get_scene_table_rows, goto_scene_page, scan_scene_table_pages, search_scene_row_by_id, select_scene_records, update_scene_status
 from .registry import get_source
 
 
@@ -151,7 +151,18 @@ def download_sentinel2_msi_scenes(
                 )
                 row = find_scene_row_by_id(get_scene_table_rows(page), item["scene_id"])
                 if row is None:
-                    raise RuntimeError(f"已选中 {item['scene_id']}，但在第 {item.get('page_no')} 页未能重新定位该记录。")
+                    update_scene_status(
+                        status_path,
+                        state="DOWNLOADING",
+                        pages_scanned=pages_scanned,
+                        selected_count=len(selected),
+                        downloaded_count=len(downloaded),
+                        current_scene=item["scene_id"],
+                        message=f"第 {item.get('page_no')} 页未重新定位到 {item['scene_id']}，正在改用数据标识搜索。",
+                    )
+                    row = search_scene_row_by_id(page, item["scene_id"], parse_row=_parse_sentinel2_row)
+                if row is None:
+                    raise RuntimeError(f"已选中 {item['scene_id']}，但按第 {item.get('page_no')} 页和数据标识搜索都未能重新定位该记录。")
                 try:
                     download = _click_row_download(page, row, timeout_ms)
                 except PlaywrightTimeoutError as exc:

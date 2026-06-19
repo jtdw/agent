@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 
 import geopandas as gpd
@@ -33,6 +34,62 @@ def _write_tile(path: Path, west: float, north: float, value: int) -> None:
 
 
 class RasterPostprocessTests(unittest.TestCase):
+    def test_duplicate_raster_dataset_entries_are_deduplicated_before_clipping(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+            raw_dir = manager.temp_dir / "duplicate_raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            source = raw_dir / "MODND1D.20160517.CN.NDVI.V2.TIF"
+            _write_tile(source, west=0, north=2, value=100)
+            copied_a = raw_dir / "11111111111111111111111111111111_MODND1D.20160517.CN.NDVI.V2.tif"
+            copied_b = raw_dir / "22222222222222222222222222222222_MODND1D.20160517.CN.NDVI.V2.tif"
+            shutil.copy2(source, copied_a)
+            shutil.copy2(source, copied_b)
+            first = manager.put_raster_path("ndvi_first", copied_a)
+            second = manager.put_raster_path("ndvi_second", copied_b)
+            boundary = gpd.GeoDataFrame({"name": ["study_area"]}, geometry=[box(0, 0, 1, 2)], crs="EPSG:4326")
+            boundary_name = manager.put_vector("study_area_boundary", boundary)
+
+            result = standardize_raster_download_result(
+                manager,
+                {"dataset_names": [first, second]},
+                output_name="study_area_ndvi",
+                clip_vector=boundary_name,
+            )
+
+            self.assertEqual(result["raster_standardization"]["action"], "single_raster_clipped")
+            self.assertEqual(result["raster_standardization"]["source_dataset"], first)
+            with rasterio.open(result["final_output_path"]) as src:
+                self.assertEqual(src.width, 1)
+                self.assertEqual(src.height, 2)
+
+    def test_single_raster_is_clipped_when_clip_vector_is_available(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+            raw_dir = manager.temp_dir / "single_raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            source = raw_dir / "MODND1D.20160517.CN.NDVI.V2.TIF"
+            _write_tile(source, west=0, north=2, value=100)
+            boundary = gpd.GeoDataFrame({"name": ["study_area"]}, geometry=[box(0, 0, 1, 2)], crs="EPSG:4326")
+            boundary_name = manager.put_vector("study_area_boundary", boundary)
+
+            result = standardize_raster_download_result(
+                manager,
+                {"downloads": [str(source)]},
+                output_name="study_area_ndvi",
+                clip_vector=boundary_name,
+            )
+
+            final_path = Path(result["final_output_path"])
+            self.assertTrue(final_path.exists())
+            self.assertNotEqual(final_path.resolve(), source.resolve())
+            self.assertEqual(result["raster_standardization"]["action"], "single_raster_clipped")
+            self.assertEqual(result["raster_standardization"]["clip_vector"], boundary_name)
+            self.assertTrue(Path(result["zip_path"]).exists())
+            with rasterio.open(final_path) as src:
+                self.assertEqual(src.width, 1)
+                self.assertEqual(src.height, 2)
+
     def test_mosaics_adjacent_tiles_clips_to_boundary_and_registers_final_raster(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             manager = DataManager(Path(tmp))

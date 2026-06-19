@@ -28,7 +28,7 @@ from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
 from core.data_manager import DataManager
 from core.model_results import generate_model_result_id
-from core.tool_contracts import ArtifactInfo, ToolResult, tool_result_error, tool_result_ok
+from core.tool_contracts import ToolResult, tool_result_error, tool_result_ok
 
 from .raster_stack import build_raster_stack, stack_training_frame, write_prediction_raster
 from .spatial_features import extract_raster_features, parse_name_list
@@ -54,19 +54,31 @@ def _map_layer_id(dataset_name: str) -> str:
     return f"dataset_{clean or 'layer'}"
 
 
-def _artifact(path: Path, type_: str, title: str, *, dataset_name: str = "", meta: dict[str, Any] | None = None) -> ArtifactInfo:
+def _artifact(path: Path, type_: str, title: str, *, dataset_name: str = "", meta: dict[str, Any] | None = None) -> dict[str, Any]:
     merged_meta = dict(meta or {})
     if dataset_name:
         merged_meta.update({"dataset_name": dataset_name, "map_ready": type_ in {"geojson", "raster"}, "map_layer_id": _map_layer_id(dataset_name)})
-    return ArtifactInfo(
-        artifact_id=f"artifact_{uuid4().hex[:10]}",
-        path=str(path),
-        type=type_,
-        title=title,
-        quality_status="generated",
-        preview_available=type_ in {"geojson", "raster", "png"},
-        meta=merged_meta,
-    )
+    mime_type = {
+        "csv": "text/csv",
+        "geojson": "application/geo+json",
+        "metrics": "text/csv",
+        "feature_importance": "text/csv",
+        "model": "application/octet-stream",
+        "summary": "application/json",
+        "raster": "image/tiff",
+        "png": "image/png",
+    }.get(type_, "")
+    return {
+        "artifact_id": f"artifact_{uuid4().hex[:10]}",
+        "path": str(path),
+        "type": type_,
+        "title": title,
+        "quality_status": "generated",
+        "preview_available": type_ in {"geojson", "raster", "png"},
+        "mime_type": mime_type,
+        "source_tool": "generic_xgboost_workflow",
+        "meta": merged_meta,
+    }
 
 
 def _json_safe(value: Any) -> Any:
@@ -378,7 +390,7 @@ def _fit_table_model(
         metrics_dataset=metrics_dataset,
         metrics_path=str(Path(manager.get(metrics_dataset).path)),
         artifact_ids=[],
-        artifacts=[item.to_dict() for item in artifacts],
+        artifacts=artifacts,
         metrics=_json_safe(metrics),
         diagnostics=_json_safe(diagnostics),
     )
@@ -392,14 +404,14 @@ def _fit_table_model(
         "metrics_dataset": metrics_dataset,
         "importance_dataset": importance_dataset,
         "map_layer_id": _map_layer_id(result_dataset) if gdf is not None else "",
-        "generated_files": [str(Path(item.path)) for item in artifacts],
+        "generated_files": [str(Path(item["path"])) for item in artifacts],
     }
     return tool_result_ok(
         "generic_xgboost_workflow",
         task_id=task_id,
         inputs=inputs,
         outputs=outputs,
-        artifacts=[item.to_dict() for item in artifacts],
+        artifacts=artifacts,
         summary=f"通用 XGBoost {model_type} 已完成，目标变量 {target_col}，样本量 {len(work)}。",
         diagnostics=_json_safe(diagnostics),
     )
@@ -516,9 +528,9 @@ def run_generic_xgboost_workflow(
                 },
             )
             raster_artifact = _artifact(prediction_path, "raster", f"{output}_prediction.tif", dataset_name=raster_dataset, meta={"layer_kind": "prediction"})
-            manager.register_artifact(**raster_artifact.to_dict())
+            manager.register_artifact(**raster_artifact)
             result.outputs.update({"result_dataset": raster_dataset, "map_layer_id": _map_layer_id(raster_dataset)})
-            result.artifacts.insert(0, raster_artifact.to_dict())
+            result.artifacts.insert(0, raster_artifact)
             result.diagnostics["features"] = stack.feature_names
             return result
         if mode_norm == "sample_raster" or (mode_norm == "auto" and raster_list and (sample_dataset_name or dataset_name)):

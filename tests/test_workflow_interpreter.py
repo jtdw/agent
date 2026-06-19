@@ -139,10 +139,11 @@ class WorkflowInterpreterTests(unittest.TestCase):
 
         reply = interpret_result("这个流程做了什么", {"intent": "result_analysis"}, {}, json.dumps(workflow, ensure_ascii=False), {"active_dataset": {"name": "points"}}, {})
 
-        self.assertIn("逐步解释", reply)
-        self.assertIn("check_dataset", reply)
-        self.assertIn("clip_vector", reply)
-        self.assertIn("generate_map", reply)
+        self.assertIn("canonical", reply.lower())
+        self.assertNotIn("结果解读", reply)
+        self.assertNotIn("推荐查看", reply)
+        self.assertNotIn("input:", reply)
+        self.assertNotIn("output:", reply)
 
     def test_result_interpreter_failure_followup_locates_failed_step(self) -> None:
         workflow = self.successful_clip_map_workflow()
@@ -154,8 +155,9 @@ class WorkflowInterpreterTests(unittest.TestCase):
 
         reply = interpret_result("为什么失败", {"intent": "troubleshooting"}, {}, json.dumps(workflow, ensure_ascii=False), {"active_dataset": {"name": "points"}}, {})
 
-        self.assertIn("失败步骤: generate_map", reply)
-        self.assertIn("FIELD_NOT_FOUND", reply)
+        self.assertIn("canonical", reply.lower())
+        self.assertNotIn("失败步骤: generate_map", reply)
+        self.assertNotIn("field pop_density was not found", reply)
         self.assertIn("为什么", "为什么失败")
 
 

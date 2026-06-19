@@ -19,6 +19,7 @@ from .gscloud_scene_table import (
     get_scene_table_rows,
     goto_scene_page,
     scan_scene_table_pages,
+    search_scene_row_by_id,
     update_scene_status,
 )
 from .registry import get_source
@@ -311,7 +312,18 @@ def download_landsat8_oli_tirs_scenes(
                 )
                 row = find_scene_row_by_id(get_scene_table_rows(page), item["scene_id"])
                 if row is None:
-                    raise RuntimeError(f"已选中 {item['scene_id']}，但在第 {item.get('page_no')} 页未能重新定位该记录。")
+                    update_scene_status(
+                        status_path,
+                        state="DOWNLOADING",
+                        pages_scanned=pages_scanned,
+                        selected_count=len(selected),
+                        downloaded_count=len(downloaded),
+                        current_scene=item["scene_id"],
+                        message=f"第 {item.get('page_no')} 页未重新定位到 {item['scene_id']}，正在改用数据标识搜索。",
+                    )
+                    row = search_scene_row_by_id(page, item["scene_id"], parse_row=_parse_landsat_row)
+                if row is None:
+                    raise RuntimeError(f"已选中 {item['scene_id']}，但按第 {item.get('page_no')} 页和数据标识搜索都未能重新定位该记录。")
                 try:
                     download = _click_row_download(page, row, timeout_ms)
                 except PlaywrightTimeoutError as exc:

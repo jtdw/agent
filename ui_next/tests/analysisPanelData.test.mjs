@@ -65,6 +65,54 @@ const boundModelView = analysis.buildAnalysisPanelView({
 });
 assert.equal(boundModelView.bestModel?.modelResultId, 'model_result_xgb_001');
 
+const genericModelView = analysis.buildAnalysisPanelView({
+  model_results: [
+    {
+      model_result_id: 'model_result_generic_xgb_001',
+      model: 'generic_xgboost',
+      metrics_dataset: 'gxgb_metrics',
+      metrics: { R2: 0.81, RMSE: 0.12, MAE: 0.07 },
+      artifacts: [
+        { artifact_id: 'gxgb_prediction', name: 'gxgb_prediction.geojson', path: 'derived/gxgb_prediction.geojson', download_url: '/gxgb_prediction.geojson', type: 'geojson', meta: { map_ready: true } },
+        { artifact_id: 'gxgb_importance', name: 'gxgb_feature_importance.csv', path: 'derived/gxgb_feature_importance.csv', download_url: '/gxgb_feature_importance.csv', type: 'feature_importance' }
+      ]
+    }
+  ],
+  artifacts: []
+});
+assert.equal(genericModelView.bestModel?.modelResultId, 'model_result_generic_xgb_001');
+assert.equal(genericModelView.downloads.length, 2);
+assert.equal(genericModelView.downloads[0].artifactId, 'gxgb_prediction');
+
+const gcpView = analysis.buildAnalysisPanelView({
+  model_results: [
+    {
+      model_result_id: 'model_result_gcp_001',
+      model: 'GCP',
+      metrics_dataset: 'xgb_sm_demo_gcp_metrics',
+      metrics: {
+        target_coverage: 0.9,
+        empirical_coverage: 0.875,
+        mean_interval_width: 0.12,
+        interval_score: 0.35
+      },
+      artifacts: [
+        { artifact_id: 'gcp_png', name: 'xgb_sm_demo_gcp_coverage.png', path: 'plots/xgb_sm_demo_gcp_coverage.png', download_url: '/gcp_coverage.png', type: 'image' },
+        { artifact_id: 'gcp_report', name: 'xgb_sm_demo_gcp_report.md', path: 'derived/xgb_sm_demo_gcp_report.md', download_url: '/gcp_report.md', type: 'report' }
+      ]
+    }
+  ],
+  artifacts: []
+});
+assert.deepEqual(gcpView.cards.map((card) => [card.label, card.value]), [
+  ['Target Coverage', '0.900'],
+  ['Empirical Coverage', '0.875'],
+  ['Mean Width', '0.120'],
+  ['Interval Score', '0.350']
+]);
+assert.equal(gcpView.downloads.length, 2);
+assert.equal(gcpView.downloads[0].kind, 'chart');
+
 const empty = analysis.buildAnalysisPanelView({ artifacts: [], latest_pipeline: null, analysis: {} });
 assert.equal(empty.hasResults, false);
 assert.equal(empty.cards.length, 0);

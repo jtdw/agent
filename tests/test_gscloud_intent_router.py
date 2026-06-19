@@ -19,18 +19,18 @@ class GSCloudIntentRouterTests(unittest.TestCase):
         self.assertEqual(route.product_key, "mod021km_1km_surface_reflectance")
         self.assertEqual(route.resource_type, "mod021km_surface_reflectance")
 
-    def test_routes_short_evi_5day_request(self):
-        route = route_gscloud_download_intent("下载五天evi")
+    def test_routes_short_evi_10day_request(self):
+        route = route_gscloud_download_intent("下载旬合成evi")
 
         self.assertEqual(route.kind, "matched")
-        self.assertEqual(route.product_key, "modev1f_china_250m_evi_5day")
-        self.assertEqual(route.resource_type, "modev1f_evi_5day")
+        self.assertEqual(route.product_key, "modev1t_china_250m_evi_10day")
+        self.assertEqual(route.resource_type, "modev1t_evi_10day")
 
     def test_routes_surface_temperature_request(self):
         route = route_gscloud_download_intent("获取地表温度")
 
         self.assertEqual(route.kind, "matched")
-        self.assertEqual(route.product_key, "modl1d_china_1km_lst_daily")
+        self.assertEqual(route.product_key, "modl1t_china_1km_lst_composite")
 
     def test_ambiguous_vegetation_request_asks_clarification(self):
         route = route_gscloud_download_intent("下载植被数据")

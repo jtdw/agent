@@ -29,6 +29,13 @@ RASTER_EXTS = {".tif", ".tiff", ".img"}
 TABLE_EXTS = {".csv", ".xlsx", ".xls"}
 DOCUMENT_EXTS = {".docx", ".txt", ".md"}
 SHAPE_SIDE_EXTS = {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qix", ".fix"}
+ZIP_DATASET_PATTERNS = [
+    "*.shp", "*.gpkg", "*.geojson", "*.json", "*.kml",
+    "*.csv", "*.xlsx", "*.xls",
+    "*.tif", "*.tiff", "*.img",
+    "*.docx", "*.txt", "*.md",
+]
+ZIP_DATASET_EXTS = VECTOR_EXTS | RASTER_EXTS | TABLE_EXTS | DOCUMENT_EXTS
 
 
 def _safe_extract_zip(zf: zipfile.ZipFile, target_dir: Path) -> None:
@@ -203,6 +210,24 @@ class DataManager:
             return str(path.resolve().relative_to(self.workdir.resolve())).replace("\\", "/")
         except Exception:
             return path.name
+
+    def _resolve_workspace_path(self, path: str | Path) -> Path:
+        candidate = Path(path)
+        if candidate.is_absolute():
+            return candidate
+        raw = str(path or "").replace("\\", "/")
+        parts = [part for part in raw.split("/") if part]
+        if "sessions" in parts:
+            index = parts.index("sessions")
+            if index + 1 < len(parts) and (not self.current_session_id or parts[index + 1] == self.current_session_id):
+                return self.workdir / Path(*parts[index:])
+        if "users" in parts:
+            index = parts.index("users")
+            if index + 1 < len(parts) and parts[index + 1] == self.workdir.name:
+                suffix = parts[index + 2 :]
+                if suffix:
+                    return self.workdir / Path(*suffix)
+        return self.workdir / candidate
 
     def _unique_storage_name(self, filename: str) -> str:
         original = Path(str(filename or "uploaded.bin")).name
@@ -393,7 +418,42 @@ class DataManager:
                 continue
         raise PermissionError("Local file imports are restricted to the workspace or configured local library.")
 
-    def _extract_zip_if_needed(self, path: Path) -> Path:
+    def _zip_dataset_candidates(self, target_dir: Path) -> list[Path]:
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for pattern in ZIP_DATASET_PATTERNS:
+            for match in sorted(target_dir.rglob(pattern)):
+                if not match.is_file() or match.suffix.lower() not in ZIP_DATASET_EXTS:
+                    continue
+                key = str(match.resolve(strict=False)).lower()
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(match)
+        return candidates
+
+    def inspect_zip_datasets(self, file_path: str) -> list[dict[str, Any]]:
+        path = Path(file_path)
+        if not path.exists():
+            resolved = self._resolve_local_library_reference(file_path)
+            if resolved is None:
+                raise FileNotFoundError(f"文件不存在: {file_path}")
+            path = resolved
+        if path.suffix.lower() != ".zip":
+            raise ValueError("inspect_zip_datasets only supports .zip files")
+        self._require_allowed_import_source(path)
+        copied = self._copy_to_uploads(path)
+        target_dir = self.upload_dir / copied.stem
+        target_dir.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(copied, "r") as zf:
+            _safe_extract_zip(zf, target_dir)
+        root = target_dir.resolve()
+        out: list[dict[str, Any]] = []
+        for item in self._zip_dataset_candidates(target_dir):
+            rel = str(item.resolve(strict=False).relative_to(root)).replace("\\", "/")
+            out.append({"member": rel, "name": item.name, "suffix": item.suffix.lower()})
+        return out
+
+    def _extract_zip_if_needed(self, path: Path, zip_member: str = "") -> Path:
         if path.suffix.lower() != ".zip":
             return path
         target_dir = self.upload_dir / path.stem
@@ -401,16 +461,25 @@ class DataManager:
         with zipfile.ZipFile(path, "r") as zf:
             _safe_extract_zip(zf, target_dir)
 
-        search_order = [
-            "*.shp", "*.gpkg", "*.geojson", "*.json", "*.kml",
-            "*.csv", "*.xlsx", "*.xls",
-            "*.tif", "*.tiff", "*.img",
-            "*.docx", "*.txt", "*.md",
-        ]
-        for pattern in search_order:
-            matches = sorted(target_dir.rglob(pattern))
-            if matches:
-                return matches[0]
+        root = target_dir.resolve()
+        if str(zip_member or "").strip():
+            selected = (root / str(zip_member).replace("\\", "/")).resolve(strict=False)
+            try:
+                selected.relative_to(root)
+            except ValueError as exc:
+                raise PermissionError("zip_member is outside the extracted archive.") from exc
+            if not selected.exists() or not selected.is_file():
+                raise FileNotFoundError(f"zip member not found: {zip_member}")
+            if selected.suffix.lower() not in ZIP_DATASET_EXTS:
+                raise ValueError(f"zip member is not a supported dataset: {zip_member}")
+            return selected
+
+        matches = self._zip_dataset_candidates(target_dir)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            labels = [str(item.resolve(strict=False).relative_to(root)).replace("\\", "/") for item in matches[:20]]
+            raise ValueError("multiple dataset candidates in zip; choose an explicit zip_member: " + ", ".join(labels))
         raise ValueError(f"压缩包 {path.name} 中没有找到可加载的数据文件")
 
     def _read_docx_text(self, path: Path) -> str:
@@ -463,7 +532,7 @@ class DataManager:
             "preview": text[:200],
         }
 
-    def load_path(self, file_path: str, name: str | None = None) -> str:
+    def load_path(self, file_path: str, name: str | None = None, original_filename: str = "", zip_member: str = "") -> str:
         source = Path(file_path)
         if not source.exists():
             resolved = self._resolve_local_library_reference(file_path)
@@ -472,9 +541,11 @@ class DataManager:
             source = resolved
         self._require_allowed_import_source(source)
         copied = self._copy_to_uploads(source)
-        actual = self._extract_zip_if_needed(copied)
+        actual = self._extract_zip_if_needed(copied, zip_member=zip_member)
         dataset_name = self._unique_name(name or actual.stem)
         ext = actual.suffix.lower()
+        original_name = Path(str(original_filename or source.name)).name
+        original_meta = {"original_filename": original_name} if original_name else {}
 
         if ext in VECTOR_EXTS:
             actual = self._prepare_vector_source(actual)
@@ -484,7 +555,7 @@ class DataManager:
                 path=actual,
                 data_type="vector",
                 object_ref=gdf,
-                meta=self._scoped_meta(self._build_vector_meta(gdf)),
+                meta=self._scoped_meta({**self._build_vector_meta(gdf), **original_meta}),
             )
         elif ext in RASTER_EXTS:
             with rasterio.open(actual) as src:
@@ -496,6 +567,7 @@ class DataManager:
                     "bounds": tuple(src.bounds),
                     "dtype": str(src.dtypes[0]) if src.dtypes else None,
                     "nodata": src.nodata,
+                    **original_meta,
                 }
             self.datasets[dataset_name] = DatasetRecord(
                 name=dataset_name,
@@ -514,7 +586,7 @@ class DataManager:
                 path=actual,
                 data_type="table",
                 object_ref=df,
-                meta=self._scoped_meta({"rows": len(df), "columns": list(df.columns)}),
+                meta=self._scoped_meta({"rows": len(df), "columns": list(df.columns), **original_meta}),
             )
         elif ext in DOCUMENT_EXTS:
             if ext == ".docx":
@@ -526,7 +598,7 @@ class DataManager:
                 path=actual,
                 data_type="document",
                 object_ref=text,
-                meta=self._scoped_meta(self._build_document_meta(text)),
+                meta=self._scoped_meta({**self._build_document_meta(text), **original_meta}),
             )
         else:
             raise ValueError(f"暂不支持的文件类型: {ext}")
@@ -875,9 +947,7 @@ class DataManager:
         meta: dict[str, Any] | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
-        artifact_path = Path(path)
-        if not artifact_path.is_absolute():
-            artifact_path = self.workdir / artifact_path
+        artifact_path = self._resolve_workspace_path(path)
         scoped_meta = self._scoped_meta(meta or {k: v for k, v in extra.items() if k not in {"name", "display_path", "category", "size_kb", "modified"}})
         payload = {
             "artifact_id": artifact_id or f"artifact_{uuid4().hex[:10]}",
@@ -978,13 +1048,13 @@ class DataManager:
                 deleted_files.append(str(item))
 
         if artifact_id:
-            if self.database.delete_artifact(artifact_id):
+            if self.database.delete_artifact(artifact_id, hard=True):
                 deleted_artifacts.append(artifact_id)
         for artifact in self.database.list_artifacts(session_id=self.current_session_id, limit=1000):
             artifact_path = Path(str(artifact.get("path") or "")).resolve(strict=False)
             if str(artifact_path).lower() in target_keys:
                 artifact_key = str(artifact.get("artifact_id") or "")
-                if artifact_key and self.database.delete_artifact(artifact_key):
+                if artifact_key and self.database.delete_artifact(artifact_key, hard=True):
                     deleted_artifacts.append(artifact_key)
 
         for item in self.database.list_catalog(session_id=self.current_session_id):
@@ -1071,7 +1141,10 @@ class DataManager:
 
     def _enrich_registered_artifact(self, artifact: dict[str, Any]) -> dict[str, Any]:
         item = dict(artifact)
-        path = Path(str(item.get("path") or ""))
+        path = self._resolve_workspace_path(str(item.get("path") or ""))
+        item["path"] = str(path)
+        item["absolute_path"] = str(path.resolve(strict=False))
+        item["relative_path"] = self._scoped_relative_path(path)
         try:
             relative = path.relative_to(path.parents[1])
         except Exception:
@@ -1097,10 +1170,22 @@ class DataManager:
 
     def get_model_result(self, model_result_id: str) -> dict[str, Any] | None:
         result = self.database.get_model_result(model_result_id)
-        return self._attach_registered_model_artifacts(result) if result else None
+        if not result or not self._model_result_visible_in_current_session(result):
+            return None
+        return self._attach_registered_model_artifacts(result)
 
     def list_model_results(self, limit: int = 50) -> list[dict[str, Any]]:
-        return [self._attach_registered_model_artifacts(item) for item in self.database.list_model_results(limit=limit)]
+        return [
+            self._attach_registered_model_artifacts(item)
+            for item in self.database.list_model_results(limit=limit)
+            if self._model_result_visible_in_current_session(item)
+        ]
+
+    def _model_result_visible_in_current_session(self, result: dict[str, Any]) -> bool:
+        if not self.current_session_id:
+            return True
+        result_session = str(result.get("session_id") or "")
+        return not result_session or result_session == self.current_session_id
 
     def _attach_registered_model_artifacts(self, result: dict[str, Any] | None) -> dict[str, Any]:
         item = dict(result or {})

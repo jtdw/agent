@@ -34,10 +34,17 @@ from .service import CommercialService
 from .login_jobs import list_gscloud_login_jobs, read_gscloud_login_job, start_gscloud_login_process
 from .capture_jobs import list_gscloud_capture_jobs, read_gscloud_capture_job, start_gscloud_capture_process
 from .tile_jobs import list_gscloud_tile_jobs, read_gscloud_tile_job, start_gscloud_tile_process
+from ..tool_contracts import download_job_to_tool_result
 
 
 def _json(data: dict | list) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, default=str)
+
+
+def _download_job_payload(job: dict, **extra) -> dict:
+    payload = {"job": job, "tool_result": download_job_to_tool_result(job)}
+    payload.update(extra)
+    return payload
 
 
 def _confirmation_id(action: str, **params) -> str:
@@ -305,7 +312,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
         source_key: str,
         resource_type: str,
         region: str = "",
-        account_mode: str = "own",
+        account_mode: str = "auto",
         request_text: str = "",
         output_name: str = "",
         start_date: str = "",

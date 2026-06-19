@@ -43,7 +43,7 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
         self.assertIn("workspace/domestic_downloads/dem.zip", "\n".join(outcome["result_paths"]))
         self.assertTrue(any("地图" in item or "裁剪" in item for item in outcome["recommendations"]))
 
-    def test_upload_outcome_recommends_field_check(self) -> None:
+    def test_upload_outcome_is_brief_without_recommendations(self) -> None:
         result = {"count": 2, "messages": ["已载入表格：station.csv", "已载入边界：basin.shp"]}
         dashboard = {"datasets": [{"name": "station", "type": "table"}, {"name": "basin", "type": "vector"}]}
 
@@ -51,7 +51,7 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
 
         self.assertTrue(outcome["has_results"])
         self.assertIn("station.csv", outcome["summary"])
-        self.assertTrue(any("字段" in item for item in outcome["recommendations"]))
+        self.assertEqual(outcome["recommendations"], [])
 
     def test_analysis_without_model_results_does_not_claim_result_files(self) -> None:
         outcome = build_task_outcome(
@@ -96,6 +96,43 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
         self.assertEqual(panel["title"], "XGBoost model finished")
         self.assertEqual(panel["files"][0]["label"], "metrics")
         self.assertEqual(panel["files"][0]["download_url"], "/api/files/artifact?path=derived/xgb_metrics.csv")
+
+    def test_result_panel_prefers_current_response_artifacts(self) -> None:
+        from core.api_helpers import _build_result_panel
+
+        response = {
+            "task_outcome": {"summary": "XGBoost model finished"},
+            "artifacts": [
+                {
+                    "artifact_id": "artifact_current_predictions",
+                    "title": "current_predictions.csv",
+                    "path": "derived/current_predictions.csv",
+                    "download_url": "/api/artifacts/artifact_current_predictions/download",
+                    "type": "csv",
+                }
+            ],
+        }
+        dashboard = {
+            "model_results": [
+                {
+                    "model": "XGBoost",
+                    "artifacts": [
+                        {
+                            "artifact_id": "artifact_old_metrics",
+                            "label": "old_metrics.csv",
+                            "path": "derived/old_metrics.csv",
+                            "download_url": "/api/artifacts/artifact_old_metrics/download",
+                        }
+                    ],
+                }
+            ],
+            "artifacts": [],
+        }
+
+        panel = _build_result_panel(response, dashboard)
+
+        self.assertEqual(panel["files"][0]["artifact_id"], "artifact_current_predictions")
+        self.assertEqual(panel["files"][0]["download_url"], "/api/artifacts/artifact_current_predictions/download")
 
 
 if __name__ == "__main__":

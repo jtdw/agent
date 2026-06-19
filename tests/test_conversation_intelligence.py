@@ -87,6 +87,14 @@ class ConversationIntelligenceTests(unittest.TestCase):
         self.assertTrue(resolved["resolved"])
         self.assertEqual(resolved["referenced_object"]["type"], "model_result")
 
+    def test_feature_importance_followup_is_result_analysis(self) -> None:
+        state = ConversationState(last_model_result={"model": "generic_xgboost", "output_prefix": "gxgb"}).to_dict()
+
+        intent = classify_user_intent("Which factors are most important for this model?", state, {"dataset_count": 1}, enable_llm=False)
+
+        self.assertEqual(intent["intent"], "result_analysis")
+        self.assertTrue(intent["needs_followup_resolution"])
+
     def test_continue_followup_uses_last_user_goal(self) -> None:
         state = ConversationState(active_dataset="soil_station", last_user_goal="检查并建模", last_task_type="data_upload_analysis").to_dict()
 

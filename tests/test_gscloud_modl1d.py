@@ -1,20 +1,21 @@
 import unittest
 
-from core.domestic_sources.gscloud_products import match_gscloud_product
 from core.domestic_sources.gscloud_modl1d import parse_modl1d_cells
+from core.domestic_sources.gscloud_products import match_gscloud_product
 
 
 class GSCloudMODL1DTests(unittest.TestCase):
     def test_product_aliases_match_modl1d_land_surface_temperature(self):
         for text in [
+            "下载 MODL1T 中国 1KM 地表温度旬合成产品",
+            "获取成都 LST 旬合成产品",
             "下载 MODL1D 中国 1KM 地表温度每天产品",
-            "获取成都 LST 每天产品",
             "地理空间数据云 1KM 地表温度数据",
         ]:
             product = match_gscloud_product(text)
             self.assertIsNotNone(product)
-            self.assertEqual(product.key, "modl1d_china_1km_lst_daily")
-            self.assertEqual(product.dataset_id, "334")
+            self.assertEqual(product.key, "modl1t_china_1km_lst_composite")
+            self.assertEqual(product.dataset_id, "337")
             self.assertEqual(product.pid, "333")
 
     def test_parse_modl1d_main_and_quality_rows(self):

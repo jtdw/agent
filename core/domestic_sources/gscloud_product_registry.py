@@ -7,8 +7,8 @@ from .gscloud_products import (
     LANDSAT8_OLI_TIRS,
     MOD021KM_1KM_SURFACE_REFLECTANCE,
     MODEV1F_CHINA_250M_EVI_5DAY,
-    MODL1D_CHINA_1KM_LST_DAILY,
-    MODND1D_CHINA_500M_NDVI_DAILY,
+    MODL1T_CHINA_1KM_LST_COMPOSITE,
+    MODND1T_CHINA_500M_NDVI_10DAY,
     SENTINEL2_MSI,
 )
 
@@ -25,9 +25,9 @@ class GSCloudSceneProductConfig:
 
 _SCENE_PRODUCTS: tuple[GSCloudSceneProductConfig, ...] = (
     GSCloudSceneProductConfig(LANDSAT8_OLI_TIRS.key, LANDSAT8_OLI_TIRS.resource_type, LANDSAT8_OLI_TIRS.name, "landsat8_oli_tirs", "landsat8"),
-    GSCloudSceneProductConfig(MODND1D_CHINA_500M_NDVI_DAILY.key, MODND1D_CHINA_500M_NDVI_DAILY.resource_type, MODND1D_CHINA_500M_NDVI_DAILY.name, "modnd1d_ndvi", "modnd1d"),
-    GSCloudSceneProductConfig(MODL1D_CHINA_1KM_LST_DAILY.key, MODL1D_CHINA_1KM_LST_DAILY.resource_type, MODL1D_CHINA_1KM_LST_DAILY.name, "modl1d_lst", "modl1d"),
-    GSCloudSceneProductConfig(MODEV1F_CHINA_250M_EVI_5DAY.key, MODEV1F_CHINA_250M_EVI_5DAY.resource_type, MODEV1F_CHINA_250M_EVI_5DAY.name, "modev1f_evi", "modev1f"),
+    GSCloudSceneProductConfig(MODND1T_CHINA_500M_NDVI_10DAY.key, MODND1T_CHINA_500M_NDVI_10DAY.resource_type, MODND1T_CHINA_500M_NDVI_10DAY.name, "modnd1t_ndvi", "modnd1t"),
+    GSCloudSceneProductConfig(MODL1T_CHINA_1KM_LST_COMPOSITE.key, MODL1T_CHINA_1KM_LST_COMPOSITE.resource_type, MODL1T_CHINA_1KM_LST_COMPOSITE.name, "modl1t_lst", "modl1t"),
+    GSCloudSceneProductConfig(MODEV1F_CHINA_250M_EVI_5DAY.key, MODEV1F_CHINA_250M_EVI_5DAY.resource_type, MODEV1F_CHINA_250M_EVI_5DAY.name, "modev1t_evi", "modev1t"),
     GSCloudSceneProductConfig(MOD021KM_1KM_SURFACE_REFLECTANCE.key, MOD021KM_1KM_SURFACE_REFLECTANCE.resource_type, MOD021KM_1KM_SURFACE_REFLECTANCE.name, "mod021km_reflectance", "mod021km"),
     GSCloudSceneProductConfig(SENTINEL2_MSI.key, SENTINEL2_MSI.resource_type, SENTINEL2_MSI.name, "sentinel2_msi", "sentinel2"),
 )

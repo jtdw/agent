@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import tempfile
+import zipfile
 from pathlib import Path
 
 import geopandas as gpd
@@ -67,6 +68,44 @@ class GSCloudDemRegionRoutingTests(unittest.TestCase):
             self.assertEqual(
                 plan["tile_ids"],
                 ["utm_srtm_57_06", "utm_srtm_58_06", "utm_srtm_57_07", "utm_srtm_58_07"],
+            )
+
+    def test_dem_tile_plan_uses_local_shandian_boundary_library(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            settings = Settings(api_key="", workdir=root / "workspace")
+            settings.ensure_dirs()
+            manager = DataManager(settings.workdir)
+
+            boundary_dir = manager.workdir / "local_library" / "data" / "boundary"
+            boundary_dir.mkdir(parents=True, exist_ok=True)
+            zip_path = boundary_dir / "shandianhe_basin_boundary_full.zip"
+
+            source_dir = root / "source_boundary"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            gdf = gpd.GeoDataFrame(
+                {"name": ["shandianhe"]},
+                geometry=[box(115.2, 41.1, 116.6, 42.4)],
+                crs="EPSG:4326",
+            )
+            shp_path = source_dir / "shandianhe_basin_boundary.shp"
+            gdf.to_file(shp_path, driver="ESRI Shapefile")
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for path in source_dir.glob("shandianhe_basin_boundary.*"):
+                    archive.write(path, arcname=path.name)
+
+            plan = plan_gscloud_dem_tiles(
+                manager,
+                region="\u95ea\u7535\u6cb3\u6d41\u57df",
+                dataset_id="310",
+                save_preview=False,
+            )
+
+            self.assertEqual(plan["region_dataset"], "shandianhe_basin_boundary")
+            self.assertEqual(plan["region_source"], "local_library_boundary")
+            self.assertEqual(
+                plan["tile_ids"],
+                ["ASTGTM_N41E115", "ASTGTM_N41E116", "ASTGTM_N42E115", "ASTGTM_N42E116"],
             )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Callable
 
 from core.llm_intent_classifier import classify_intent_with_llm
@@ -24,7 +25,21 @@ HYBRID_CONFIDENCE_THRESHOLD = 0.75
 
 
 def _contains_any(text: str, words: tuple[str, ...]) -> list[str]:
-    return [word for word in words if word and word.lower() in text]
+    hits: list[str] = []
+    for word in words:
+        if not word:
+            continue
+        lowered = word.lower()
+        if lowered in {"dem", "srtm", "gdem", "rf", "xgb"}:
+            if _contains_ascii_token(text, lowered):
+                hits.append(word)
+        elif lowered in text:
+            hits.append(word)
+    return hits
+
+
+def _contains_ascii_token(text: str, token: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9_]){re.escape(token)}(?![a-z0-9_])", str(text or "").lower()))
 
 
 def _workspace_dataset_count(workspace_summary: Any) -> int:
@@ -147,6 +162,103 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
         )
 
     semantic = parse_user_semantics(text)
+    gcp_hits = _contains_any(
+        lower,
+        (
+            "gcp",
+            "conformal",
+            "uncertainty",
+            "prediction interval",
+            "interval width",
+            "coverage",
+            "geoconformal prediction",
+            "spatial conformal prediction",
+            "不确定性",
+            "地理共形预测",
+            "共形预测",
+            "预测区间",
+            "覆盖率",
+            "区间宽度",
+        ),
+    )
+    if gcp_hits and not any(token in lower for token in ("xgboost", "xgb", "train", "训练")):
+        return _normalize_result(
+            {
+                "intent": "modeling",
+                "confidence": 0.88,
+                "reason": "matched_gcp_uncertainty_keywords",
+                "needs_followup_resolution": False,
+                "keywords": gcp_hits,
+                "secondary_intents": _secondary_intents(text, "modeling"),
+            },
+            classifier="rule",
+        )
+    importance_followup_hits = _contains_any(
+        lower,
+        (
+            "important factors",
+            "most important",
+            "feature importance",
+            "important features",
+            "which factors",
+            "关键因素",
+            "重要因素",
+            "特征重要性",
+            "哪些因素最重要",
+        ),
+    )
+    if importance_followup_hits and (state.get("last_model_result") or state.get("selected_model_result")):
+        return _normalize_result(
+            {
+                "intent": "result_analysis",
+                "confidence": 0.86,
+                "reason": "matched_model_feature_importance_followup",
+                "needs_followup_resolution": True,
+                "keywords": importance_followup_hits,
+                "secondary_intents": [],
+            },
+            classifier="rule",
+        )
+    modeling_hits = _contains_any(
+        lower,
+        (
+            "建模",
+            "模型",
+            "预测",
+            "机器学习",
+            "随机森林",
+            "xgboost",
+            "xgb",
+            "rf",
+            "lstm",
+            "btch",
+            "gcp",
+            "融合",
+            "训练",
+            "回归",
+            "目标列",
+            "目标变量",
+            "特征列",
+            "特征重要性",
+            "空间分块验证",
+            "残差",
+            "精度指标",
+            "妯",
+            "闅忔満",
+        ),
+    )
+    if modeling_hits:
+        return _normalize_result(
+            {
+                "intent": "modeling",
+                "confidence": 0.9 if any(hit.lower() in {"xgboost", "xgb"} for hit in modeling_hits) else 0.86,
+                "reason": "matched_modeling_keywords",
+                "needs_followup_resolution": False,
+                "keywords": modeling_hits,
+                "secondary_intents": _secondary_intents(text, "modeling"),
+            },
+            classifier="rule",
+        )
     if semantic.get("intent") == "data_download" and float(semantic.get("confidence") or 0.0) >= 0.68:
         return _normalize_result(
             {
@@ -421,9 +533,9 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "评价",
             "精度",
             "残差",
-            "璇存槑",
-            "璇勪环",
-            "娈嬪樊",
+            "说明",
+            "评估",
+            "误差",
         ),
     )
     if result_hits:

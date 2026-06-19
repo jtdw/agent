@@ -177,7 +177,7 @@ def start_gscloud_modnd1d_process(
     return start_gscloud_scene_process(
         workdir=workdir,
         job_id=job_id,
-        product_key="modnd1d_china_500m_ndvi_daily",
+        product_key="modnd1t_china_500m_ndvi_10day",
         region=region,
         year=year,
         start_date=start_date,
@@ -187,8 +187,8 @@ def start_gscloud_modnd1d_process(
         headless=headless,
         auto_load=auto_load,
         extra={"include_qc": bool(include_qc)},
-        start_message="正在启动 MODND1D 中国 500M NDVI 每天产品自动检索下载任务。任务会强制筛选“数据=有”，默认只下载 NDVI 主产品。",
-        running_message="已在独立后台进程启动 MODND1D NDVI 检索下载。当前对话不会阻塞。",
+        start_message="正在启动 MODND1T 中国 500M NDVI 旬合成产品自动检索下载任务。任务会强制筛选“数据=有”，默认只下载 NDVI/MAX 主产品。",
+        running_message="已在独立后台进程启动 MODND1T NDVI 旬合成检索下载。当前对话不会阻塞。",
     )
 
 
@@ -209,7 +209,7 @@ def start_gscloud_modl1d_process(
     return start_gscloud_scene_process(
         workdir=workdir,
         job_id=job_id,
-        product_key="modl1d_china_1km_lst_daily",
+        product_key="modl1t_china_1km_lst_composite",
         region=region,
         year=year,
         start_date=start_date,
@@ -219,8 +219,8 @@ def start_gscloud_modl1d_process(
         headless=headless,
         auto_load=auto_load,
         extra={"include_quality": bool(include_quality)},
-        start_message="正在启动 MODL1D 中国 1KM 地表温度每天产品自动检索下载任务。任务会强制筛选“数据=有”，默认只下载 LTD/LTN 主产品。",
-        running_message="已在独立后台进程启动 MODL1D 地表温度检索下载。当前对话不会阻塞。",
+        start_message="正在启动 MODL1T 中国 1KM 地表温度旬合成产品自动检索下载任务。任务会强制筛选“数据=有”，默认只下载 LTD/LTN 主产品。",
+        running_message="已在独立后台进程启动 MODL1T 地表温度旬合成检索下载。当前对话不会阻塞。",
     )
 
 
@@ -240,7 +240,7 @@ def start_gscloud_modev1f_process(
     return start_gscloud_scene_process(
         workdir=workdir,
         job_id=job_id,
-        product_key="modev1f_china_250m_evi_5day",
+        product_key="modev1t_china_250m_evi_10day",
         region=region,
         year=year,
         start_date=start_date,
@@ -249,8 +249,8 @@ def start_gscloud_modev1f_process(
         timeout_seconds=timeout_seconds,
         headless=headless,
         auto_load=auto_load,
-        start_message="正在启动 MODEV1F 中国 250M EVI 五天合成产品自动检索下载任务。任务会强制筛选“数据=有”的 EVI 记录。",
-        running_message="已在独立后台进程启动 MODEV1F EVI 检索下载。当前对话不会阻塞。",
+        start_message="正在启动 MODEV1T 中国 250M EVI 旬合成产品自动检索下载任务。任务会强制筛选“数据=有”的 EVI 记录。",
+        running_message="已在独立后台进程启动 MODEV1T EVI 旬合成检索下载。当前对话不会阻塞。",
     )
 
 

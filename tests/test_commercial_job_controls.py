@@ -48,6 +48,29 @@ class CommercialJobControlTests(unittest.TestCase):
         self.assertEqual(charged_user["platform_monthly_used"], 1)
         self.assertEqual(charged_account["used_today"], 1)
 
+    def test_auto_account_mode_uses_platform_for_paid_users_and_own_for_basic(self):
+        paid_job = self.service.submit_job(
+            user_id=self.user["user_id"],
+            source_key="gscloud",
+            resource_type="dem",
+            region="Chengdu",
+            account_mode="auto",
+        )
+
+        basic = self.service.create_user("basic@example.com", plan="basic", user_id="u_basic")
+        basic_job = self.service.submit_job(
+            user_id=basic["user_id"],
+            source_key="gscloud",
+            resource_type="dem",
+            region="Chengdu",
+            account_mode="auto",
+        )
+
+        self.assertEqual(paid_job["account_mode"], "platform")
+        self.assertEqual(paid_job["quota_reserved"], 1)
+        self.assertEqual(basic_job["account_mode"], "own")
+        self.assertEqual(basic_job["quota_reserved"], 0)
+
     def test_failed_or_canceled_reserved_job_releases_quota(self):
         failed_job = self.service.submit_job(
             user_id=self.user["user_id"],
@@ -76,7 +99,7 @@ class CommercialJobControlTests(unittest.TestCase):
         job = self.service.submit_job(
             user_id=self.user["user_id"],
             source_key="gscloud",
-            resource_type="modev1f_evi_5day",
+            resource_type="modev1t_evi_10day",
             region="成都",
             account_mode="platform",
             request_text="下载成都 EVI",
@@ -87,7 +110,7 @@ class CommercialJobControlTests(unittest.TestCase):
         retry = self.service.retry_job(job["job_id"], user_id=self.user["user_id"])
 
         self.assertNotEqual(retry["job_id"], job["job_id"])
-        self.assertEqual(retry["resource_type"], "modev1f_evi_5day")
+        self.assertEqual(retry["resource_type"], "modev1t_evi_10day")
         self.assertEqual(retry["region"], "成都")
         self.assertEqual(retry["request_text"], "下载成都 EVI")
         self.assertEqual(retry["retried_from_job_id"], job["job_id"])

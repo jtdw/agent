@@ -10,8 +10,8 @@ from .gscloud_products import (
     LANDSAT8_OLI_TIRS,
     MOD021KM_1KM_SURFACE_REFLECTANCE,
     MODEV1F_CHINA_250M_EVI_5DAY,
-    MODL1D_CHINA_1KM_LST_DAILY,
-    MODND1D_CHINA_500M_NDVI_DAILY,
+    MODL1T_CHINA_1KM_LST_COMPOSITE,
+    MODND1T_CHINA_500M_NDVI_10DAY,
     SENTINEL2_MSI,
 )
 
@@ -68,22 +68,22 @@ def _product_aliases(product_key: str, *extra: str) -> tuple[str, ...]:
 
 INTENTS: tuple[_IntentSpec, ...] = (
     _IntentSpec(
-        product_key=MODND1D_CHINA_500M_NDVI_DAILY.key,
-        resource_type=MODND1D_CHINA_500M_NDVI_DAILY.resource_type,
-        aliases=_product_aliases(MODND1D_CHINA_500M_NDVI_DAILY.key, "植被指数ndvi", "归一化植被指数"),
-        category_terms=("ndvi", "归一化植被", "植被指数"),
+        product_key=MODND1T_CHINA_500M_NDVI_10DAY.key,
+        resource_type=MODND1T_CHINA_500M_NDVI_10DAY.resource_type,
+        aliases=_product_aliases(MODND1T_CHINA_500M_NDVI_10DAY.key, "植被指数ndvi", "归一化植被指数"),
+        category_terms=("ndvi", "归一化植被", "植被指数", "旬合成"),
     ),
     _IntentSpec(
         product_key=MODEV1F_CHINA_250M_EVI_5DAY.key,
         resource_type=MODEV1F_CHINA_250M_EVI_5DAY.resource_type,
-        aliases=_product_aliases(MODEV1F_CHINA_250M_EVI_5DAY.key, "五天evi", "5天evi", "增强植被指数"),
-        category_terms=("evi", "五天", "5天", "增强植被"),
+        aliases=_product_aliases(MODEV1F_CHINA_250M_EVI_5DAY.key, "旬合成evi", "10天evi", "十天evi", "增强植被指数"),
+        category_terms=("evi", "旬合成", "10天", "十天", "增强植被"),
     ),
     _IntentSpec(
-        product_key=MODL1D_CHINA_1KM_LST_DAILY.key,
-        resource_type=MODL1D_CHINA_1KM_LST_DAILY.resource_type,
-        aliases=_product_aliases(MODL1D_CHINA_1KM_LST_DAILY.key, "地温", "陆表温度", "地表热"),
-        category_terms=("地表温度", "地温", "lst", "温度"),
+        product_key=MODL1T_CHINA_1KM_LST_COMPOSITE.key,
+        resource_type=MODL1T_CHINA_1KM_LST_COMPOSITE.resource_type,
+        aliases=_product_aliases(MODL1T_CHINA_1KM_LST_COMPOSITE.key, "地温", "陆表温度", "地表热"),
+        category_terms=("地表温度", "地温", "lst", "温度", "旬合成", "10天", "十天"),
     ),
     _IntentSpec(
         product_key=MOD021KM_1KM_SURFACE_REFLECTANCE.key,
@@ -115,11 +115,11 @@ INTENTS: tuple[_IntentSpec, ...] = (
 def _clarification_for(prompt: str) -> str:
     normalized = _norm(prompt)
     if any(term in normalized for term in ("植被", "植被指数")) and not any(term in normalized for term in ("ndvi", "evi")):
-        return "你是想下载 NDVI 还是 EVI？如果用于植被指数时间序列，通常选 NDVI；如果需要 250M 五天合成增强植被指数，选 EVI。"
+        return "你是想下载 NDVI 还是 EVI？如果用于植被指数时间序列，通常选 NDVI；如果需要 250M 旬合成增强植被指数，选 EVI。"
     if "遥感影像" in normalized or ("遥感" in normalized and "影像" in normalized):
         return "你是想下载 Sentinel-2 还是 Landsat 8？如果需要较新的高分辨率光学影像，通常选 Sentinel-2；如果要 Landsat 系列数据，选 Landsat 8。"
     if "modis" in normalized and not any(term in normalized for term in ("ndvi", "evi", "lst", "温度", "反射", "mod021", "mod21")):
-        return "你要下载哪类 MODIS 数据？可选 NDVI、LST 地表温度、EVI 五天合成或 MOD021KM 地表反射率。"
+        return "你要下载哪类 MODIS 数据？可选 NDVI、LST 地表温度、EVI 旬合成或 MOD021KM 地表反射率。"
     return ""
 
 

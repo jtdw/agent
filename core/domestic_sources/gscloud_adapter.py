@@ -19,6 +19,8 @@ from .registry import get_source
 
 
 GSCLOUD_HOME = "https://www.gscloud.cn/"
+_SHANDIAN_BOUNDARY_FILENAMES = ("shandianhe_basin_boundary_full.zip", "shandianhe_basin_boundary.zip")
+_SHANDIAN_BOUNDARY_DATASET_NAME = "shandianhe_basin_boundary"
 # 你截图里的 ASTER GDEM 30M 访问数据页。
 GSCLOUD_ASTER_GDEM30_ACCESS_URL = "https://www.gscloud.cn/sources/accessdata/310?pid=1"
 GSCLOUD_DEM_INDEX_URL = "https://www.gscloud.cn/sources/index?pid=1&rootid=1&title=DEM&sort=priority&page=1"
@@ -672,6 +674,11 @@ REGION_BBOX_PRESETS: dict[str, tuple[float, float, float, float]] = {
 }
 
 
+REGION_BBOX_PRESETS.setdefault("\u95ea\u7535\u6cb3", (115.2, 41.1, 116.6, 42.4))
+REGION_BBOX_PRESETS.setdefault("\u95ea\u7535\u6cb3\u6d41\u57df", (115.2, 41.1, 116.6, 42.4))
+REGION_BBOX_PRESETS.setdefault("shandianhe", (115.2, 41.1, 116.6, 42.4))
+
+
 def _format_astgtm_tile_id(lat_floor: int, lon_floor: int) -> str:
     lat_prefix = "N" if lat_floor >= 0 else "S"
     lon_prefix = "E" if lon_floor >= 0 else "W"
@@ -681,6 +688,61 @@ def _format_astgtm_tile_id(lat_floor: int, lon_floor: int) -> str:
 def _is_shandianhe_region(region: str) -> bool:
     text = str(region or "").strip().lower()
     return "闪电河" in str(region or "") or "shandian" in text
+
+
+def _candidate_shandian_boundary_paths(manager: DataManager) -> list[Path]:
+    project_root = Path(__file__).resolve().parents[2]
+    roots = [
+        manager.workdir / "local_library" / "data" / "boundary",
+        project_root / "local_library" / "data" / "boundary",
+    ]
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for root in roots:
+        for filename in _SHANDIAN_BOUNDARY_FILENAMES:
+            path = root / filename
+            try:
+                resolved = path.resolve()
+            except Exception:
+                resolved = path
+            if path.exists() and resolved not in seen:
+                seen.add(resolved)
+                candidates.append(path)
+    return candidates
+
+
+def _extract_local_shandian_boundary(manager: DataManager, region: str):
+    if not _is_shandianhe_region(region):
+        return None, "", ""
+
+    import geopandas as gpd
+
+    for archive_path in _candidate_shandian_boundary_paths(manager):
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                shp_names = [name for name in archive.namelist() if name.lower().endswith(".shp")]
+                if not shp_names:
+                    continue
+                shp_name = sorted(shp_names, key=lambda item: ("/" in item, item))[0]
+                target_dir = manager.temp_dir / "local_boundary_cache" / safe_name(archive_path.stem)
+                target_dir.mkdir(parents=True, exist_ok=True)
+                safe_extract_zip(archive, target_dir)
+            gdf = gpd.read_file(target_dir / shp_name)
+            if gdf.empty:
+                continue
+            if gdf.crs is None:
+                gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+            else:
+                gdf = gdf.to_crs("EPSG:4326")
+            dataset_name = manager.put_vector(
+                _SHANDIAN_BOUNDARY_DATASET_NAME,
+                gdf,
+                filename=f"{_SHANDIAN_BOUNDARY_DATASET_NAME}.geojson",
+            )
+            return gdf, dataset_name, "local_library_boundary"
+        except Exception:
+            continue
+    return None, "", ""
 
 
 def _format_srtm_utm_tile_id(row: int, strip: int) -> str:
@@ -743,6 +805,8 @@ def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", regio
     if region_dataset:
         candidates.append(region_dataset)
     region_key = str(region or "").strip().lower()
+    if _is_shandianhe_region(region):
+        candidates.extend([_SHANDIAN_BOUNDARY_DATASET_NAME, "local_library_shandianhe_basin_boundary"])
     if region_key:
         for name in manager.list_dataset_names():
             lower = name.lower()
@@ -769,6 +833,12 @@ def _find_region_gdf_for_tile_plan(manager: DataManager, region: str = "", regio
             return gdf, name, "workspace_vector"
         except Exception:
             continue
+    try:
+        gdf, source_name, source_type = _extract_local_shandian_boundary(manager, region)
+        if gdf is not None and not gdf.empty:
+            return gdf, source_name, source_type
+    except Exception:
+        pass
     try:
         gdf, source_name, source_type = extract_local_admin_boundary(manager, region)
         if gdf is not None and not gdf.empty:

@@ -17,7 +17,7 @@ from core.config import Settings
 from core.conversation_intent import classify_user_intent
 from core.context_builder import build_conversation_context
 from core.conversation_state import ConversationState
-from core.result_interpreter import interpret_result
+from core.presentation_result import build_presentation_bundle_from_raw_execution
 from core.service import GISWorkspaceService
 from core.task_planner import build_task_plan
 from core.tool_contracts import parse_tool_result
@@ -25,11 +25,36 @@ from core.tool_executor import execute_validated_tool_plan
 from core.workflow_executor import execute_workflow_plan, parse_workflow_result
 
 
+def continue_current_step(plan, current_step, remaining_steps, execution_trace, user_request, **kwargs):
+    if not current_step:
+        return {"status": "ready", "decision": {"decision": "stop_success", "confidence": 0.9}}
+    return {
+        "status": "ready",
+        "decision": {
+            "decision": "continue",
+            "next_step_id": current_step.get("step_id") or current_step.get("tool_name"),
+            "selected_next_action": "",
+            "required_tool": current_step.get("tool_name") or "",
+            "required_inputs": current_step.get("validated_tool_args") or current_step.get("args") or {},
+            "reason": "run validated step",
+            "user_question": "",
+            "confidence": 0.9,
+        },
+    }
+
+
 class WorkflowExecutorTests(unittest.TestCase):
     def make_service(self, root: Path) -> GISWorkspaceService:
         settings = Settings(api_key="", workdir=root / "workspace")
         settings.ensure_dirs()
         return GISWorkspaceService(settings)
+
+    def active_plan_from_deterministic(self, service: GISWorkspaceService):
+        def build(prompt: str, context: dict, **kwargs):
+            plan = build_task_plan(prompt, context.get("intent") or {}, context, manager=service.manager)
+            return {"status": "ready", "mode": "active", "planner_source": "test", "executes_tools": False, "plan": plan}
+
+        return build
 
     def seed_clip_map_data(self, service: GISWorkspaceService) -> None:
         service.manager.put_vector(
@@ -210,15 +235,30 @@ class WorkflowExecutorTests(unittest.TestCase):
             execution = execute_workflow_plan(service.manager, plan)
             context = {"active_dataset": {"name": "points", "type": "vector"}}
 
-            success_reply = interpret_result("check", {"intent": "data_upload_analysis"}, plan, execution["raw_reply"], context, {})
-            self.assertIn("逐步解释", success_reply)
-            self.assertIn("check_dataset", success_reply)
+            success_bundle = build_presentation_bundle_from_raw_execution(
+                plan=plan,
+                raw_results={"workflow_result": execution["workflow_result"]},
+                task_goal="check",
+                task_plan_summary={"primary_goal": "data_upload_analysis"},
+                coordinator_status="succeeded",
+            )
+            success_reply = success_bundle["reply"]
+            self.assertIn("Completed", success_reply)
+            self.assertIn("check_dataset", str(success_bundle["presentation_result"]["executed_steps"]))
+            self.assertNotIn("input:", success_reply)
+            self.assertNotIn("output:", success_reply)
 
             bad_plan = {"workflow_plan": [{"step_id": "bad", "tool_name": "unsupported_overlay_tool", "validated_tool_args": {}}]}
             bad_execution = execute_workflow_plan(service.manager, bad_plan)
-            failure_reply = interpret_result("bad", {"intent": "data_processing"}, bad_plan, bad_execution["raw_reply"], context, {})
-            self.assertIn("失败定位", failure_reply)
-            self.assertIn("bad", failure_reply)
+            failure_bundle = build_presentation_bundle_from_raw_execution(
+                plan=bad_plan,
+                raw_results={"workflow_result": bad_execution["workflow_result"]},
+                task_goal="bad",
+                task_plan_summary={"primary_goal": "data_processing"},
+                coordinator_status="failed",
+            )
+            failure_reply = failure_bundle["reply"]
+            self.assertEqual(failure_bundle["presentation_result"]["status"], "failed")
             self.assertIn("UNSUPPORTED_WORKFLOW_TOOL", failure_reply)
 
     def test_overlay_workflow_output_can_feed_map_step(self) -> None:
@@ -379,13 +419,17 @@ class WorkflowExecutorTests(unittest.TestCase):
             service = self.make_service(Path(tmp))
             self.seed_clip_map_data(service)
 
-            with mock.patch.object(service, "_get_agent", side_effect=AssertionError("LLM should not be called")):
-                result = service.ask(
-                    "clip this shp to the study area, then plot population density map and explain",
-                    frontend_context={"active_dataset_id": "points", "selected_layer_id": "study_area"},
-                )
+            with mock.patch("core.service.build_llm_task_plan", side_effect=self.active_plan_from_deterministic(service)):
+                with mock.patch(
+                    "core.coordinated_executor.build_coordinator_decision",
+                    side_effect=continue_current_step,
+                ):
+                    result = service.ask(
+                        "clip this shp to the study area, then plot population density map and explain",
+                        frontend_context={"active_dataset_id": "points", "selected_layer_id": "study_area"},
+                    )
 
-            self.assertEqual(result["mode"], "deterministic_workflow")
+            self.assertEqual(result["mode"], "coordinated_workflow")
             self.assertTrue(result["images"])
             self.assertTrue(Path(result["images"][0]).exists())
             self.assertIn("points_clipped", service.manager.datasets)
@@ -412,9 +456,17 @@ class WorkflowExecutorTests(unittest.TestCase):
             self.assertTrue(model_result_id)
             self.assertIsNotNone(service.manager.get_model_result(model_result_id))
             self.assertTrue(any(artifact["type"] == "metrics" for artifact in result["final_artifacts"]))
-            reply = interpret_result("explain model", intent, plan, execution["raw_reply"], self.modeling_context(), {})
-            self.assertIn(model_result_id, reply)
-            self.assertIn("metrics", reply.lower())
+            bundle = build_presentation_bundle_from_raw_execution(
+                plan=plan,
+                raw_results={"workflow_result": execution["workflow_result"]},
+                task_goal="explain model",
+                task_plan_summary={"primary_goal": "modeling"},
+                coordinator_status="succeeded",
+            )
+            reply = bundle["reply"]
+            self.assertIn("Completed", reply)
+            self.assertTrue(bundle["presentation_result"]["artifact_refs"])
+            self.assertNotIn("workspace", reply)
 
     def test_missing_target_variable_does_not_create_modeling_workflow(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -499,8 +551,16 @@ class WorkflowExecutorTests(unittest.TestCase):
             exported_path = Path(export_step["tool_result"]["outputs"]["path"])
             self.assertTrue(exported_path.exists())
             self.assertEqual(exported_path.suffix.lower(), ".png")
-            reply = interpret_result("export map", {"intent": "data_processing"}, plan, execution["raw_reply"], {"active_dataset": {"name": "points"}}, {})
-            self.assertIn(str(exported_path), reply)
+            bundle = build_presentation_bundle_from_raw_execution(
+                plan=plan,
+                raw_results={"workflow_result": execution["workflow_result"]},
+                task_goal="export map",
+                task_plan_summary={"primary_goal": "data_processing"},
+                coordinator_status="succeeded",
+            )
+            reply = bundle["reply"]
+            self.assertIn(exported_path.name, reply)
+            self.assertNotIn(str(exported_path), reply)
 
     def test_vector_clip_result_can_be_exported_to_shapefile_zip(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

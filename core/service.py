@@ -19,14 +19,22 @@ from .conversation_intent import classify_user_intent
 from .conversation_state import ConversationState, load_conversation_state, recover_conversation_state, save_conversation_state
 from .followup_resolver import resolve_followup
 from .frontend_context import apply_frontend_context_to_state, sanitize_frontend_context
+from .llm_task_planner import build_llm_task_plan, build_shadow_llm_task_plan
+from .llm_planner_observability import summarize_shadow_plan
 from .model_results import generate_model_result_id
+from .coordinated_executor import run_coordinated_execution
+from .download_request_executor import execute_download_requests
+from .presentation_result import build_presentation_bundle, build_presentation_bundle_from_raw_execution
 from .response_postprocess import clean_assistant_reply
 from .result_interpreter import interpret_result
+from .response_language import enforce_user_text_language, localized_text, normalize_response_language
 from .task_planner import build_task_plan
+from .plan_validator import validate_task_plan_before_execution
 from .task_outcome_advisor import build_task_outcome
 from .tool_executor import execute_validated_tool_plan
 from .tool_context import ToolRuntimeContext
 from .workflow_executor import execute_workflow_plan
+from .workflows.data_package import format_ingest_message, ingest_data_package
 
 try:
     from .data_manager import DataManager
@@ -48,6 +56,17 @@ TEXT_DEEP_KEYWORDS = (
 )
 FAST_KEYWORDS = ("快速", "简要", "概括", "一句话", "简洁", "速览")
 LOCAL_LIBRARY_CONTEXT_MARKER = "【本地文件库上下文】"
+
+
+def _artifact_is_image(artifact: dict[str, Any]) -> bool:
+    artifact_type = str(artifact.get("type") or artifact.get("kind") or "").lower()
+    mime_type = str(artifact.get("mime_type") or "").lower()
+    path = str(artifact.get("path") or artifact.get("name") or artifact.get("title") or "").lower()
+    return (
+        artifact_type in {"map", "image", "plot", "visual", "visualization"}
+        or mime_type.startswith("image/")
+        or Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".svg"}
+    )
 
 
 def _visible_chat_content(content: str) -> str:
@@ -266,10 +285,7 @@ class GISWorkspaceService:
             self.manager.log_operation("切换对话", clean, "chat")
             return True
 
-        self.current_session_id = self._ensure_session()
-        self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), self.current_session_id)
-        self.manager.log_operation("会话已失效，使用当前会话继续", clean, "chat")
-        return False
+        raise FileNotFoundError(f"session not found: {clean}")
 
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = self.manager.database.list_conversations()
@@ -352,18 +368,14 @@ class GISWorkspaceService:
 
         self._set_runtime_status("智能体正在重新生成", "已回退后续消息并重新调用模型", busy=True, phase="reasoning", progress=20)
         try:
-            model_name, image_paths, reason = self._decide_model(text)
-            agent = self._get_agent(model_name)
-            reply, _ = agent.ask(text, history=self._history_for_agent()[:-1], image_paths=image_paths)
-            self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
-            route_state = load_conversation_state(self.manager, self.current_session_id)
-            route_state.last_active_chat_model = model_name
-            save_conversation_state(self.manager, self.current_session_id, route_state)
-            assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "regenerated_from": int(message_id)}
-            self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
-            self.manager.log_operation("重新生成回复", f"message_id={message_id} | {model_name}", "chat")
-            self._set_runtime_status("重新生成完成", f"已使用模型 {model_name} 重新输出", busy=False, phase="complete", progress=100)
-            return {"reply": reply, "model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths}
+            result = self.ask(
+                text,
+                record_user_message=False,
+                extra_assistant_meta={"regenerated_from": int(message_id)},
+            )
+            self.manager.log_operation("retry_response_regenerated", f"message_id={message_id} | {result.get('model')}", "chat")
+            self._set_runtime_status("Regeneration complete", "Regenerated through LLM Planner", busy=False, phase="complete", progress=100)
+            return result
         except Exception:
             self._set_runtime_status("重新生成失败", "处理任务时出现错误", busy=False, phase="error", progress=0)
             raise
@@ -447,29 +459,30 @@ class GISWorkspaceService:
         self._mark_latest_upload_state()
         return message
 
-    def _register_uploaded_file(self, path: Path) -> str:
+    def _register_uploaded_file(self, path: Path, *, display_name: str = "", original_filename: str = "", zip_member: str = "") -> str:
+        dataset_hint = display_name or Path(original_filename or path.name).stem
         try:
-            return self._get_agent(self.selected_model).register_file(str(path))
+            if zip_member:
+                raise RuntimeError("LLM provider is not ready (ZIP_MEMBER_DIRECT_LOAD)")
+            return self._get_agent(self.selected_model).register_file(str(path), dataset_name=dataset_hint, original_filename=original_filename or path.name)
         except RuntimeError as exc:
-            if "LLM provider is not ready" not in str(exc) and "API_KEY_MISSING" not in str(exc):
+            if "LLM provider is not ready" not in str(exc) and "API_KEY_MISSING" not in str(exc) and "ZIP_MEMBER_DIRECT_LOAD" not in str(exc):
                 raise
-            dataset_name = self.manager.load_path(str(path))
+            dataset_name = self.manager.load_path(str(path), name=dataset_hint or None, original_filename=original_filename or path.name, zip_member=zip_member)
             record = self.manager.get(dataset_name)
-            return f"Loaded dataset {dataset_name} ({record.data_type}) from {Path(path).name} using deterministic registration because the LLM provider is unavailable."
+            return f"上传成功：{original_filename or Path(path).name}（数据集：{dataset_name}，类型：{record.data_type}）"
 
-    def upload_bytes_batch(self, files: list[tuple[str, bytes]]) -> list[str]:
+    def upload_saved_files_batch(self, files: list[tuple[Path, str]]) -> list[str]:
         if not files:
             return []
-
-        saved_paths: list[Path] = []
-        for filename, data in files:
-            saved_paths.append(self.manager.save_uploaded_bytes(filename, data))
 
         messages: list[str] = []
         grouped_shape_parts: dict[str, list[Path]] = defaultdict(list)
         other_paths: list[Path] = []
 
-        for path in saved_paths:
+        original_by_path: dict[Path, str] = {}
+        for path, original_filename in files:
+            original_by_path[path] = original_filename
             ext = path.suffix.lower()
             if ext in {".shp", ".shx", ".dbf", ".prj", ".cpg", ".sbn", ".sbx", ".qix", ".fix"}:
                 grouped_shape_parts[path.stem].append(path)
@@ -478,7 +491,14 @@ class GISWorkspaceService:
 
         for path in other_paths:
             try:
-                messages.append(self._register_uploaded_file(path))
+                original_filename = original_by_path.get(path, path.name)
+                messages.append(
+                    self._register_uploaded_file(
+                        path,
+                        display_name=Path(original_filename).stem,
+                        original_filename=original_filename,
+                    )
+                )
             except Exception as exc:
                 # ISMN/SMN-SDR station archives contain .stm time-series files. They are
                 # not ordinary tables, but the map endpoint can parse them directly from
@@ -493,6 +513,19 @@ class GISWorkspaceService:
                             continue
                     except Exception:
                         pass
+                    try:
+                        original_filename = original_by_path.get(path, path.name)
+                        package_result = ingest_data_package(
+                            self.manager,
+                            str(path),
+                            user_goal="上传数据包后的自动识别与分析准备",
+                            output_prefix=Path(original_filename).stem,
+                        )
+                        if int(package_result.get("loaded_count") or 0) > 0:
+                            messages.append(format_ingest_message(package_result))
+                            continue
+                    except Exception:
+                        pass
                 raise exc
 
         for stem, paths in grouped_shape_parts.items():
@@ -503,6 +536,12 @@ class GISWorkspaceService:
 
         self._mark_latest_upload_state()
         return messages
+
+    def upload_bytes_batch(self, files: list[tuple[str, bytes]]) -> list[str]:
+        if not files:
+            return []
+        saved_paths = [(self.manager.save_uploaded_bytes(filename, data), filename) for filename, data in files]
+        return self.upload_saved_files_batch(saved_paths)
 
     def _mark_latest_upload_state(self) -> None:
         if not self.current_session_id:
@@ -597,6 +636,13 @@ class GISWorkspaceService:
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for target in copied:
                 zf.write(target, target.relative_to(export_root))
+        artifact = self.manager.register_artifact(
+            path=str(zip_path),
+            type="archive",
+            title=zip_path.name,
+            description="Workspace result export archive.",
+            source_tool="workspace_export",
+        )
 
         self.manager.log_operation(
             "导出结果文件",
@@ -607,6 +653,7 @@ class GISWorkspaceService:
             "mode": mode,
             "export_dir": str(export_root),
             "zip_path": str(zip_path),
+            "artifact_id": artifact.get("artifact_id", ""),
             "file_count": len(copied),
             "files": [str(item) for item in copied[:20]],
         }
@@ -948,7 +995,10 @@ class GISWorkspaceService:
             metrics_path = str(item.get("path") or "")
             if (metrics_dataset, metrics_path, prefix, model) in registered_keys:
                 continue
-            metrics = self._read_first_csv_record(metrics_path)
+            try:
+                metrics = self._read_first_csv_record(metrics_path)
+            except FileNotFoundError:
+                continue
             importance_name = f"{prefix}_{key}_importance.csv"
             summary_name = f"{prefix}_{key}_summary.json"
             model_name = f"{prefix}_{key}_model.joblib"
@@ -1121,16 +1171,24 @@ class GISWorkspaceService:
     def _clean_assistant_reply(self, reply: str) -> str:
         return clean_assistant_reply(str(reply or ""))
 
-    def ask(self, prompt: str, visible_prompt: str | None = None, frontend_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    def ask(
+        self,
+        prompt: str,
+        visible_prompt: str | None = None,
+        frontend_context: dict[str, Any] | None = None,
+        record_user_message: bool = True,
+        extra_assistant_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if not self.current_session_id:
             self.current_session_id = self._ensure_session()
 
         user_message = _visible_chat_content(visible_prompt if visible_prompt is not None else prompt)
         existing_messages = self.current_messages()
-        if len(existing_messages) == 0:
+        if record_user_message and len(existing_messages) == 0:
             self.manager.database.rename_conversation(self.current_session_id, self._default_title(user_message))
 
-        self.manager.database.add_message(self.current_session_id, "user", user_message)
+        if record_user_message:
+            self.manager.database.add_message(self.current_session_id, "user", user_message)
         self._set_runtime_status("智能体正在运行", "正在解析任务与选择模型", busy=True, phase="routing", progress=10)
 
         try:
@@ -1145,14 +1203,99 @@ class GISWorkspaceService:
             if followup.get("referenced_object"):
                 state.referenced_object = followup["referenced_object"]
             context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
-            plan = build_task_plan(user_message, intent, context, manager=self.manager)
+            candidate_plan = build_task_plan(user_message, intent, context, manager=self.manager)
+            llm_active_plan = build_llm_task_plan(user_message, context)
+            plan = llm_active_plan.get("plan") if isinstance(llm_active_plan.get("plan"), dict) else candidate_plan
+            plan_validation: dict[str, Any] | None = None
+            if llm_active_plan.get("status") == "ready":
+                plan_validation = validate_task_plan_before_execution(plan, context)
+                plan = plan_validation.get("execution_plan") if isinstance(plan_validation.get("execution_plan"), dict) else plan
+            llm_shadow_plan = build_shadow_llm_task_plan(user_message, context, candidate_plan)
+
+            def _assistant_meta(payload: dict[str, Any]) -> dict[str, Any]:
+                payload["llm_planner"] = {
+                    key: value
+                    for key, value in llm_active_plan.items()
+                    if key not in {"plan"}
+                }
+                payload["llm_task_plan"] = plan.get("llm_task_plan") or plan
+                if plan_validation is not None:
+                    payload["plan_validation"] = plan_validation
+                if isinstance(llm_shadow_plan, dict) and llm_shadow_plan.get("status") != "disabled":
+                    payload["llm_shadow_plan"] = llm_shadow_plan
+                    payload.update(summarize_shadow_plan(llm_shadow_plan))
+                if extra_assistant_meta:
+                    payload.update(extra_assistant_meta)
+                return payload
+
             builtin_reply = self._builtin_workspace_reply(user_message)
 
+            if llm_active_plan.get("status") != "ready":
+                response_language = normalize_response_language(context.get("response_language"), user_message)
+                reply = enforce_user_text_language(
+                    plan.get("clarification_question") or localized_text("generic_no_plan", response_language),
+                    response_language,
+                    "generic_no_plan",
+                )
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": "clarification",
+                    "reason": str(llm_active_plan.get("status") or "llm_planner_unavailable"),
+                    "intent": intent,
+                    "plan": {**plan, "response_language": response_language},
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "clarification", "model": "conversation-coordinator", "reason": assistant_meta["reason"], "images": []}
+                self._set_runtime_status("Waiting for clarification", reply, busy=False, phase="clarification", progress=100)
+                return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": assistant_meta["reason"], "images": [], "task_outcome": task_outcome}
+
+            if plan_validation is not None and not plan_validation.get("ok"):
+                errors = plan_validation.get("errors") if isinstance(plan_validation.get("errors"), list) else []
+                reason_text = "; ".join(str(error.get("code") or error.get("message") or "") for error in errors if isinstance(error, dict))
+                response_language = normalize_response_language(context.get("response_language"), user_message)
+                fallback = "已验证的 LLM 计划在执行前被门控阻断。" if response_language.startswith("zh") else "The validated LLM plan was blocked before execution."
+                reply = enforce_user_text_language(plan.get("clarification_question") or reason_text or fallback, response_language, "invalid_llm_plan")
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": "clarification",
+                    "reason": "plan_validation_blocked",
+                    "intent": intent,
+                    "plan": plan,
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "clarification", "model": "conversation-coordinator", "reason": "plan_validation_blocked", "images": []}
+                self._set_runtime_status("Execution blocked", reply, busy=False, phase="clarification", progress=100)
+                return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "plan_validation_blocked", "images": [], "task_outcome": task_outcome}
+
             if plan.get("should_ask_clarification") and builtin_reply is None:
+                response_language = normalize_response_language(context.get("response_language"), user_message)
+                plan["clarification_question"] = enforce_user_text_language(plan.get("clarification_question") or "", response_language, "low_confidence")
                 reply = interpret_result(user_message, intent, plan, str(plan.get("clarification_question") or ""), context, dashboard_data)
                 reply = self._clean_assistant_reply(reply)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
-                assistant_meta = {"model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "intent": intent, "plan": plan}
+                assistant_meta = _assistant_meta({"model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "intent": intent, "plan": plan})
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1168,19 +1311,232 @@ class GISWorkspaceService:
                 self._set_runtime_status("等待补充信息", str(plan.get("clarification_question") or ""), busy=False, phase="clarification", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "images": [], "task_outcome": task_outcome}
 
+            download_requests = plan.get("download_requests") if isinstance(plan.get("download_requests"), list) else []
+            if download_requests:
+                download_execution = execute_download_requests(
+                    self.manager,
+                    plan,
+                    context=context,
+                    runtime_context=self._tool_runtime_context(),
+                )
+                if download_execution.get("executed"):
+                    dashboard_data = self.dashboard()
+                    context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+                    tool_results = download_execution.get("tool_results") if isinstance(download_execution.get("tool_results"), list) else []
+                    presentation_bundle = build_presentation_bundle(
+                        task_goal=str(plan.get("primary_goal") or plan.get("task_type") or intent.get("intent") or user_message),
+                        task_plan_summary={
+                            "primary_goal": plan.get("primary_goal") or plan.get("task_type") or "",
+                            "intent": plan.get("intent") or intent.get("intent") or "",
+                            "operation": plan.get("operation") or "",
+                            "response_language": plan.get("response_language") or context.get("response_language") or "",
+                        },
+                        coordinator_status=str(download_execution.get("status") or ""),
+                        normalized_results=tool_results,
+                        response_language=str(plan.get("response_language") or context.get("response_language") or ""),
+                    )
+                    normalized_results = presentation_bundle["normalized_results"]
+                    presentation_result = presentation_bundle["presentation_result"]
+                    execution_summary = presentation_bundle["execution_summary"]
+                    reply = self._clean_assistant_reply(str(presentation_bundle["reply"]))
+                    task_outcome = build_task_outcome("download", {"reply": reply, "presentation_result": presentation_result}, dashboard=dashboard_data)
+                    current_artifacts: list[dict[str, Any]] = []
+                    download_management_views: list[dict[str, Any]] = []
+                    for tool_result in tool_results:
+                        if not isinstance(tool_result, dict):
+                            continue
+                        artifacts = tool_result.get("artifacts") if isinstance(tool_result.get("artifacts"), list) else []
+                        current_artifacts.extend([artifact for artifact in artifacts if isinstance(artifact, dict)])
+                        diagnostics = tool_result.get("diagnostics") if isinstance(tool_result.get("diagnostics"), dict) else {}
+                        management_view = diagnostics.get("management_view")
+                        if isinstance(management_view, dict):
+                            download_management_views.append(management_view)
+                    status = str(download_execution.get("status") or "")
+                    reason = "validated_download_requests"
+                    assistant_meta = _assistant_meta({
+                        "model": "conversation-coordinator",
+                        "mode": "validated_download_executor",
+                        "reason": reason,
+                        "intent": intent,
+                        "plan": plan,
+                        "normalized_results": normalized_results,
+                        "presentation_result": presentation_result,
+                        "execution_summary": execution_summary,
+                        "download_management_views": download_management_views,
+                        "execution_trace": download_execution.get("execution_trace"),
+                        "result_rendering_path": "presentation_result",
+                        "presentation_source": presentation_bundle.get("presentation_source"),
+                        "legacy_result_fallback_available": False,
+                        "prevalidated_executor_used": True,
+                        "prevalidated_executor_type": "download_requests",
+                        "prevalidated_executor_rejected": False,
+                        "user_facing_result_fallback_used": False,
+                        "deprecated_raw_job_api_used": False,
+                        "legacy_download_url_used": False,
+                        "artifacts": current_artifacts,
+                        "files": current_artifacts,
+                        "user_facing_result": {},
+                        "newly_executed": True,
+                        "source": "current_execution",
+                    })
+                    self._update_conversation_state_after_turn(
+                        state,
+                        user_message=user_message,
+                        intent=intent,
+                        plan=plan,
+                        context=context,
+                        reply=reply,
+                        dashboard_data=dashboard_data,
+                    )
+                    self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                    self.last_route = {"mode": "validated_download_executor", "model": "conversation-coordinator", "reason": reason, "images": []}
+                    self.manager.log_operation("validated_download_execution", ",".join(download_execution.get("executed_tools", [])), "download")
+                    self._set_runtime_status("Download execution finished", reply, busy=False, phase="complete" if status == "succeeded" else "clarification", progress=100)
+                    return {
+                        "reply": reply,
+                        "model": "conversation-coordinator",
+                        "mode": "validated_download_executor",
+                        "reason": reason,
+                        "images": [],
+                        "artifacts": current_artifacts,
+                        "files": current_artifacts,
+                        "user_facing_result": {},
+                        "presentation_result": presentation_result,
+                        "execution_summary": execution_summary,
+                        "download_management_views": download_management_views,
+                        "task_outcome": task_outcome,
+                    }
+
+            coordinated_execution = run_coordinated_execution(
+                self.manager,
+                plan,
+                context,
+                user_message,
+                runtime_context=self._tool_runtime_context(),
+            )
+            if coordinated_execution.get("executed") or coordinated_execution.get("blocked_reason") != "NO_EXECUTABLE_STEPS":
+                raw_reply = json.dumps(coordinated_execution, ensure_ascii=False, default=str)
+                dashboard_data = self.dashboard()
+                context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+                tool_results = coordinated_execution.get("tool_results") if isinstance(coordinated_execution.get("tool_results"), list) else []
+                raw_normalized_results = coordinated_execution.get("normalized_results") if isinstance(coordinated_execution.get("normalized_results"), list) else []
+                presentation_bundle = build_presentation_bundle(
+                    task_goal=str(plan.get("primary_goal") or plan.get("task_type") or intent.get("intent") or user_message),
+                    task_plan_summary={
+                        "primary_goal": plan.get("primary_goal") or plan.get("task_type") or "",
+                        "intent": plan.get("intent") or intent.get("intent") or "",
+                        "operation": plan.get("operation") or "",
+                        "response_language": plan.get("response_language") or context.get("response_language") or "",
+                    },
+                    coordinator_status=str(coordinated_execution.get("status") or ""),
+                    normalized_results=raw_normalized_results,
+                    response_language=str(plan.get("response_language") or context.get("response_language") or ""),
+                )
+                normalized_results = presentation_bundle["normalized_results"]
+                presentation_result = presentation_bundle["presentation_result"]
+                execution_summary = presentation_bundle["execution_summary"]
+                reply = str(presentation_bundle["reply"])
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply, "presentation_result": presentation_result}, dashboard=dashboard_data)
+                images: list[str] = []
+                current_artifacts: list[dict[str, Any]] = []
+                for tool_result in tool_results:
+                    if not isinstance(tool_result, dict):
+                        continue
+                    artifacts = tool_result.get("artifacts") if isinstance(tool_result.get("artifacts"), list) else []
+                    current_artifacts.extend([artifact for artifact in artifacts if isinstance(artifact, dict)])
+                    for artifact in artifacts:
+                        if isinstance(artifact, dict) and _artifact_is_image(artifact) and artifact.get("path"):
+                            images.append(str(artifact["path"]))
+                if not coordinated_execution.get("ok"):
+                    state.last_error = {
+                        "message": raw_reply,
+                        "task_type": plan.get("task_type") or intent.get("intent"),
+                        "prompt": user_message,
+                        "blocked_reason": coordinated_execution.get("blocked_reason"),
+                    }
+                status = str(coordinated_execution.get("status") or "")
+                mode = "coordinated_workflow" if coordinated_execution.get("executed") else "clarification"
+                reason = str(coordinated_execution.get("blocked_reason") or "workflow_coordinator")
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": mode,
+                    "reason": reason,
+                    "intent": intent,
+                    "plan": plan,
+                    "coordinator_decisions": coordinated_execution.get("coordinator_decisions"),
+                    "normalized_results": normalized_results,
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
+                    "result_rendering_path": "presentation_result",
+                    "presentation_source": presentation_bundle.get("presentation_source"),
+                    "legacy_result_fallback_available": False,
+                    "coordinator_budget": coordinated_execution.get("coordinator_budget"),
+                    "final_decision": coordinated_execution.get("final_decision"),
+                    "artifacts": current_artifacts,
+                    "files": current_artifacts,
+                    "user_facing_result": {},
+                    "newly_executed": bool(coordinated_execution.get("executed")),
+                    "source": "current_execution",
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                    images=images,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": mode, "model": "conversation-coordinator", "reason": reason, "images": images}
+                self.manager.log_operation("coordinated_workflow_execution", ",".join(coordinated_execution.get("executed_tools", [])), "workflow")
+                phase = "complete" if status == "succeeded" else "clarification"
+                self._set_runtime_status("Execution complete" if status == "succeeded" else "Execution blocked", reply, busy=False, phase=phase, progress=100)
+                return {
+                    "reply": reply,
+                    "model": "conversation-coordinator",
+                    "mode": mode,
+                    "reason": reason,
+                    "images": images,
+                    "artifacts": current_artifacts,
+                    "files": current_artifacts,
+                    "user_facing_result": {},
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
+                    "task_outcome": task_outcome,
+                }
+
             workflow_execution = execute_workflow_plan(self.manager, plan, context=self._tool_runtime_context()) if plan.get("workflow_plan") else {"executed": False}
             if workflow_execution.get("executed"):
                 raw_reply = str(workflow_execution.get("raw_reply") or "")
                 dashboard_data = self.dashboard()
                 context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
-                reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
-                reply = self._clean_assistant_reply(reply)
-                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
-                images: list[str] = []
                 workflow_result = workflow_execution.get("workflow_result") if isinstance(workflow_execution.get("workflow_result"), dict) else {}
+                presentation_bundle = build_presentation_bundle_from_raw_execution(
+                    plan=plan,
+                    raw_results={"workflow_result": workflow_result},
+                    task_goal=str(plan.get("primary_goal") or plan.get("task_type") or intent.get("intent") or user_message),
+                    task_plan_summary={
+                        "primary_goal": plan.get("primary_goal") or plan.get("task_type") or "",
+                        "intent": plan.get("intent") or intent.get("intent") or "",
+                        "operation": plan.get("operation") or "",
+                        "response_language": plan.get("response_language") or context.get("response_language") or "",
+                    },
+                    coordinator_status=str(workflow_result.get("status") or ("succeeded" if workflow_execution.get("ok") else "failed")),
+                    response_language=str(plan.get("response_language") or context.get("response_language") or ""),
+                )
+                normalized_results = presentation_bundle["normalized_results"]
+                presentation_result = presentation_bundle["presentation_result"]
+                execution_summary = presentation_bundle["execution_summary"]
+                reply = str(presentation_bundle["reply"]) if workflow_result else interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply, "presentation_result": presentation_result}, dashboard=dashboard_data)
+                images: list[str] = []
                 artifacts = workflow_result.get("final_artifacts") if isinstance(workflow_result.get("final_artifacts"), list) else []
                 for artifact in artifacts:
-                    if isinstance(artifact, dict) and str(artifact.get("type") or "") == "map" and artifact.get("path"):
+                    if isinstance(artifact, dict) and _artifact_is_image(artifact) and artifact.get("path"):
                         images.append(str(artifact["path"]))
                 if not workflow_execution.get("ok"):
                     state.last_error = {
@@ -1189,14 +1545,31 @@ class GISWorkspaceService:
                         "prompt": user_message,
                         "failed_step": workflow_execution.get("failed_step"),
                     }
-                assistant_meta = {
+                assistant_meta = _assistant_meta({
                     "model": "conversation-coordinator",
-                    "mode": "deterministic_workflow",
-                    "reason": "workflow_plan",
+                    "mode": "validated_workflow_executor",
+                    "reason": "validated_workflow_plan",
                     "intent": intent,
                     "plan": plan,
-                    "workflow_execution": workflow_execution,
-                }
+                    "normalized_results": normalized_results,
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
+                    "result_rendering_path": "presentation_result",
+                    "presentation_source": presentation_bundle.get("presentation_source"),
+                    "legacy_result_fallback_available": True,
+                    "prevalidated_executor_used": True,
+                    "prevalidated_executor_type": "workflow",
+                    "prevalidated_executor_rejected": False,
+                    "result_rendering_path": "presentation_result",
+                    "user_facing_result_fallback_used": False,
+                    "deprecated_raw_job_api_used": False,
+                    "legacy_download_url_used": False,
+                    "artifacts": artifacts,
+                    "files": artifacts,
+                    "user_facing_result": {},
+                    "newly_executed": True,
+                    "source": "current_execution",
+                })
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1209,19 +1582,24 @@ class GISWorkspaceService:
                 )
                 self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
                 self.last_route = {
-                    "mode": "deterministic_workflow",
+                    "mode": "validated_workflow_executor",
                     "model": "conversation-coordinator",
-                    "reason": "workflow_plan",
+                    "reason": "validated_workflow_plan",
                     "images": images,
                 }
-                self.manager.log_operation("deterministic_workflow_execution", ",".join(workflow_execution.get("executed_steps", [])), "workflow")
+                self.manager.log_operation("validated_workflow_execution", ",".join(workflow_execution.get("executed_steps", [])), "workflow")
                 self._set_runtime_status("运行完成", "已执行经过验证的 GIS 工作流", busy=False, phase="complete", progress=100)
                 return {
                     "reply": reply,
                     "model": "conversation-coordinator",
-                    "mode": "deterministic_workflow",
-                    "reason": "workflow_plan",
+                    "mode": "validated_workflow_executor",
+                    "reason": "validated_workflow_plan",
                     "images": images,
+                    "artifacts": artifacts,
+                    "files": artifacts,
+                    "user_facing_result": {},
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
                     "task_outcome": task_outcome,
                 }
 
@@ -1230,16 +1608,35 @@ class GISWorkspaceService:
                 raw_reply = str(deterministic_execution.get("raw_reply") or "")
                 dashboard_data = self.dashboard()
                 context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
-                reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
+                tool_results = deterministic_execution.get("tool_results") if isinstance(deterministic_execution.get("tool_results"), list) else []
+                presentation_bundle = build_presentation_bundle_from_raw_execution(
+                    plan=plan,
+                    raw_results={"tool_results": tool_results},
+                    task_goal=str(plan.get("primary_goal") or plan.get("task_type") or intent.get("intent") or user_message),
+                    task_plan_summary={
+                        "primary_goal": plan.get("primary_goal") or plan.get("task_type") or "",
+                        "intent": plan.get("intent") or intent.get("intent") or "",
+                        "operation": plan.get("operation") or "",
+                        "response_language": plan.get("response_language") or context.get("response_language") or "",
+                    },
+                    coordinator_status=str(deterministic_execution.get("status") or ("succeeded" if deterministic_execution.get("ok") else "failed")),
+                    response_language=str(plan.get("response_language") or context.get("response_language") or ""),
+                )
+                normalized_results = presentation_bundle["normalized_results"]
+                presentation_result = presentation_bundle["presentation_result"]
+                execution_summary = presentation_bundle["execution_summary"]
+                reply = str(presentation_bundle["reply"]) if tool_results else interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
                 reply = self._clean_assistant_reply(reply)
-                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                task_outcome = build_task_outcome("analysis", {"reply": reply, "presentation_result": presentation_result}, dashboard=dashboard_data)
                 images: list[str] = []
+                current_artifacts: list[dict[str, Any]] = []
                 for tool_result in deterministic_execution.get("tool_results", []):
                     if not isinstance(tool_result, dict):
                         continue
                     artifacts = tool_result.get("artifacts") if isinstance(tool_result.get("artifacts"), list) else []
+                    current_artifacts.extend([artifact for artifact in artifacts if isinstance(artifact, dict)])
                     for artifact in artifacts:
-                        if isinstance(artifact, dict) and str(artifact.get("type") or "") == "map" and artifact.get("path"):
+                        if isinstance(artifact, dict) and _artifact_is_image(artifact) and artifact.get("path"):
                             images.append(str(artifact["path"]))
                 if not deterministic_execution.get("ok"):
                     state.last_error = {
@@ -1248,14 +1645,31 @@ class GISWorkspaceService:
                         "prompt": user_message,
                         "failed_tool": deterministic_execution.get("failed_tool"),
                     }
-                assistant_meta = {
+                assistant_meta = _assistant_meta({
                     "model": "conversation-coordinator",
-                    "mode": "deterministic_tool",
-                    "reason": "validated_tool_args",
+                    "mode": "validated_tool_executor",
+                    "reason": "validated_tool_plan",
                     "intent": intent,
                     "plan": plan,
-                    "tool_execution": deterministic_execution,
-                }
+                    "normalized_results": normalized_results,
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
+                    "result_rendering_path": "presentation_result",
+                    "presentation_source": presentation_bundle.get("presentation_source"),
+                    "legacy_result_fallback_available": True,
+                    "prevalidated_executor_used": True,
+                    "prevalidated_executor_type": "tool",
+                    "prevalidated_executor_rejected": False,
+                    "result_rendering_path": "presentation_result",
+                    "user_facing_result_fallback_used": False,
+                    "deprecated_raw_job_api_used": False,
+                    "legacy_download_url_used": False,
+                    "artifacts": current_artifacts,
+                    "files": current_artifacts,
+                    "user_facing_result": {},
+                    "newly_executed": True,
+                    "source": "current_execution",
+                })
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1268,19 +1682,24 @@ class GISWorkspaceService:
                 )
                 self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
                 self.last_route = {
-                    "mode": "deterministic_tool",
+                    "mode": "validated_tool_executor",
                     "model": "conversation-coordinator",
-                    "reason": "validated_tool_args",
+                    "reason": "validated_tool_plan",
                     "images": images,
                 }
-                self.manager.log_operation("deterministic_tool_execution", ",".join(deterministic_execution.get("executed_tools", [])), "tool")
+                self.manager.log_operation("validated_tool_execution", ",".join(deterministic_execution.get("executed_tools", [])), "tool")
                 self._set_runtime_status("运行完成", "已执行经过验证的 GIS 工具计划", busy=False, phase="complete", progress=100)
                 return {
                     "reply": reply,
                     "model": "conversation-coordinator",
-                    "mode": "deterministic_tool",
-                    "reason": "validated_tool_args",
+                    "mode": "validated_tool_executor",
+                    "reason": "validated_tool_plan",
                     "images": images,
+                    "artifacts": current_artifacts,
+                    "files": current_artifacts,
+                    "user_facing_result": {},
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
                     "task_outcome": task_outcome,
                 }
 
@@ -1289,7 +1708,7 @@ class GISWorkspaceService:
                 task_outcome = build_task_outcome("analysis", {"reply": builtin_reply}, dashboard=dashboard_data)
                 builtin_reply = interpret_result(user_message, intent, plan, builtin_reply, context, dashboard_data)
                 builtin_reply = self._clean_assistant_reply(builtin_reply)
-                assistant_meta = {"model": "builtin-workspace", "mode": "builtin", "reason": "builtin_workspace_prompt", "intent": intent, "plan": plan}
+                assistant_meta = _assistant_meta({"model": "builtin-workspace", "mode": "builtin", "reason": "builtin_workspace_prompt", "intent": intent, "plan": plan})
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1324,14 +1743,14 @@ class GISWorkspaceService:
                 reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
                 reply = self._clean_assistant_reply(reply)
                 task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
-                assistant_meta = {
+                assistant_meta = _assistant_meta({
                     "model": "conversation-coordinator",
                     "mode": "deterministic_context",
                     "reason": "referenced_object_context",
                     "intent": intent,
                     "plan": plan,
                     "referenced_object": referenced,
-                }
+                })
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1354,27 +1773,16 @@ class GISWorkspaceService:
                     "task_outcome": task_outcome,
                 }
 
-            model_name, image_paths, reason = self._decide_model(prompt)
-            self._set_runtime_status("智能体正在运行", f"正在调用 {model_name} 并执行 GIS 工具", busy=True, phase="reasoning", progress=45)
-            agent = self._get_agent(model_name)
-            enhanced_prompt = (
-                f"{prompt}\n\n【对话协调上下文】\n{format_context_for_agent(context)}"
-                f"\n\n【结构化任务计划】\n{json.dumps(plan, ensure_ascii=False, indent=2, default=str)}"
-                "\n\n请严格基于以上上下文、当前工作区和工具结果回答；不要编造字段、路径、指标或图件内容。"
-            )
-            reply, _ = agent.ask(enhanced_prompt, history=self._history_for_agent()[:-1], image_paths=image_paths)
-            if self._should_append_model_result_context(user_message, reply):
-                model_context = self._format_latest_model_result_context()
-                if model_context:
-                    reply = f"{reply.rstrip()}\n{model_context}"
-            dashboard_data = self.dashboard()
-            context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
-            reply = interpret_result(user_message, intent, plan, reply, context, dashboard_data)
+            reply = str(plan.get("clarification_question") or "The LLM plan was validated, but it did not contain an executable tool step for this request.")
             reply = self._clean_assistant_reply(reply)
             task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
-            self.last_route = {"mode": self.route_mode, "model": model_name, "reason": reason, "images": image_paths}
-            state.last_active_chat_model = model_name
-            assistant_meta = {"model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "intent": intent, "plan": plan}
+            assistant_meta = _assistant_meta({
+                "model": "conversation-coordinator",
+                "mode": "clarification",
+                "reason": "no_executable_validated_plan",
+                "intent": intent,
+                "plan": plan,
+            })
             self._update_conversation_state_after_turn(
                 state,
                 user_message=user_message,
@@ -1383,12 +1791,11 @@ class GISWorkspaceService:
                 context=context,
                 reply=reply,
                 dashboard_data=dashboard_data,
-                images=image_paths,
             )
             self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
-            self.manager.log_operation("模型路由", f"{model_name} | {reason}", "route")
-            self._set_runtime_status("运行完成", f"已完成任务，使用模型 {model_name}", busy=False, phase="complete", progress=100)
-            return {"reply": reply, "model": model_name, "mode": self.route_mode, "reason": reason, "images": image_paths, "task_outcome": task_outcome}
+            self.last_route = {"mode": "clarification", "model": "conversation-coordinator", "reason": "no_executable_validated_plan", "images": []}
+            self._set_runtime_status("No executable validated plan", reply, busy=False, phase="clarification", progress=100)
+            return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "no_executable_validated_plan", "images": [], "task_outcome": task_outcome}
         except Exception as exc:
             try:
                 state = recover_conversation_state(self.manager, self.current_session_id)

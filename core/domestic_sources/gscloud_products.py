@@ -26,38 +26,44 @@ LANDSAT8_OLI_TIRS = GSCloudProduct(
     download_mode="scene_table",
 )
 
-MODND1D_CHINA_500M_NDVI_DAILY = GSCloudProduct(
-    key="modnd1d_china_500m_ndvi_daily",
-    name="MODND1D 中国 500M NDVI 每天产品",
-    resource_type="modnd1d_ndvi_daily",
-    dataset_id="343",
+MODND1T_CHINA_500M_NDVI_10DAY = GSCloudProduct(
+    key="modnd1t_china_500m_ndvi_10day",
+    name="MODND1T 中国 500M NDVI 旬合成产品",
+    resource_type="modnd1t_ndvi_10day",
+    dataset_id="346",
     pid="333",
-    access_url="https://www.gscloud.cn/sources/accessdata/343?pid=333",
-    aliases=("modnd1d", "ndvi", "中国 500m ndvi", "500m ndvi", "modis ndvi", "每日ndvi", "每天产品"),
+    access_url="https://www.gscloud.cn/sources/accessdata/346?pid=333",
+    aliases=("modnd1t", "modnd1d", "ndvi", "中国 500m ndvi", "500m ndvi", "modis ndvi", "旬合成", "旬产品", "10天合成", "十天合成"),
     download_mode="scene_table",
 )
 
-MODL1D_CHINA_1KM_LST_DAILY = GSCloudProduct(
-    key="modl1d_china_1km_lst_daily",
-    name="MODL1D 中国 1KM 地表温度每天产品",
-    resource_type="modl1d_lst_daily",
-    dataset_id="334",
+MODND1D_CHINA_500M_NDVI_DAILY = MODND1T_CHINA_500M_NDVI_10DAY
+
+MODL1T_CHINA_1KM_LST_COMPOSITE = GSCloudProduct(
+    key="modl1t_china_1km_lst_composite",
+    name="MODLT1T 中国 1KM 地表温度旬合成产品",
+    resource_type="modl1t_lst_composite",
+    dataset_id="337",
     pid="333",
-    access_url="https://www.gscloud.cn/sources/accessdata/334?pid=333",
-    aliases=("modl1d", "地表温度", "lst", "1km 地表温度", "1km lst", "modis 地表温度", "每天产品"),
+    access_url="https://www.gscloud.cn/sources/accessdata/337?pid=333",
+    aliases=("modlt1t", "modl1t", "modl1d", "地表温度", "lst", "1km 地表温度", "1km lst", "modis 地表温度", "旬合成", "旬产品", "10天合成", "十天合成"),
     download_mode="scene_table",
 )
 
-MODEV1F_CHINA_250M_EVI_5DAY = GSCloudProduct(
-    key="modev1f_china_250m_evi_5day",
-    name="MODEV1F 中国 250M EVI 五天合成产品",
-    resource_type="modev1f_evi_5day",
-    dataset_id="352",
+MODL1D_CHINA_1KM_LST_DAILY = MODL1T_CHINA_1KM_LST_COMPOSITE
+
+MODEV1T_CHINA_250M_EVI_10DAY = GSCloudProduct(
+    key="modev1t_china_250m_evi_10day",
+    name="MODEV1T 中国 250M EVI 旬合成产品",
+    resource_type="modev1t_evi_10day",
+    dataset_id="353",
     pid="333",
-    access_url="https://www.gscloud.cn/sources/accessdata/352?pid=333",
-    aliases=("modev1f", "evi", "250m evi", "modis evi", "五天合成", "5天合成", "五日合成", "5day evi"),
+    access_url="https://www.gscloud.cn/sources/accessdata/353?pid=333",
+    aliases=("modev1t", "modev1f", "evi", "250m evi", "modis evi", "旬合成", "旬产品", "10天合成", "十天合成"),
     download_mode="scene_table",
 )
+
+MODEV1F_CHINA_250M_EVI_5DAY = MODEV1T_CHINA_250M_EVI_10DAY
 
 MOD021KM_1KM_SURFACE_REFLECTANCE = GSCloudProduct(
     key="mod021km_1km_surface_reflectance",
@@ -84,9 +90,9 @@ SENTINEL2_MSI = GSCloudProduct(
 
 GSCLOUD_PRODUCTS = {
     LANDSAT8_OLI_TIRS.key: LANDSAT8_OLI_TIRS,
-    MODND1D_CHINA_500M_NDVI_DAILY.key: MODND1D_CHINA_500M_NDVI_DAILY,
-    MODL1D_CHINA_1KM_LST_DAILY.key: MODL1D_CHINA_1KM_LST_DAILY,
-    MODEV1F_CHINA_250M_EVI_5DAY.key: MODEV1F_CHINA_250M_EVI_5DAY,
+    MODND1T_CHINA_500M_NDVI_10DAY.key: MODND1T_CHINA_500M_NDVI_10DAY,
+    MODL1T_CHINA_1KM_LST_COMPOSITE.key: MODL1T_CHINA_1KM_LST_COMPOSITE,
+    MODEV1T_CHINA_250M_EVI_10DAY.key: MODEV1T_CHINA_250M_EVI_10DAY,
     MOD021KM_1KM_SURFACE_REFLECTANCE.key: MOD021KM_1KM_SURFACE_REFLECTANCE,
     SENTINEL2_MSI.key: SENTINEL2_MSI,
 }

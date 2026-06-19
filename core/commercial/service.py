@@ -643,6 +643,20 @@ class CommercialService:
             return QuotaCheck(True)
         return QuotaCheck(False, f"不支持的账号模式: {account_mode}")
 
+    def default_account_mode(self, user_id_or_row: str | dict[str, Any], source_key: str = "gscloud") -> str:
+        user = user_id_or_row if isinstance(user_id_or_row, dict) else self.get_user(str(user_id_or_row or ""))
+        if str(source_key or "").strip().lower() != "gscloud":
+            return "own"
+        quota = int(user.get("platform_monthly_quota") or 0)
+        used = int(user.get("platform_monthly_used") or 0)
+        return "platform" if quota > used else "own"
+
+    def resolve_account_mode(self, user_id_or_row: str | dict[str, Any], account_mode: str = "auto", source_key: str = "gscloud") -> str:
+        mode = str(account_mode or "auto").strip().lower()
+        if mode in {"", "auto", "default"}:
+            return self.default_account_mode(user_id_or_row, source_key)
+        return mode
+
     def submit_job(
         self,
         user_id: str,
@@ -651,15 +665,16 @@ class CommercialService:
         region: str = "",
         start_date: str = "",
         end_date: str = "",
-        account_mode: str = "own",
+        account_mode: str = "auto",
         request_text: str = "",
         direct_url: str = "",
         local_file_path: str = "",
         output_name: str = "",
+        session_id: str = "",
     ) -> dict[str, Any]:
         user = self.get_user(user_id)
         source_key = source_key.strip().lower()
-        account_mode = account_mode.strip().lower()
+        account_mode = self.resolve_account_mode(user, account_mode, source_key)
         check = self._check_user_quota(user, account_mode, source_key)
         if not check.ok:
             raise PermissionError(check.reason)
@@ -668,6 +683,7 @@ class CommercialService:
         data = {
             "job_id": job_id,
             "user_id": user["user_id"],
+            "session_id": str(session_id or "").strip(),
             "source_key": source_key,
             "resource_type": resource_type.strip().lower() or "unknown",
             "region": region,
@@ -707,12 +723,22 @@ class CommercialService:
             raise ValueError(f"任务不存在: {job_id}")
         return public_record(decorate_job_record(row, json_loads))
 
-    def list_jobs(self, user_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
+    def list_jobs(self, user_id: str = "", session_id: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        clean_session = str(session_id or "").strip()
         if user_id:
             user = self.get_user(user_id)
-            rows = self.db.fetch_all("SELECT * FROM download_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?", [user["user_id"], int(limit)])
+            if clean_session:
+                rows = self.db.fetch_all(
+                    "SELECT * FROM download_jobs WHERE user_id=? AND (session_id=? OR session_id IS NULL OR session_id='') ORDER BY created_at DESC LIMIT ?",
+                    [user["user_id"], clean_session, int(limit)],
+                )
+            else:
+                rows = self.db.fetch_all("SELECT * FROM download_jobs WHERE user_id=? ORDER BY created_at DESC LIMIT ?", [user["user_id"], int(limit)])
         else:
-            rows = self.db.fetch_all("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT ?", [int(limit)])
+            if clean_session:
+                rows = self.db.fetch_all("SELECT * FROM download_jobs WHERE session_id=? ORDER BY created_at DESC LIMIT ?", [clean_session, int(limit)])
+            else:
+                rows = self.db.fetch_all("SELECT * FROM download_jobs ORDER BY created_at DESC LIMIT ?", [int(limit)])
         out = []
         for r in rows:
             out.append(public_record(decorate_job_record(r, json_loads)))
@@ -968,7 +994,7 @@ class CommercialService:
         )
         return self.get_job(job_id)
 
-    def retry_job(self, job_id: str, user_id: str = "") -> dict[str, Any]:
+    def retry_job(self, job_id: str, user_id: str = "", session_id: str = "") -> dict[str, Any]:
         job = self.get_job(job_id)
         if user_id:
             user = self.get_user(user_id)
@@ -983,11 +1009,12 @@ class CommercialService:
             region=job.get("region", "") or "",
             start_date=job.get("start_date", "") or "",
             end_date=job.get("end_date", "") or "",
-            account_mode=job.get("account_mode", "") or "own",
+            account_mode=job.get("account_mode", "") or "auto",
             request_text=job.get("request_text", "") or "",
             direct_url=job.get("direct_url", "") or "",
             local_file_path=job.get("local_file_path", "") or "",
             output_name=job.get("output_name", "") or "",
+            session_id=str(session_id or job.get("session_id") or ""),
         )
         self._update_job(retry["job_id"], retried_from_job_id=job_id)
         return self.get_job(retry["job_id"])

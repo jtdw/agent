@@ -41,15 +41,25 @@ def _metric_summary(metrics: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
-def _download_paths(result: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    for key in ("job", "scene_job", "tile_job"):
-        job = _as_dict(result.get(key))
-        for field in ("zip_path", "output_path", "download_url"):
-            value = str(job.get(field) or "")
-            if value:
-                paths.append(value)
-    return list(dict.fromkeys(paths))
+def _canonical_artifact_refs(result: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for container_key, refs_key in (
+        ("management_view", "artifact_refs"),
+        ("presentation_result", "artifact_refs"),
+    ):
+        container = _as_dict(result.get(container_key))
+        for item in _as_list(container.get(refs_key)):
+            artifact = _as_dict(item)
+            label = str(artifact.get("title") or artifact.get("artifact_id") or "").strip()
+            if label:
+                refs.append(label)
+    tool_result = _as_dict(result.get("tool_result"))
+    for item in _as_list(tool_result.get("artifacts")):
+        artifact = _as_dict(item)
+        label = str(artifact.get("title") or artifact.get("artifact_id") or artifact.get("filename") or "").strip()
+        if label:
+            refs.append(label)
+    return list(dict.fromkeys(refs))
 
 
 def _upload_summary(result: dict[str, Any], dashboard: dict[str, Any]) -> str:
@@ -82,6 +92,36 @@ def build_task_outcome(task_type: str, result: dict[str, Any] | None = None, *, 
     }
 
     if clean_type in {"analysis", "model", "workflow"}:
+        presentation = _as_dict(result.get("presentation_result"))
+        if presentation:
+            refs = []
+            for key in ("artifact_refs", "map_layer_refs", "table_refs", "image_refs"):
+                for item in _as_list(presentation.get(key)):
+                    ref = _as_dict(item)
+                    label = str(ref.get("title") or ref.get("name") or ref.get("artifact_id") or ref.get("layer_id") or ref.get("table_id") or ref.get("image_id") or "").strip()
+                    if label:
+                        refs.append(label)
+            outcome.update(
+                status=str(presentation.get("status") or "completed"),
+                has_results=bool(refs or presentation.get("concise_summary") or presentation.get("result_highlights")),
+                summary=str(presentation.get("concise_summary") or result.get("reply") or "分析已完成。"),
+                result_paths=list(dict.fromkeys(refs)),
+                metrics={},
+                recommendations=[str(item) for item in _as_list(presentation.get("next_action_suggestions")) if str(item).strip()],
+            )
+            return outcome
+
+        user_result = _as_dict(result.get("user_facing_result"))
+        if user_result:
+            outcome.update(
+                has_results=bool(user_result.get("primary_artifacts") or user_result.get("preview_artifacts") or user_result.get("summary")),
+                summary=str(user_result.get("summary") or result.get("reply") or "分析已完成。"),
+                result_paths=[],
+                metrics=_as_dict(user_result.get("metrics")),
+                recommendations=[str(item) for item in _as_list(user_result.get("next_actions")) if str(item).strip()],
+            )
+            return outcome
+
         model_result = _first_model_result(dashboard)
         if not model_result:
             outcome.update(
@@ -117,34 +157,45 @@ def build_task_outcome(task_type: str, result: dict[str, Any] | None = None, *, 
         return outcome
 
     if clean_type == "download":
-        paths = _download_paths(result)
-        job = _as_dict(result.get("job"))
-        status = str(job.get("status") or result.get("status") or "submitted")
-        status_label = "完成" if status in {"completed", "success"} else "提交或启动"
+        management = _as_dict(result.get("management_view"))
+        tool_result = _as_dict(result.get("tool_result"))
+        presentation = _as_dict(result.get("presentation_result"))
+        paths = _canonical_artifact_refs(result)
+        status = str(management.get("status") or tool_result.get("status") or presentation.get("status") or result.get("status") or "running")
+        status_label = "完成" if status in {"completed", "success", "succeeded"} else "提交或启动"
+        task_id = str(management.get("task_id") or tool_result.get("task_id") or "--")
+        summary = str(management.get("user_message") or presentation.get("concise_summary") or "")
+        if summary and task_id != "--":
+            summary = f"{summary} 任务号：{task_id}。"
+        if not summary:
+            summary = f"下载任务已{status_label}。任务号：{task_id}。"
         outcome.update(
             status=status,
-            has_results=bool(paths or job),
-            summary=f"下载任务已{status_label}。任务号：{job.get('job_id') or '--'}。",
+            has_results=bool(paths or management or tool_result or presentation),
+            summary=summary,
             result_paths=paths,
-            recommendations=[
-                "先检查下载文件是否可解压、坐标系是否正确，并确认能在地图中显示。",
-                "如果是 DEM，下一步建议裁剪到研究区并生成坡度、坡向、地形因子。",
-                "如果是遥感产品，下一步建议按边界裁剪、重投影，并与站点或目标变量做时间匹配。",
-            ],
+            recommendations=[str(item) for item in _as_list(tool_result.get("next_actions")) if str(item).strip()]
+            or [str(item) for item in _as_list(presentation.get("next_action_suggestions")) if str(item).strip()]
+            or ["检查下载产物、坐标系和地图加载状态；如失败，请按可用操作重试或重新登录。"],
         )
         return outcome
 
     if clean_type == "upload":
         dataset_count = len(_as_list(dashboard.get("datasets")))
+        dataset_names = [str(item.get("name") or "") for item in _as_list(dashboard.get("datasets")) if isinstance(item, dict) and str(item.get("name") or "").strip()]
+        dataset_text = "、".join(dataset_names[:3])
+        upload_messages = [str(item) for item in _as_list(result.get("messages")) if str(item).strip()]
+        uploaded_text = "；".join(upload_messages[:3])
+        summary = "上传成功。"
+        if uploaded_text:
+            summary = f"上传成功：{uploaded_text}。"
+        if dataset_text:
+            summary = f"{summary.rstrip('。')}。已加载数据集：{dataset_text}。"
         outcome.update(
             has_results=bool(result.get("count") or dataset_count),
-            summary=_upload_summary(result, dashboard),
+            summary=summary,
             result_paths=[],
-            recommendations=[
-                "下一步先检查字段、坐标、时间和缺失值，避免直接建模导致错误。",
-                "如果包含经纬度或矢量边界，可以加载到地图检查空间范围是否正确。",
-                "如果目标是 XGBoost/RF/LSTM，建议先明确目标变量和候选特征列。",
-            ],
+            recommendations=[],
         )
         return outcome
 

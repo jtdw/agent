@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import math
+import zipfile
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+
+def _safe_stat(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+    except Exception:
+        return {"file_name": path.name, "size_bytes": 0}
+    return {"file_name": path.name, "size_bytes": int(stat.st_size)}
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+    if hasattr(value, "isoformat"):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    return value
+
+
+def _time_range(df: pd.DataFrame) -> dict[str, str]:
+    for col in df.columns:
+        name = str(col).lower()
+        if not any(token in name for token in ("date", "time", "day", "month", "year", "日期", "时间")):
+            continue
+        parsed = pd.to_datetime(df[col], errors="coerce")
+        parsed = parsed.dropna()
+        if parsed.empty:
+            continue
+        return {
+            "field": str(col),
+            "start": parsed.min().date().isoformat(),
+            "end": parsed.max().date().isoformat(),
+        }
+    return {}
+
+
+def _role_inference_from_fields(fields: list[str]) -> dict[str, Any]:
+    lowered = {field.lower(): field for field in fields}
+    evidence: list[str] = []
+    roles: list[str] = []
+    lon = next((lowered[key] for key in lowered if key in {"lon", "lng", "longitude", "x"}), "")
+    lat = next((lowered[key] for key in lowered if key in {"lat", "latitude", "y"}), "")
+    if lon and lat:
+        roles.append("coordinate_table")
+        evidence.extend([lon, lat])
+    if any("soil" in key and "moisture" in key for key in lowered):
+        roles.append("soil_moisture_observations")
+        evidence.extend([field for key, field in lowered.items() if "soil" in key and "moisture" in key])
+    if any(key in {"ndvi", "evi", "lst", "dem"} for key in lowered):
+        roles.append("remote_sensing_features")
+        evidence.extend([field for key, field in lowered.items() if key in {"ndvi", "evi", "lst", "dem"}])
+    return {
+        "basis": "metadata_only",
+        "roles": list(dict.fromkeys(roles)),
+        "evidence": list(dict.fromkeys(evidence)),
+    }
+
+
+def _profile_table(record: Any) -> dict[str, Any]:
+    df = record.object_ref
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame()
+    fields = [str(col) for col in df.columns]
+    sample = df.head(3).where(pd.notna(df.head(3)), None).to_dict(orient="records")
+    return {
+        "row_count": int(len(df)),
+        "fields": fields,
+        "field_types": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+        "numeric_fields": [str(col) for col in df.select_dtypes(include="number").columns],
+        "sample_rows": [{key: _jsonable(value) for key, value in row.items()} for row in sample],
+        "time_range": _time_range(df),
+        "role_inference": _role_inference_from_fields(fields),
+    }
+
+
+def _profile_vector(record: Any) -> dict[str, Any]:
+    gdf = record.object_ref
+    fields = [str(col) for col in getattr(gdf, "columns", [])]
+    meta = dict(getattr(record, "meta", {}) or {})
+    return {
+        "feature_count": int(meta.get("rows") or len(gdf) if hasattr(gdf, "__len__") else 0),
+        "fields": fields or [str(col) for col in meta.get("columns", [])],
+        "geometry_types": meta.get("geometry_types") or [],
+        "crs": meta.get("crs"),
+        "bounds": meta.get("bounds"),
+        "role_inference": _role_inference_from_fields(fields),
+    }
+
+
+def _profile_raster(record: Any) -> dict[str, Any]:
+    meta = dict(getattr(record, "meta", {}) or {})
+    width = meta.get("width")
+    height = meta.get("height")
+    bounds = meta.get("bounds")
+    resolution = None
+    if bounds and width and height:
+        try:
+            left, bottom, right, top = [float(v) for v in bounds]
+            resolution = [abs((right - left) / float(width)), abs((top - bottom) / float(height))]
+        except Exception:
+            resolution = None
+    return {
+        "width": width,
+        "height": height,
+        "band_count": meta.get("count"),
+        "crs": meta.get("crs"),
+        "bounds": bounds,
+        "resolution": resolution,
+        "dtype": meta.get("dtype"),
+        "nodata": meta.get("nodata"),
+        "role_inference": {"basis": "metadata_only", "roles": ["raster"], "evidence": ["raster_metadata"]},
+    }
+
+
+def _profile_archive(path: Path) -> dict[str, Any]:
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            members = [
+                {"name": item.filename, "size": item.file_size}
+                for item in zf.infolist()[:50]
+                if not item.is_dir()
+            ]
+    except Exception:
+        members = []
+    return {
+        "archive_members": members,
+        "role_inference": {"basis": "metadata_only", "roles": ["archive"], "evidence": [item["name"] for item in members[:10]]},
+    }
+
+
+def profile_dataset(manager: Any, dataset_name: str) -> dict[str, Any]:
+    record = manager.get(dataset_name)
+    path = Path(str(record.path))
+    profile: dict[str, Any] = {
+        "name": record.name,
+        "data_type": record.data_type,
+        "path": str(record.path),
+        **_safe_stat(path),
+    }
+    data_type = str(record.data_type or "").lower()
+    if data_type == "table":
+        profile.update(_profile_table(record))
+    elif data_type == "vector":
+        profile.update(_profile_vector(record))
+    elif data_type == "raster":
+        profile.update(_profile_raster(record))
+    elif path.suffix.lower() == ".zip":
+        profile.update(_profile_archive(path))
+    else:
+        profile.setdefault("role_inference", {"basis": "metadata_only", "roles": [], "evidence": []})
+    return profile

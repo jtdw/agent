@@ -5,9 +5,9 @@ import { GlassCard } from './GlassCard';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { ResearchWorkflowPanel } from './ResearchWorkflowPanel';
 import { SegmentedControl } from './SegmentedControl';
-import { CommercialUser, DownloadJob, WorkspaceDashboard, api } from '@/lib/api';
+import { CommercialUser, DownloadJob, DownloadManagementView, WorkspaceDashboard, api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import type { LayerOpacity, LayerVisibility } from './mapLayerPolicy';
+import type { LayerVisibility } from './mapLayerPolicy';
 import type { WorkflowAction } from './researchWorkflow';
 
 type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
@@ -30,9 +30,9 @@ type DownloadProduct = {
 const downloadProducts: DownloadProduct[] = [
   { value: 'dem', label: 'DEM / 高程数据', outputSuffix: 'dem', requestLabel: 'DEM 数据' },
   { value: 'landsat8_oli_tirs', label: 'Landsat 8 OLI_TIRS', outputSuffix: 'landsat8', requestLabel: 'Landsat 8 OLI_TIRS 数据' },
-  { value: 'modnd1d_ndvi_daily', label: 'MODND1D NDVI 每天产品', outputSuffix: 'modnd1d_ndvi', requestLabel: 'MODND1D NDVI 每天产品' },
-  { value: 'modl1d_lst_daily', label: 'MODL1D 1KM 地表温度', outputSuffix: 'modl1d_lst', requestLabel: 'MODL1D 中国 1KM 地表温度每天产品' },
-  { value: 'modev1f_evi_5day', label: 'MODEV1F 250M EVI 五天合成', outputSuffix: 'modev1f_evi', requestLabel: 'MODEV1F 中国 250M EVI 五天合成产品' },
+  { value: 'modnd1t_ndvi_10day', label: 'MODND1T NDVI 旬合成', outputSuffix: 'modnd1t_ndvi', requestLabel: 'MODND1T 中国 500M NDVI 旬合成产品' },
+  { value: 'modl1t_lst_composite', label: 'MODLT1T 地表温度旬合成', outputSuffix: 'modl1t_lst', requestLabel: 'MODLT1T 中国 1KM 地表温度旬合成产品' },
+  { value: 'modev1t_evi_10day', label: 'MODEV1T 250M EVI 旬合成', outputSuffix: 'modev1t_evi', requestLabel: 'MODEV1T 中国 250M EVI 旬合成产品' },
   { value: 'mod021km_surface_reflectance', label: 'MOD021KM 1KM 地表反射率', outputSuffix: 'mod021km_reflectance', requestLabel: 'MOD021KM 1KM 地表反射率' },
   { value: 'sentinel2_msi', label: 'Sentinel-2 MSI', outputSuffix: 'sentinel2_msi', requestLabel: 'Sentinel-2 MSI 数据' }
 ];
@@ -75,31 +75,79 @@ function hasLayerVisibility(id: string): id is keyof LayerVisibility {
   return id === 'stations' || id === 'boundary' || id === 'dem' || id === 'soil';
 }
 
-function hasLayerOpacity(id: string): id is keyof LayerOpacity {
-  return id === 'stations' || id === 'boundary' || id === 'dem' || id === 'soil' || id === 'draw';
+function attachManagementViews(jobs: DownloadJob[] = [], views: DownloadManagementView[] = []) {
+  if (!jobs.length && views.length) {
+    return views.map((view) => ({
+      job_id: view.task_id,
+      status: view.status,
+      progress: view.progress,
+      output_name: view.display_title,
+      source_key: view.source_name,
+      stage: view.action_state?.stage,
+      updated_at: view.updated_at,
+      management_view: view
+    }));
+  }
+  if (!views.length) return jobs;
+  const byId = new globalThis.Map(views.map((view) => [view.task_id, view]));
+  return jobs.map((job) => ({ ...job, management_view: job.management_view || byId.get(job.job_id) }));
+}
+
+function jobView(job: DownloadJob) {
+  return job.management_view;
+}
+
+function jobStatus(job: DownloadJob) {
+  return jobView(job)?.status || 'running';
+}
+
+function jobProgress(job: DownloadJob) {
+  return Number(jobView(job)?.progress ?? 0);
+}
+
+function jobTitle(job: DownloadJob) {
+  return jobView(job)?.display_title || job.job_id;
+}
+
+function jobStage(job: DownloadJob) {
+  return jobView(job)?.action_state?.stage || '--';
+}
+
+function jobActions(job: DownloadJob) {
+  return jobView(job)?.available_actions || [];
+}
+
+function canJob(job: DownloadJob, action: string) {
+  const actions = jobActions(job);
+  if (actions.length) return actions.includes(action);
+  if (action === 'cancel') return jobStatus(job) === 'running';
+  if (action === 'view_artifacts') return Boolean(jobView(job)?.artifact_refs?.length);
+  return false;
+}
+
+function jobState(job: DownloadJob, key: string) {
+  return jobView(job)?.action_state?.[key] || '';
 }
 
 export function LayerPanel({
   user,
+  sessionId,
   basemap,
   setBasemap,
   onClose,
   layerVisibility,
-  layerOpacity,
   onLayerToggle,
-  onLayerOpacityChange,
   onLayerLocate,
   onRunWorkflowAction
 }: {
   user: CommercialUser | null;
+  sessionId?: string;
   basemap: Basemap;
   setBasemap: (value: Basemap) => void;
   onClose?: () => void;
   layerVisibility: LayerVisibility;
-  layerOpacity: LayerOpacity;
   onLayerToggle: (id: keyof LayerVisibility) => void;
-  onLayerOpacityChange: (id: keyof LayerOpacity, value: number) => void;
-  onLayerLocate: (id: keyof LayerOpacity) => void;
+  onLayerLocate: (id: keyof LayerVisibility) => void;
   onRunWorkflowAction: (action: WorkflowAction) => void;
 }) {
   const [side, setSide] = useState<'right' | 'left'>('right');
@@ -120,7 +168,7 @@ export function LayerPanel({
       setDashboard(null);
       return;
     }
-    api.dashboard(userId).then(setDashboard).catch(() => setDashboard(null));
+    api.dashboard(userId, sessionId).then(setDashboard).catch(() => setDashboard(null));
   };
 
   const refreshJobs = () => {
@@ -128,21 +176,21 @@ export function LayerPanel({
       setJobs([]);
       return;
     }
-    api.jobs(userId)
+    api.jobs(userId, sessionId)
       .then((r) => {
-        const nextJobs = r.jobs || [];
+        const nextJobs = attachManagementViews(r.jobs || [], r.management_views || []);
         setJobs(nextJobs);
         if (!jobsInitializedRef.current) {
           nextJobs
-            .filter((job) => job.status === 'completed')
+            .filter((job) => jobStatus(job) === 'succeeded')
             .forEach((job) => completedSeenRef.current.add(job.job_id));
           jobsInitializedRef.current = true;
           return;
         }
-        const latestCompleted = nextJobs.find((job) => job.status === 'completed' && !completedSeenRef.current.has(job.job_id));
+        const latestCompleted = nextJobs.find((job) => jobStatus(job) === 'succeeded' && !completedSeenRef.current.has(job.job_id));
         if (latestCompleted) {
           completedSeenRef.current.add(latestCompleted.job_id);
-          setNotice(`下载任务已完成：${latestCompleted.output_name || latestCompleted.job_id}。可在“下载任务”中查看或下载结果。`);
+          setNotice(`下载任务已完成：${jobTitle(latestCompleted)}。可在“下载任务”中查看或下载结果。`);
           refreshDashboard();
         }
       })
@@ -159,7 +207,7 @@ export function LayerPanel({
       refreshJobs();
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [userId]);
+  }, [sessionId, userId]);
 
   const submitPlatformJob = async () => {
     if (!user) {
@@ -177,7 +225,8 @@ export function LayerPanel({
         region,
         account_mode: 'platform',
         request_text: `前端一键提交：下载 ${region} ${product.requestLabel}`,
-        output_name: `${region}_${product.outputSuffix}`
+        output_name: `${region}_${product.outputSuffix}`,
+        session_id: sessionId
       });
       if (result.auto_started) {
         setNotice('已提交下载任务，系统正在处理。');
@@ -233,7 +282,7 @@ export function LayerPanel({
   const exportAll = async () => {
     setBusy(true);
     try {
-      const r = await api.exportWorkspace(userId, 'all');
+      const r = await api.exportWorkspace(userId, sessionId, 'all');
       setNotice(`已打包 ${r.file_count} 个成果文件。${r.download_url ? '可在最近成果中下载。' : ''}`);
       refreshDashboard();
       if (r.download_url) await downloadUrl(r.download_url, 'workspace-export.zip');
@@ -253,12 +302,22 @@ export function LayerPanel({
     }
   };
 
+  const downloadJobArtifact = async (job: DownloadJob) => {
+    const ref = jobView(job)?.artifact_refs?.[0];
+    if (ref?.artifact_id) {
+      const metadata = await api.artifactMetadata(ref.artifact_id, userId, sessionId);
+      await downloadUrl(metadata.download_url, metadata.filename || metadata.title || ref.title || jobTitle(job));
+      return;
+    }
+    setNotice('该任务没有可解析的 artifact_id，暂不能提供下载入口。');
+  };
+
   const deleteJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.deleteDownloadJob(job.job_id, userId);
-      setJobs(result.jobs || []);
-      setNotice(`已删除下载任务记录：${job.output_name || job.job_id}`);
+      const result = await api.deleteDownloadJob(job.job_id, userId, sessionId);
+      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setNotice(`已删除下载任务记录：${jobTitle(job)}`);
       refreshDashboard();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '删除任务失败');
@@ -272,11 +331,12 @@ export function LayerPanel({
     try {
       const result = await api.deleteWorkspaceArtifact({
         user_id: userId,
+        session_id: sessionId,
         artifact_id: artifact.artifact_id || '',
         path: artifact.path || ''
       });
       setDashboard(result.dashboard);
-      setNotice(`已删除结果文件：${artifact.name || artifact.path.split(/[\\/]/).pop() || 'artifact'}`);
+      setNotice(`已删除结果文件：${artifact.filename || artifact.name || artifact.title || artifact.artifact_id || 'artifact'}`);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '删除结果文件失败');
     } finally {
@@ -287,9 +347,9 @@ export function LayerPanel({
   const cancelJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在前端取消任务。');
-      setJobs(result.jobs || []);
-      setNotice(`已取消下载任务：${job.output_name || job.job_id}`);
+      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在前端取消任务。', sessionId);
+      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setNotice(`已取消下载任务：${jobTitle(job)}`);
       refreshDashboard();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '取消任务失败');
@@ -301,8 +361,8 @@ export function LayerPanel({
   const retryJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.retryDownloadJob(job.job_id, userId);
-      setJobs(result.jobs || []);
+      const result = await api.retryDownloadJob(job.job_id, userId, sessionId);
+      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
       setNotice(result.auto_started ? '已创建重试任务并开始后台下载。' : `已创建重试任务：${result.reason || '等待处理'}`);
       refreshDashboard();
     } catch (e) {
@@ -332,12 +392,13 @@ export function LayerPanel({
   const inspectJobLog = async (job: DownloadJob) => {
     setBusy(true);
     try {
-      const result = await api.downloadJobLog(userId, job.job_id);
-      const sceneCount = result.scene_jobs?.length || 0;
-      const tileCount = result.tile_jobs?.length || 0;
-      const auditCount = result.audit_events?.length || 0;
-      await api.downloadJobLogFile(userId, job.job_id);
-      setNotice(`任务日志：状态 ${result.job.status || '--'}，场景日志 ${sceneCount} 条，分幅日志 ${tileCount} 条，审计记录 ${auditCount} 条。`);
+      const result = await api.downloadJobLog(userId, job.job_id, sessionId);
+      const view = result.management_view;
+      const sceneCount = result.diagnostic_event_views?.scene_jobs?.length || 0;
+      const tileCount = result.diagnostic_event_views?.tile_jobs?.length || 0;
+      const auditCount = result.diagnostic_event_views?.audit_events?.length || 0;
+      await api.downloadJobLogFile(userId, job.job_id, sessionId);
+      setNotice(`任务日志：状态 ${view?.status || '--'}，场景日志 ${sceneCount} 条，分幅日志 ${tileCount} 条，审计记录 ${auditCount} 条。`);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '读取任务日志失败');
     } finally {
@@ -349,8 +410,8 @@ export function LayerPanel({
   const artifacts = dashboard?.artifacts?.slice(0, 4) || [];
   const runtime = dashboard?.runtime_status || {};
   const recentJobs = jobs.slice(0, 5);
-  const runningJobs = jobs.filter((job) => job.status === 'running');
-  const waitingJobs = jobs.filter((job) => job.status === 'queued' || job.status === 'waiting_login' || job.status === 'waiting_manual');
+  const runningJobs = jobs.filter((job) => jobStatus(job) === 'running');
+  const waitingJobs = jobs.filter((job) => ['awaiting_confirmation', 'blocked'].includes(jobStatus(job)));
 
   return (
     <motion.aside
@@ -410,21 +471,22 @@ export function LayerPanel({
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 下载任务</div>
               <div className="space-y-2">
                 {recentJobs.map((job) => {
-                  const done = job.status === 'completed';
-                  const failed = job.status === 'failed';
-                  const active = job.status === 'queued' || job.status === 'running' || job.status === 'waiting_login' || job.status === 'waiting_manual';
-                  const retryable = failed || job.status === 'canceled' || job.status === 'waiting_login' || job.status === 'waiting_manual';
+                  const status = jobStatus(job);
+                  const done = status === 'succeeded';
+                  const failed = status === 'failed';
+                  const active = canJob(job, 'cancel');
+                  const retryable = canJob(job, 'retry');
                   const deletable = !active;
                   return (
                     <div key={job.job_id} className={cn('rounded-2xl border px-3 py-2 text-xs shadow-sm transition hover:-translate-y-0.5', done ? 'border-emerald-300/35 bg-emerald-400/10' : failed ? 'border-coral/30 bg-coral/10' : 'border-white/35 bg-white/45 dark:border-white/10 dark:bg-white/5')}>
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="truncate font-black text-slate-700 dark:text-slate-100">{job.output_name || job.job_id}</div>
-                          <div className="mt-0.5 text-slate-500 dark:text-slate-400">{job.status || 'unknown'} · {job.stage || '--'} · {Number(job.progress || 0)}%</div>
+                          <div className="truncate font-black text-slate-700 dark:text-slate-100">{jobTitle(job)}</div>
+                          <div className="mt-0.5 text-slate-500 dark:text-slate-400">{status || 'unknown'} · {jobStage(job)} · {Number(jobProgress(job) || 0)}%</div>
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">
-                          {done && job.download_url && (
-                            <button type="button" onClick={() => downloadUrl(job.download_url, job.output_name || `${job.job_id}.zip`)} className="rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 font-black text-white shadow-glow">下载</button>
+                          {done && canJob(job, 'view_artifacts') && (
+                            <button type="button" onClick={() => downloadJobArtifact(job)} className="rounded-full bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 font-black text-white shadow-glow">下载</button>
                           )}
                           {active && (
                             <button
@@ -464,23 +526,16 @@ export function LayerPanel({
                           </button>
                         </div>
                       </div>
-                      {(job.pages_scanned || job.candidate_count || job.current_scene) && (
+                      {(jobState(job, 'pages_scanned') || jobState(job, 'candidate_count') || jobState(job, 'current_scene')) && (
                         <div className="mt-1 text-slate-500 dark:text-slate-400">
-                          扫描 {job.pages_scanned || 0} 页 · 候选 {job.candidate_count || 0} 条 · 已选 {job.selected_count || 0} 条 · 已下 {job.downloaded_count || 0} 个
-                          {job.current_scene ? ` · 当前 ${job.current_scene}` : ''}
+                          扫描 {jobState(job, 'pages_scanned') || 0} 页 · 候选 {jobState(job, 'candidate_count') || 0} 条 · 已选 {jobState(job, 'selected_count') || 0} 条 · 已下 {jobState(job, 'downloaded_count') || 0} 个
+                          {jobState(job, 'current_scene') ? ` · 当前 ${jobState(job, 'current_scene')}` : ''}
                         </div>
                       )}
-                      {job.failure_diagnostic?.user_message && <div className="mt-1 text-coral">{job.failure_diagnostic.user_message}</div>}
-                      {job.scan_stop_reason && <div className="mt-1 text-slate-500 dark:text-slate-400">扫描停止：{job.scan_stop_reason}</div>}
-                      {job.quota_reserved ? <div className="mt-1 text-amber-600 dark:text-amber-300">已预占 1 次平台账号额度，失败或取消会自动释放。</div> : null}
-                      {job.retried_from_job_id && <div className="mt-1 text-slate-500 dark:text-slate-400">重试来源：{job.retried_from_job_id}</div>}
-                      {job.artifact_quality?.length ? (
-                        <div className={cn('mt-1', job.artifact_quality.every((item) => item.ok !== false) ? 'text-emerald-600 dark:text-emerald-300' : 'text-amber-600 dark:text-amber-300')}>
-                          成果质量：{job.artifact_quality.every((item) => item.ok !== false) ? '已通过基础检查' : '需要检查文件或范围'}
-                        </div>
-                      ) : null}
-                      {failed && job.error_message && !job.failure_diagnostic?.user_message && <div className="mt-1 text-coral">{job.error_message}</div>}
-                      {done && !job.download_url && <div className="mt-1 text-slate-500 dark:text-slate-400">已完成，结果正在整理。</div>}
+                      {jobView(job)?.user_message && <div className="mt-1 text-coral">{jobView(job)?.user_message}</div>}
+                      {jobView(job)?.warnings?.length ? <div className="mt-1 text-amber-600 dark:text-amber-300">{jobView(job)?.warnings?.[0]}</div> : null}
+                      {failed && jobView(job)?.error_title && !jobView(job)?.user_message && <div className="mt-1 text-coral">{jobView(job)?.error_title}</div>}
+                      {done && !canJob(job, 'view_artifacts') && <div className="mt-1 text-slate-500 dark:text-slate-400">已完成，结果正在整理。</div>}
                     </div>
                   );
                 })}
@@ -495,7 +550,7 @@ export function LayerPanel({
           <div className="mt-4 space-y-2">
             {layers.map((layer) => {
               const active = hasLayerVisibility(layer.id) ? layerVisibility[layer.id] : layer.active;
-              const opacityLayerId = hasLayerOpacity(layer.id) ? layer.id : null;
+              const locatableLayerId = hasLayerVisibility(layer.id) ? layer.id : null;
               return (
                 <motion.div key={layer.id} whileHover={{ x: 3 }} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/45 bg-white/34 p-2.5 shadow-sm transition hover:bg-white/62 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/8', active && 'bg-white/68 ring-1 ring-cyan-300/25 dark:bg-white/8')}>
                   {active && <motion.span layoutId="layer-active" className="absolute left-0 top-3 h-10 w-1 rounded-full bg-gradient-to-b from-ocean to-cyan-glow" />}
@@ -503,23 +558,9 @@ export function LayerPanel({
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-black">{layer.name}</div>
                     <div className="truncate text-xs text-slate-500 dark:text-slate-400">{layer.desc}</div>
-                    {opacityLayerId && (
-                      <div className="mt-2 flex items-center gap-2">
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          value={Math.round((layerOpacity[opacityLayerId] ?? 1) * 100)}
-                          onChange={(event) => onLayerOpacityChange(opacityLayerId, Number(event.target.value) / 100)}
-                          className="h-1.5 min-w-0 flex-1 accent-cyan-glow"
-                          aria-label={`${layer.name} 透明度`}
-                        />
-                        <span className="w-9 text-right text-[11px] font-black text-slate-500 dark:text-slate-400">{Math.round((layerOpacity[opacityLayerId] ?? 1) * 100)}%</span>
-                      </div>
-                    )}
                   </div>
-                  {opacityLayerId && (
-                    <button type="button" onClick={() => onLayerLocate(opacityLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/45 bg-white/58 text-slate-500 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/80 dark:border-white/10 dark:bg-white/10" title="定位到图层">
+                  {locatableLayerId && (
+                    <button type="button" onClick={() => onLayerLocate(locatableLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/45 bg-white/58 text-slate-500 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/80 dark:border-white/10 dark:bg-white/10" title="定位到图层">
                       <Map size={14} strokeWidth={1.7} />
                     </button>
                   )}
@@ -564,16 +605,18 @@ export function LayerPanel({
             <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 最近成果</div>
               <div className="space-y-2">
-                {artifacts.map((item, i) => (
-                  <div key={`${item.path}-${i}`} className="flex items-center justify-between gap-2 rounded-2xl border border-white/35 bg-white/48 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/72 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
-                    <button type="button" onClick={() => downloadUrl(item.download_url, item.name || item.path.split(/[\\/]/).pop() || 'artifact')} className="min-w-0 flex-1 truncate text-left">
-                    {item.name || item.path.split(/[\\/]/).pop() || '成果文件'}
+                {artifacts.map((item, i) => {
+                  const safeName = item.filename || item.name || item.title || item.artifact_id || '成果文件';
+                  return (
+                  <div key={`${item.artifact_id || safeName}-${i}`} className="flex items-center justify-between gap-2 rounded-2xl border border-white/35 bg-white/48 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/72 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                    <button type="button" onClick={() => downloadUrl(item.download_url, safeName)} className="min-w-0 flex-1 truncate text-left">
+                    {safeName}
                     </button>
                     <button type="button" onClick={() => deleteArtifact(item)} disabled={busy} className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-coral transition hover:bg-white/60 disabled:opacity-50" title="删除结果文件">
                       <Trash2 size={14} strokeWidth={1.8} />
                     </button>
                   </div>
-                ))}
+                )})}
               </div>
             </div>
           )}

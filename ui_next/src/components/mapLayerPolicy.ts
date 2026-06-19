@@ -1,5 +1,4 @@
 export type LayerVisibility = { dem: boolean; boundary: boolean; stations: boolean; soil: boolean };
-export type LayerOpacity = { dem: number; boundary: number; stations: number; soil: number; draw: number };
 
 export const STATION_LAYER_IDS: string[] = [];
 export const BOUNDARY_LAYER_IDS: string[] = [];

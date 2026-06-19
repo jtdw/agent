@@ -8,7 +8,7 @@ from typing import Any
 from ..data_manager import DataManager
 from .gscloud_adapter import _ensure_playwright, _postprocess_gscloud_files
 from .gscloud_download_recovery import recover_gscloud_download_from_error_page
-from .gscloud_products import MODND1D_CHINA_500M_NDVI_DAILY
+from .gscloud_products import MODND1T_CHINA_500M_NDVI_10DAY
 from .gscloud_reliability import find_existing_scene_download, validate_download_artifact
 from .gscloud_scene_table import (
     AVAILABLE,
@@ -18,6 +18,7 @@ from .gscloud_scene_table import (
     get_scene_table_rows,
     goto_scene_page,
     scan_scene_table_pages,
+    search_scene_row_by_id,
     select_scene_records,
     update_scene_status,
 )
@@ -69,7 +70,7 @@ def _try_select_data_available(page) -> bool:
 def parse_modnd1d_cells(cells: list[str], row_index: int) -> dict[str, Any] | None:
     if len(cells) < 6:
         return None
-    scene_id = next((c for c in cells if c.upper().startswith("MODND1D.")), "")
+    scene_id = next((c for c in cells if c.upper().startswith(("MODND1T.", "MODND1D."))), "")
     if not scene_id:
         return None
     date = next((c for c in cells if re.match(r"\d{4}-\d{2}-\d{2}", c)), "")
@@ -144,7 +145,7 @@ def download_modnd1d_china_ndvi_daily(
     sync_playwright, PlaywrightTimeoutError = _ensure_playwright()
     timeout_ms = max(30, int(timeout_seconds or 1800)) * 1000
     max_scenes = max(1, int(max_scenes or 1))
-    target_dir = Path(manager.workdir) / "domestic_downloads" / "gscloud" / "modnd1d"
+    target_dir = Path(manager.workdir) / "domestic_downloads" / "gscloud" / "modnd1t"
     target_dir.mkdir(parents=True, exist_ok=True)
     downloaded: list[Path] = []
     candidates: list[dict[str, Any]] = []
@@ -160,7 +161,7 @@ def download_modnd1d_china_ndvi_daily(
         context = browser.new_context(**context_kwargs)
         page = context.new_page()
         try:
-            page.goto(MODND1D_CHINA_500M_NDVI_DAILY.access_url, wait_until="domcontentloaded", timeout=60_000)
+            page.goto(MODND1T_CHINA_500M_NDVI_10DAY.access_url, wait_until="domcontentloaded", timeout=60_000)
             page.wait_for_selector("table, .el-table, .ivu-table, .ant-table, tr", timeout=30_000)
             _try_select_data_available(page)
             page.wait_for_timeout(1200)
@@ -186,8 +187,8 @@ def download_modnd1d_china_ndvi_daily(
             )
             if not selected:
                 raise RuntimeError(
-                    f"未找到满足条件的 MODND1D NDVI 可下载记录。已扫描 {pages_scanned} 页，"
-                    f"筛选条件：数据=有，产品={'NDVI+QC' if include_qc else 'NDVI'}，年份={year or '未指定'}，"
+                    f"未找到满足条件的 MODND1T NDVI 旬合成可下载记录。已扫描 {pages_scanned} 页，"
+                    f"筛选条件：数据=有，产品={'NDVI+QC' if include_qc else 'NDVI/MAX'}，年份={year or '未指定'}，"
                     f"开始日期={start_date or '未指定'}，结束日期={end_date or '未指定'}。"
                     "请放宽日期或年份条件，或提高 GSCLOUD_SCENE_MAX_PAGES。"
             )
@@ -210,13 +211,24 @@ def download_modnd1d_china_ndvi_daily(
                     continue
                 goto_scene_page(
                     page,
-                    MODND1D_CHINA_500M_NDVI_DAILY.access_url,
+                    MODND1T_CHINA_500M_NDVI_10DAY.access_url,
                     int(item.get("page_no") or 1),
                     after_goto=lambda p: (_try_select_data_available(p), p.wait_for_timeout(1200)),
                 )
                 row = find_scene_row_by_id(get_scene_table_rows(page), item["scene_id"])
                 if row is None:
-                    raise RuntimeError(f"已选中 {item['scene_id']}，但在第 {item.get('page_no')} 页未能重新定位该记录。")
+                    update_scene_status(
+                        status_path,
+                        state="DOWNLOADING",
+                        pages_scanned=pages_scanned,
+                        selected_count=len(selected),
+                        downloaded_count=len(downloaded),
+                        current_scene=item["scene_id"],
+                        message=f"第 {item.get('page_no')} 页未重新定位到 {item['scene_id']}，正在改用数据标识搜索。",
+                    )
+                    row = search_scene_row_by_id(page, item["scene_id"], parse_row=_parse_modnd1d_row)
+                if row is None:
+                    raise RuntimeError(f"已选中 {item['scene_id']}，但按第 {item.get('page_no')} 页和数据标识搜索都未能重新定位该记录。")
                 try:
                     download = _click_row_download(page, row, timeout_ms)
                 except PlaywrightTimeoutError as exc:
@@ -240,7 +252,7 @@ def download_modnd1d_china_ndvi_daily(
             browser.close()
 
     result = _postprocess_gscloud_files(manager, downloaded, get_source("gscloud"), output_name=output_name, auto_load=auto_load)
-    result["product"] = MODND1D_CHINA_500M_NDVI_DAILY.__dict__
+    result["product"] = MODND1T_CHINA_500M_NDVI_10DAY.__dict__
     result["scene_count"] = len(downloaded)
     result["selected_scenes"] = selected
     result["candidate_count"] = len(candidates)
@@ -248,7 +260,7 @@ def download_modnd1d_china_ndvi_daily(
     result["scan_stop_reason"] = stop_reason
     result["filters"] = {
         "data_available": AVAILABLE,
-        "product": "NDVI" if not include_qc else "NDVI+QC",
+        "product": "NDVI/MAX" if not include_qc else "NDVI/MAX+QC",
         "region": region,
         "year": year,
         "start_date": start_date,

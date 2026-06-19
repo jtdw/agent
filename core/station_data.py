@@ -8,6 +8,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
+import pandas as pd
+
 MISSING_LIMIT = -100.0
 
 
@@ -73,6 +75,138 @@ def _choose_depth_files(names: list[str], preferred_depth: str = "0.050000") -> 
     stm.sort(key=depth_key)
     first_depth = depth_key(stm[0])[0]
     return [name for name in stm if abs(depth_key(name)[0] - first_depth) < 1e-9]
+
+
+def _parse_stm_rows(raw: str, source_file: str, year: str = "") -> list[dict[str, Any]]:
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if not lines:
+        return []
+    header = lines[0].split()
+    if len(header) < 9:
+        return []
+    station_id = header[2]
+    lat = _safe_float(header[3])
+    lon = _safe_float(header[4])
+    elev = _safe_float(header[5])
+    depth_from = _safe_float(header[6])
+    if lat is None or lon is None:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for row in lines[1:]:
+        parts = row.split()
+        if len(parts) < 3:
+            continue
+        date_part = parts[0]
+        time_part = parts[1] if len(parts) > 1 else ""
+        if year and not date_part.startswith(str(year)):
+            continue
+        value = _safe_float(parts[2])
+        if value is None or value <= MISSING_LIMIT or value < 0 or value > 1.2:
+            continue
+        normalized_date = date_part.replace("/", "-").replace(".", "-")
+        rows.append(
+            {
+                "station_id": station_id,
+                "lon": float(lon),
+                "lat": float(lat),
+                "elevation_m": elev,
+                "depth_m": depth_from,
+                "date": normalized_date,
+                "time": time_part,
+                "soil_moisture": float(value),
+                "source_file": source_file,
+            }
+        )
+    return rows
+
+
+def stm_archive_to_training_dataframe(
+    zip_path: str | Path,
+    preferred_depth: str = "0.050000",
+    year: str = "2019",
+    aggregate: str = "daily",
+) -> pd.DataFrame:
+    """Convert an ISMN/SMN-SDR station zip into an XGBoost-ready sample table.
+
+    aggregate="daily" returns one row per station/day with summary statistics.
+    aggregate="none" returns each valid STM observation row.
+    """
+    zip_path = Path(zip_path)
+    if not zip_path.exists():
+        raise FileNotFoundError(f"站点压缩包不存在：{zip_path}")
+    mode = str(aggregate or "daily").strip().lower()
+    if mode not in {"daily", "none", "hourly", "raw"}:
+        raise ValueError("aggregate must be one of: daily, none")
+
+    rows: list[dict[str, Any]] = []
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        selected = _choose_depth_files(zf.namelist(), preferred_depth=preferred_depth)
+        for name in selected:
+            try:
+                raw = zf.read(name).decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            rows.extend(_parse_stm_rows(raw, name, year=year))
+
+    if not rows:
+        if mode == "daily":
+            return pd.DataFrame(
+                columns=[
+                    "station_id",
+                    "lon",
+                    "lat",
+                    "elevation_m",
+                    "depth_m",
+                    "date",
+                    "soil_moisture_mean",
+                    "soil_moisture_min",
+                    "soil_moisture_max",
+                    "soil_moisture_count",
+                ]
+            )
+        return pd.DataFrame(
+            columns=["station_id", "lon", "lat", "elevation_m", "depth_m", "date", "time", "soil_moisture", "source_file"]
+        )
+
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df = df[df["date"].notna()].copy()
+    df = df.sort_values(["station_id", "date", "time"]).reset_index(drop=True)
+    if mode in {"none", "hourly", "raw"}:
+        return df[["station_id", "lon", "lat", "elevation_m", "depth_m", "date", "time", "soil_moisture", "source_file"]]
+
+    grouped = (
+        df.groupby(["station_id", "lon", "lat", "elevation_m", "depth_m", "date"], dropna=False)["soil_moisture"]
+        .agg(["mean", "min", "max", "count"])
+        .reset_index()
+        .rename(
+            columns={
+                "mean": "soil_moisture_mean",
+                "min": "soil_moisture_min",
+                "max": "soil_moisture_max",
+                "count": "soil_moisture_count",
+            }
+        )
+    )
+    grouped["soil_moisture_mean"] = grouped["soil_moisture_mean"].round(6)
+    grouped["soil_moisture_min"] = grouped["soil_moisture_min"].round(6)
+    grouped["soil_moisture_max"] = grouped["soil_moisture_max"].round(6)
+    grouped["soil_moisture_count"] = grouped["soil_moisture_count"].astype(int)
+    return grouped[
+        [
+            "station_id",
+            "lon",
+            "lat",
+            "elevation_m",
+            "depth_m",
+            "date",
+            "soil_moisture_mean",
+            "soil_moisture_min",
+            "soil_moisture_max",
+            "soil_moisture_count",
+        ]
+    ]
 
 
 def parse_ismn_station_zip(zip_path: str | Path, preferred_depth: str = "0.050000", year: str = "2019") -> dict[str, Any]:

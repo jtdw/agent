@@ -26,6 +26,17 @@ def _compact(value: str) -> str:
     return re.sub(r"[\s，。；;、,._\-]+", "", str(value or "").strip())
 
 
+def _semantic_search_text(value: str) -> str:
+    text = str(value or "")
+    text = re.sub(r"@\{[^}]+\}", " ", text)
+    text = re.sub(r"\b[\w\-]+\.(?:csv|tsv|xlsx|xls|geojson|json|shp|zip|tif|tiff)\b", " ", text, flags=re.IGNORECASE)
+    return text
+
+
+def _has_ascii_resource_token(text: str, token: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9_]){re.escape(token)}(?:v?\d+)?(?![a-z0-9_])", str(text or "").lower()))
+
+
 def clean_semantic_phrase(value: str) -> str:
     text = str(value or "").strip()
     previous = None
@@ -129,22 +140,23 @@ def _admin_alias_index() -> dict[str, dict[str, Any]]:
 
 
 def _detect_action(prompt: str) -> str:
-    compact = _compact(prompt).lower()
-    if any(term in prompt for term in ACTION_TERMS) or "download" in compact or "get" in compact:
+    search_text = _semantic_search_text(prompt)
+    compact = _compact(search_text).lower()
+    if any(term in search_text for term in ACTION_TERMS) or "download" in compact or "get" in compact:
         return "download"
-    if any(term in prompt for term in ("裁剪", "叠加", "重投影", "转换", "提取", "统计")):
+    if any(term in search_text for term in ("裁剪", "叠加", "重投影", "转换", "提取", "统计")):
         return "process"
-    if any(term in prompt for term in ("制图", "画图", "地图", "专题图", "可视化")):
+    if any(term in search_text for term in ("制图", "画图", "地图", "专题图", "可视化")):
         return "map"
     return ""
 
 
 def _detect_resource_type(prompt: str) -> str:
-    text = str(prompt or "")
+    text = _semantic_search_text(prompt)
     lower = text.lower()
     if any(term in text for term in ("行政区边界", "行政边界", "边界")):
         return "admin_boundary"
-    if any(term in lower for term in ("dem", "srtm", "gdem")) or any(term in text for term in ("高程", "数字高程", "地形")):
+    if any(_has_ascii_resource_token(lower, term) for term in ("dem", "srtm", "gdem")) or any(term in text for term in ("高程", "数字高程", "地形")):
         return "DEM"
     if "ndvi" in lower or "植被指数" in text:
         return "NDVI"
@@ -208,11 +220,12 @@ def _dataset_id_for_dem(prompt: str, resolution: str) -> str:
 
 def parse_user_semantics(prompt: str, context: Any | None = None) -> dict[str, Any]:
     text = str(prompt or "").strip()
-    action = _detect_action(text)
-    resource_type = _detect_resource_type(text)
-    resolution = _detect_resolution(text)
-    admin = _best_admin_match(text)
-    raw = str(admin.get("matched_alias") or "") if admin else _fallback_region_raw(text)
+    search_text = _semantic_search_text(text)
+    action = _detect_action(search_text)
+    resource_type = _detect_resource_type(search_text)
+    resolution = _detect_resolution(search_text)
+    admin = _best_admin_match(search_text)
+    raw = str(admin.get("matched_alias") or "") if admin else _fallback_region_raw(search_text)
     cleaned_raw = clean_semantic_phrase(raw)
     if cleaned_raw and not admin:
         admin = _best_admin_match(cleaned_raw)
@@ -236,7 +249,7 @@ def parse_user_semantics(prompt: str, context: Any | None = None) -> dict[str, A
     data_source = "gscloud" if intent == "data_download" and resource_type in {"DEM", "NDVI", "EVI", "Landsat", "Sentinel-2"} else ""
     if resource_type == "DEM":
         product_key = "gscloud_dem"
-        dataset_id = _dataset_id_for_dem(text, resolution)
+        dataset_id = _dataset_id_for_dem(search_text, resolution)
 
     confidence = 0.35
     if intent != "unclear_request":

@@ -5,6 +5,7 @@ import re
 import zipfile
 from pathlib import Path
 from urllib.parse import quote
+from uuid import uuid4
 
 
 SENSITIVE_EXACT_NAMES = {".env", "workspace.db", "cookies.json", "cookie.json", "storage_state.json"}
@@ -69,7 +70,8 @@ def shapefile_zip_path(workdir: str | Path, shp_path: str | Path, artifact_id: s
         raise FileNotFoundError(f"Artifact file does not exist: {shp.name}")
     temp_dir = Path(workdir).resolve() / "temp" / "artifact_downloads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    zip_path = temp_dir / safe_download_filename(f"{Path(shp).stem}.zip")
+    stable_id = safe_download_filename(str(artifact_id or "").strip() or f"artifact_{uuid4().hex}")
+    zip_path = temp_dir / safe_download_filename(f"{Path(shp).stem}_{stable_id}.zip")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for sidecar in sorted(shp.parent.glob(f"{shp.stem}.*")):
             if sidecar.suffix.lower() in SHAPE_SIDE_EXTS and sidecar.is_file():

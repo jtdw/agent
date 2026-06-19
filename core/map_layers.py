@@ -14,6 +14,7 @@ from core.service import GISWorkspaceService
 VECTOR_EXTS = {".shp", ".geojson", ".gpkg", ".json", ".kml", ".zip"}
 RASTER_EXTS = {".tif", ".tiff", ".img"}
 SPATIAL_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+MAP_DISPLAYABLE_EXTS = VECTOR_EXTS.union(RASTER_EXTS)
 SHANDIAN_BOUNDARY_FILENAMES = ("shandianhe_basin_boundary_full.zip", "shandianhe_basin_boundary.zip")
 
 _LOCAL_SHANDIAN_BOUNDARY_LAYER_CACHE: dict[str, Any] | None = None
@@ -347,6 +348,52 @@ class MapLayerService:
             "meta": _merge_meta(meta, {"artifact_id": artifact_id, "map_ready": True}),
         }
 
+    def artifact_spatial_layer(self, artifact: dict[str, Any], user_id: str = "", session_id: str = "") -> dict[str, Any] | None:
+        path = Path(str(artifact.get("path") or ""))
+        suffix = path.suffix.lower()
+        if suffix not in MAP_DISPLAYABLE_EXTS or not path.exists() or not path.is_file():
+            return None
+        meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
+        dataset_name = str(meta.get("dataset_name") or artifact.get("dataset_id") or "").strip()
+        if dataset_name:
+            try:
+                self.service.manager.get(dataset_name)
+            except Exception:
+                dataset_name = ""
+        if not dataset_name:
+            dataset_name = self.service.manager.load_path(str(path), name=path.stem)
+        dataset = next((item for item in self.service.manager.list_datasets() if item.get("name") == dataset_name), None)
+        if not dataset:
+            return None
+        layer = self.dataset_layer(dataset, artifact=artifact, user_id=user_id, session_id=session_id)
+        if not layer:
+            return None
+        refreshed_meta = _merge_meta(
+            meta,
+            layer.get("meta") if isinstance(layer.get("meta"), dict) else {},
+            {
+                "map_ready": True,
+                "dataset_name": dataset_name,
+                "map_layer_id": layer["id"],
+                "layer_kind": layer["kind"],
+                "bounds": layer.get("bounds"),
+            },
+        )
+        refreshed = self.service.manager.register_artifact(
+            artifact_id=str(artifact.get("artifact_id") or ""),
+            path=str(path),
+            type=str(artifact.get("type") or suffix.lstrip(".")),
+            title=str(artifact.get("title") or artifact.get("name") or path.name),
+            description=str(artifact.get("description") or ""),
+            quality_status=str(artifact.get("quality_status") or "unchecked"),
+            preview_available=bool(artifact.get("preview_available") or layer.get("preview_url")),
+            task_id=str(artifact.get("task_id") or ""),
+            model_result_id=str(artifact.get("model_result_id") or ""),
+            dataset_id=dataset_name,
+            meta=refreshed_meta,
+        )
+        return self.dataset_layer(dataset, artifact=refreshed, user_id=user_id, session_id=session_id)
+
     def workspace_layers(self, user_id: str = "", session_id: str = "") -> dict[str, Any]:
         artifacts = self.service.manager.list_artifacts()
         artifacts_by_path = _artifact_path_index(artifacts)
@@ -374,6 +421,16 @@ class MapLayerService:
             meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
             layer_id = str(meta.get("map_layer_id") or "")
             if layer_id and layer_id in dataset_layer_ids:
+                continue
+            try:
+                spatial_layer = self.artifact_spatial_layer(artifact, user_id=user_id, session_id=session_id)
+            except Exception as exc:
+                diagnostics.append({"artifact_id": artifact.get("artifact_id"), "path": artifact.get("path"), "error": str(exc)})
+                spatial_layer = None
+            if spatial_layer:
+                if spatial_layer.get("id") not in dataset_layer_ids:
+                    layers.append(spatial_layer)
+                    dataset_layer_ids.add(spatial_layer.get("id"))
                 continue
             image_layer = self.artifact_image_layer(artifact)
             if image_layer:

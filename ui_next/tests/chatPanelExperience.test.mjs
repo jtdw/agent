@@ -23,6 +23,10 @@ assert.equal(sendPromptSource.includes('mergeStableClientMessageIds(current, nor
 assert.equal(sendPromptSource.includes('const nextSessionId = r.current_session_id || currentSessionId'), true);
 assert.equal(sendPromptSource.includes('setCurrentSessionId(nextSessionId)'), true);
 assert.equal(source.includes("meta: { reason: 'download_failed' }"), false, 'ChatPanel should not append a duplicate assistant error when a watched download job fails');
-assert.equal(layerPanelSource.includes('failed && job.error_message && !job.failure_diagnostic?.user_message'), true, 'LayerPanel should not render both failure_diagnostic.user_message and error_message for the same failed job');
+assert.equal(layerPanelSource.includes('failure_diagnostic'), false, 'LayerPanel should not render raw failure_diagnostic in the management view path');
+assert.equal(layerPanelSource.includes('error_message'), false, 'LayerPanel should not render raw error_message in the management view path');
+assert.equal(layerPanelSource.includes('jobView(job)?.user_message'), true, 'LayerPanel should render safe management_view.user_message');
+assert.equal(layerPanelSource.includes('job.download_url'), false, 'LayerPanel main download management path must not consume raw job.download_url');
+assert.match(layerPanelSource, /api\.artifactMetadata/, 'LayerPanel download actions must resolve artifact_id through the artifact resolver');
 
 console.log('chat panel experience tests passed');

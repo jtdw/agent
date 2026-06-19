@@ -3,9 +3,34 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from core.agent_policy import policy_summary
+from core.area_resolver import resolve_area_candidates
+from core.asset_profiler import profile_dataset
+from core.download_candidates import candidate_download_products
 from core.field_semantics import match_user_field_concept
+from core.knowledge_base import retrieve_knowledge_snippets
+from core.response_language import detect_response_language
+from core.tool_cards import candidate_tool_cards
 
 MAX_CONTEXT_OBJECTS = 12
+HISTORY_REFERENCE_TERMS = (
+    "上次",
+    "刚才",
+    "之前",
+    "上一轮",
+    "这个图层",
+    "这个结果",
+    "这张图",
+    "刚才下载",
+    "previous",
+    "last result",
+    "selected",
+    "this layer",
+    "this result",
+    "this shp",
+    "缁撴灉",
+)
+CURRENT_UPLOAD_TERMS = ("上传", "当前上传", "我上传", "current upload", "uploaded", "this dataset", "this shp")
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -16,14 +41,28 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
-def _compact_dataset(manager: Any, name: str) -> dict[str, Any] | None:
+def _asset_profile(manager: Any, name: str) -> dict[str, Any] | None:
+    if not name:
+        return None
+    try:
+        return profile_dataset(manager, name)
+    except Exception:
+        return None
+
+
+def _compact_dataset(manager: Any, name: str, *, include_profile: bool = False) -> dict[str, Any] | None:
     if not name:
         return None
     try:
         record = manager.get(name)
     except Exception:
         return {"name": name}
-    return {"name": record.name, "type": record.data_type, "path": str(record.path), "meta": record.meta}
+    payload = {"name": record.name, "type": record.data_type, "path": str(record.path), "meta": record.meta}
+    if include_profile:
+        profile = _asset_profile(manager, record.name)
+        if profile:
+            payload["asset_profile"] = profile
+    return payload
 
 
 def _latest_dataset(manager: Any) -> dict[str, Any] | None:
@@ -34,12 +73,34 @@ def _latest_dataset(manager: Any) -> dict[str, Any] | None:
     return datasets[-1] if datasets else None
 
 
+def _has_explicit_history_reference(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(term.lower() in text for term in HISTORY_REFERENCE_TERMS)
+
+
+def _has_explicit_current_upload_reference(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(term.lower() in text for term in CURRENT_UPLOAD_TERMS)
+
+
 def _available_datasets(manager: Any) -> list[dict[str, Any]]:
     try:
         datasets = manager.list_datasets()
     except Exception:
         return []
     return [item for item in datasets if isinstance(item, dict)]
+
+
+def _available_asset_profiles(manager: Any, limit: int = MAX_CONTEXT_OBJECTS) -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    for item in _available_datasets(manager)[-limit:]:
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        compact = _compact_dataset(manager, name, include_profile=True)
+        if compact:
+            profiles.append(compact)
+    return profiles
 
 
 def _compact_object_index(items: list[dict[str, Any]], active_name: str = "", limit: int = MAX_CONTEXT_OBJECTS) -> list[dict[str, Any]]:
@@ -174,39 +235,99 @@ def build_conversation_context(
 ) -> dict[str, Any]:
     state_dict = _as_dict(state)
     dashboard_dict = _as_dict(dashboard)
-    active_dataset = _compact_dataset(manager, str(state_dict.get("active_dataset") or "")) or _latest_dataset(manager)
+    explicit_history_reference = _has_explicit_history_reference(str(prompt or ""))
+    explicit_current_upload_reference = _has_explicit_current_upload_reference(str(prompt or ""))
+    active_dataset = _compact_dataset(manager, str(state_dict.get("active_dataset") or ""), include_profile=True)
+    if active_dataset is None and explicit_current_upload_reference:
+        active_dataset = _latest_dataset(manager)
+    if active_dataset and "asset_profile" not in active_dataset:
+        active_name_for_profile = _dataset_name(active_dataset)
+        profile = _asset_profile(manager, active_name_for_profile)
+        if profile:
+            active_dataset = {**active_dataset, "asset_profile": profile}
     active_name = _dataset_name(active_dataset)
     artifacts = _as_list(state_dict.get("active_artifacts")) or _as_list(dashboard_dict.get("artifacts"))
     field_profile = _field_profile(manager, active_dataset, str(prompt or ""))
     available_datasets = _compact_object_index(_available_datasets(manager), active_name)
     available_layers = [item for item in available_datasets if str(item.get("type") or item.get("data_type") or "") == "vector"]
-    active_selection = {
-        "selected_artifact": state_dict.get("selected_artifact"),
-        "selected_layer": state_dict.get("selected_layer"),
-        "selected_feature": state_dict.get("selected_feature"),
-        "selected_model_result": state_dict.get("selected_model_result"),
-        "selected_map_bounds": state_dict.get("selected_map_bounds"),
-    }
+    active_selection = {}
+    if explicit_history_reference:
+        active_selection = {
+            "selected_artifact": state_dict.get("selected_artifact"),
+            "selected_layer": state_dict.get("selected_layer"),
+            "selected_feature": state_dict.get("selected_feature"),
+            "selected_model_result": state_dict.get("selected_model_result"),
+            "selected_map_bounds": state_dict.get("selected_map_bounds"),
+        }
+    task_type = str(_as_dict(intent).get("intent") or "")
+    retrieval_text = " ".join(
+        [
+            str(prompt or ""),
+            task_type,
+            json.dumps(active_dataset, ensure_ascii=False, default=str)[:2000],
+        ]
+    )
     context = {
         "prompt": str(prompt or ""),
+        "response_language": detect_response_language(prompt),
+        "agent_policy": policy_summary(),
         "intent": intent,
         "workspace": dashboard_dict.get("summary") or getattr(manager, "workspace_summary", lambda: {})(),
         "active_dataset": active_dataset,
         "available_datasets": available_datasets,
+        "available_asset_profiles": _available_asset_profiles(manager),
         "available_layers": available_layers[:MAX_CONTEXT_OBJECTS],
         "latest_derived_datasets": _compact_object_index(_latest_derived_datasets(manager), active_name),
         "active_selection": {key: value for key, value in active_selection.items() if value},
-        "recent_artifacts": [item for item in artifacts[:3] if isinstance(item, dict)],
-        "recent_map_path": state_dict.get("last_map_path") or dashboard_dict.get("last_plot") or "",
-        "recent_model_result": _recent_model_result(dashboard_dict, state_dict),
-        "recent_tool_results": _as_list(state_dict.get("last_tool_results"))[:3],
-        "recent_error": state_dict.get("last_error") if isinstance(state_dict.get("last_error"), dict) else None,
+        "recent_artifacts": [item for item in artifacts[:3] if isinstance(item, dict)] if explicit_history_reference else [],
+        "recent_map_path": (state_dict.get("last_map_path") or dashboard_dict.get("last_plot") or "") if explicit_history_reference else "",
+        "recent_model_result": _recent_model_result(dashboard_dict, state_dict) if explicit_history_reference else None,
+        "recent_tool_results": _as_list(state_dict.get("last_tool_results"))[:3] if explicit_history_reference else [],
+        "recent_error": state_dict.get("last_error") if explicit_history_reference and isinstance(state_dict.get("last_error"), dict) else None,
         "user_goal": str(state_dict.get("last_user_goal") or ""),
-        "referenced_object": state_dict.get("referenced_object") if isinstance(state_dict.get("referenced_object"), dict) else None,
+        "referenced_object": state_dict.get("referenced_object") if explicit_history_reference and isinstance(state_dict.get("referenced_object"), dict) else None,
         "followup": followup or {},
+        "context_sources": {
+            "current_request_priority": True,
+            "response_language": detect_response_language(prompt),
+            "explicit_history_reference": explicit_history_reference,
+            "explicit_current_upload_reference": explicit_current_upload_reference,
+            "active_dataset_source": "conversation_state" if state_dict.get("active_dataset") else ("current_upload_reference" if active_dataset else ""),
+        },
+        "knowledge_snippets": retrieve_knowledge_snippets(retrieval_text, limit=5),
+        "candidate_tool_cards": candidate_tool_cards(retrieval_text, task_type=task_type, limit=8),
+        "download_candidates": candidate_download_products(retrieval_text, limit=6),
+        "area_candidates": resolve_area_candidates(str(prompt or ""), limit=8, manager=manager),
         **field_profile,
     }
-    if followup and isinstance(followup.get("referenced_object"), dict):
+    context["capability_trace"] = {
+        "knowledge_chunk_ids": [
+            str(item.get("knowledge_chunk_id") or item.get("id") or "")
+            for item in _as_list(context.get("knowledge_snippets"))
+            if isinstance(item, dict)
+        ],
+        "knowledge_versions": {
+            str(item.get("knowledge_id") or item.get("id") or ""): str(item.get("knowledge_version") or item.get("version") or "")
+            for item in _as_list(context.get("knowledge_snippets"))
+            if isinstance(item, dict)
+        },
+        "tool_card_versions": {
+            str(item.get("tool_name") or ""): str(item.get("version") or item.get("schema_version") or "")
+            for item in _as_list(context.get("candidate_tool_cards"))
+            if isinstance(item, dict)
+        },
+        "product_catalog_versions": {
+            str(item.get("product_id") or item.get("product_key") or ""): str(item.get("version") or item.get("schema_version") or "")
+            for item in _as_list(context.get("download_candidates"))
+            if isinstance(item, dict)
+        },
+        "asset_registry_versions": {
+            str(item.get("asset_id") or ""): str(item.get("version") or item.get("schema_version") or "")
+            for item in _as_list(context.get("area_candidates"))
+            if isinstance(item, dict)
+        },
+    }
+    if explicit_history_reference and followup and isinstance(followup.get("referenced_object"), dict):
         context["referenced_object"] = followup["referenced_object"]
         ref = followup["referenced_object"]
         if ref.get("type") == "model_result" and isinstance(ref.get("data"), dict) and not ref.get("missing"):
@@ -217,6 +338,7 @@ def build_conversation_context(
 def format_context_for_agent(context: dict[str, Any]) -> str:
     payload = {
         "intent": _as_dict(context.get("intent")).get("intent"),
+        "agent_policy": context.get("agent_policy"),
         "workspace": context.get("workspace"),
         "active_dataset": context.get("active_dataset"),
         "available_datasets": context.get("available_datasets"),
@@ -236,5 +358,10 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         "semantic_field_candidates": context.get("semantic_field_candidates"),
         "likely_target_fields": context.get("likely_target_fields"),
         "likely_mapping_fields": context.get("likely_mapping_fields"),
+        "knowledge_snippets": context.get("knowledge_snippets"),
+        "candidate_tool_cards": context.get("candidate_tool_cards"),
+        "download_candidates": context.get("download_candidates"),
+        "area_candidates": context.get("area_candidates"),
+        "capability_trace": context.get("capability_trace"),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)

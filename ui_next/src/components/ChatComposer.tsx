@@ -181,7 +181,7 @@ export function ChatComposer({
                 const details = [item.type, item.row_count != null ? `${item.row_count} 行` : '', item.column_count != null ? `${item.column_count} 字段` : '', item.crs || ''].filter(Boolean).join(' · ');
                 return (
                   <button
-                    key={item.id || item.name}
+                    key={item.id || `${item.type}-${item.name}-${item.filename || ''}`}
                     type="button"
                     role="option"
                     aria-selected={index === activeMentionIndex}

@@ -13,6 +13,7 @@ from ..domestic_sources.gscloud_adapter import (
     gscloud_platform_state_path,
     gscloud_user_state_path,
 )
+from ..domestic_sources.gscloud_reliability import classify_gscloud_failure, inspect_storage_state
 from ..domestic_sources.raster_postprocess import standardize_raster_download_result
 from ..domestic_sources.gscloud_stable_downloader import download_gscloud_tiles_by_identifier_search
 
@@ -78,11 +79,27 @@ def main() -> int:
         service._update_job(job_id, status="running", progress=8, stage="planning_gscloud_dem_tiles")
 
         state_path = _resolve_storage_state_with_fallback(service, workdir, job)
-        if not state_path or not Path(state_path).exists():
-            raise RuntimeError(
-                "未找到可用地理空间数据云登录态。请先完成平台账号或用户账号登录保存 Cookie；"
-                "登录成功后等待 5-10 秒再启动自动分幅下载。"
+        login_health = inspect_storage_state(state_path) if state_path else inspect_storage_state("")
+        if not login_health.get("ok"):
+            diagnostic = classify_gscloud_failure("未找到可用地理空间数据云登录态")
+            if hasattr(service, "_release_platform_reservation"):
+                service._release_platform_reservation(job_id, "release_waiting_login_platform_download")
+            current.update({
+                "state": "WAITING_LOGIN",
+                "message": diagnostic["user_message"],
+                "login_health": login_health,
+                "failure_diagnostic": diagnostic,
+                "updated_at": _now(),
+            })
+            _safe_write_json(status_path, current)
+            service._update_job(
+                job_id,
+                status="waiting_login",
+                progress=5,
+                stage="needs_gscloud_login_state",
+                error_message=diagnostic["user_message"],
             )
+            return 2
 
         region = current.get("region") or job.get("region") or "四川省"
         region_dataset = current.get("region_dataset") or ""

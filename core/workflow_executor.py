@@ -9,8 +9,9 @@ from uuid import uuid4
 
 from .tools.registry import build_tools
 from .tool_context import ToolRuntimeContext
-from .tool_contracts import parse_tool_result, tool_result_error, tool_result_ok
+from .tool_contracts import aggregate_tool_results, is_tool_result_success, parse_tool_result, tool_result_error, tool_result_ok
 from .tool_preconditions import validate_output_file_path
+from .download_request_executor import execute_single_download_request
 
 
 SUPPORTED_WORKFLOW_TOOLS = {
@@ -20,16 +21,21 @@ SUPPORTED_WORKFLOW_TOOLS = {
     "vector_spatial_join",
     "table_to_points",
     "extract_raster_values_to_points",
+    "raster_basic_stats",
     "raster_zonal_stats",
+    "clip_raster_by_vector",
     "raster_mosaic",
     "raster_reproject",
     "raster_algebra",
     "dem_terrain_derivatives",
     "plot_dataset",
+    "generic_xgboost_workflow",
     "train_xgboost_fusion_model",
     "train_rf_fusion_model",
     "geographical_conformal_prediction",
+    "generate_stage_report",
     "export_dataset",
+    "run_stm_soil_moisture_xgboost_workflow",
 }
 VIRTUAL_WORKFLOW_TOOLS = {"field_match", "interpret_result", "export_artifact"}
 
@@ -72,15 +78,28 @@ class WorkflowStep:
 class WorkflowResult:
     ok: bool
     workflow_id: str
+    status: str = ""
+    success: bool = False
     steps: list[dict[str, Any]] = field(default_factory=list)
     final_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
+    outputs: dict[str, Any] = field(default_factory=dict)
     final_summary: str = ""
     failed_step: str = ""
     diagnostics: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[dict[str, Any]] = field(default_factory=list)
     next_actions: list[str] = field(default_factory=list)
+    error_code: str = ""
+    error_title: str = ""
+    user_message: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["success"] = bool(payload.get("success") or payload.get("ok"))
+        payload["status"] = str(payload.get("status") or ("succeeded" if payload["success"] else "failed"))
+        payload["artifacts"] = payload.get("artifacts") or payload.get("final_artifacts") or []
+        return payload
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=2, default=str)
@@ -103,6 +122,15 @@ def parse_workflow_result(value: Any) -> dict[str, Any] | None:
     required = {"ok", "workflow_id", "steps", "final_artifacts", "final_summary", "failed_step", "diagnostics", "next_actions"}
     if not required.issubset(payload):
         return None
+    payload.setdefault("success", bool(payload.get("ok")))
+    payload.setdefault("status", "succeeded" if payload.get("ok") else "failed")
+    payload.setdefault("artifacts", payload.get("final_artifacts") or [])
+    payload.setdefault("outputs", {})
+    payload.setdefault("warnings", [])
+    payload.setdefault("errors", [])
+    payload.setdefault("error_code", "")
+    payload.setdefault("error_title", "")
+    payload.setdefault("user_message", "")
     return payload
 
 
@@ -394,8 +422,11 @@ def execute_workflow_plan(manager: Any, plan: dict[str, Any], context: ToolRunti
                 except Exception as exc:
                     parsed = _error_result(step.tool_name, step.validated_tool_args, "TOOL_EXECUTION_EXCEPTION", f"Tool {step.tool_name} raised before returning ToolResult.", f"{type(exc).__name__}: {exc}")
 
+        parsed = parse_tool_result(parsed) or _error_result(step.tool_name, step.validated_tool_args, "INVALID_TOOL_RESULT", f"Tool {step.tool_name} did not return ToolResult.", str(parsed))
+        parsed["workflow_id"] = workflow_id
+        parsed["step_id"] = step.step_id
         step.tool_result = parsed
-        step.status = "success" if parsed.get("ok") else "failed"
+        step.status = "success" if is_tool_result_success(parsed) else "failed"
         completed[step.step_id] = step
         artifacts = parsed.get("artifacts") if isinstance(parsed.get("artifacts"), list) else []
         final_artifacts.extend(artifact for artifact in artifacts if isinstance(artifact, dict))
@@ -407,17 +438,30 @@ def execute_workflow_plan(manager: Any, plan: dict[str, Any], context: ToolRunti
 
     ok = not failed_step and all(step.status in {"success", "skipped"} for step in steps)
     failed_result = _step_result_by_id(completed, failed_step) if failed_step else {}
+    step_results = [step.tool_result for step in steps if isinstance(step.tool_result, dict)]
+    aggregate = aggregate_tool_results(step_results, tool_name="workflow_executor", workflow_id=workflow_id)
+    warnings = [str(item) for result_item in step_results for item in (result_item.get("warnings") if isinstance(result_item.get("warnings"), list) else []) if str(item).strip()]
+    errors = [item for result_item in step_results for item in (result_item.get("errors") if isinstance(result_item.get("errors"), list) else []) if isinstance(item, dict)]
     result = WorkflowResult(
         ok=ok,
+        success=ok,
+        status="succeeded" if ok else str(failed_result.get("status") or "failed"),
         workflow_id=workflow_id,
         steps=[step.to_dict() for step in steps],
         final_artifacts=final_artifacts,
+        artifacts=final_artifacts,
+        outputs={"step_results": step_results, "executed_steps": executed_steps, "aggregate_status": aggregate.get("status")},
         final_summary="Workflow completed successfully." if ok else f"Workflow stopped at step {failed_step}.",
         failed_step=failed_step,
         diagnostics={"executed_steps": executed_steps, "tool_count": len([step for step in steps if step.tool_name not in VIRTUAL_WORKFLOW_TOOLS])},
+        warnings=list(dict.fromkeys(warnings)),
+        errors=errors,
         next_actions=[str(item) for item in failed_result.get("next_actions", []) if str(item).strip()]
         if failed_step
         else ["Review the generated artifacts and continue with interpretation or downstream GIS processing."],
+        error_code=str(failed_result.get("error_code") or ""),
+        error_title=str(failed_result.get("error_title") or ""),
+        user_message=str(failed_result.get("user_message") or ""),
     )
     return {
         "executed": True,
@@ -426,4 +470,70 @@ def execute_workflow_plan(manager: Any, plan: dict[str, Any], context: ToolRunti
         "workflow_result": result.to_dict(),
         "executed_steps": executed_steps,
         "failed_step": failed_step,
+    }
+
+
+def execute_single_workflow_step(
+    manager: Any,
+    step: dict[str, Any],
+    *,
+    completed_results: dict[str, dict[str, Any]] | None = None,
+    context: ToolRuntimeContext | None = None,
+) -> dict[str, Any]:
+    step_obj = WorkflowStep.from_dict(step)
+    if step_obj.tool_name == "submit_commercial_download_job" and isinstance(step_obj.validated_tool_args, dict):
+        request = step_obj.validated_tool_args.get("download_request")
+        if not isinstance(request, dict):
+            request = step_obj.validated_tool_args
+        tool_result = execute_single_download_request(
+            manager,
+            request,
+            context={},
+            runtime_context=context,
+            step_id=step_obj.step_id,
+        )
+        return {
+            "executed": True,
+            "ok": is_tool_result_success(tool_result),
+            "raw_reply": "",
+            "tool_result": tool_result,
+            "executed_steps": [step_obj.step_id],
+            "failed_step": "" if is_tool_result_success(tool_result) else step_obj.step_id,
+        }
+    completed: dict[str, WorkflowStep] = {}
+    for step_id, result in (completed_results or {}).items():
+        if not isinstance(result, dict):
+            continue
+        status = "success" if is_tool_result_success(result) else "failed"
+        completed[str(step_id)] = WorkflowStep(
+            step_id=str(step_id),
+            tool_name=str(result.get("tool_name") or ""),
+            status=status,
+            tool_result=result,
+        )
+    resolved_args = _resolve_placeholder(step_obj.validated_tool_args, completed)
+    if isinstance(resolved_args, dict):
+        step_obj.validated_tool_args = resolved_args
+    step_obj.depends_on = []
+    single = execute_workflow_plan(manager, {"workflow_plan": [step_obj.to_dict()]}, context=context)
+    workflow_result = single.get("workflow_result") if isinstance(single, dict) else None
+    steps = workflow_result.get("steps") if isinstance(workflow_result, dict) else []
+    first_step = steps[0] if isinstance(steps, list) and steps and isinstance(steps[0], dict) else {}
+    tool_result = first_step.get("tool_result") if isinstance(first_step, dict) else None
+    if not isinstance(tool_result, dict):
+        tool_result = _error_result(
+            step_obj.tool_name,
+            step_obj.validated_tool_args,
+            "INVALID_WORKFLOW_STEP_RESULT",
+            f"Workflow step {step_obj.step_id} did not produce a structured ToolResult.",
+        )
+    tool_result["step_id"] = step_obj.step_id
+    tool_result["tool_name"] = step_obj.tool_name
+    return {
+        "executed": bool(single.get("executed")) if isinstance(single, dict) else False,
+        "ok": bool(single.get("ok")) if isinstance(single, dict) else False,
+        "raw_reply": single.get("raw_reply", "") if isinstance(single, dict) else "",
+        "tool_result": tool_result,
+        "executed_steps": [step_obj.step_id] if single.get("executed") else [],
+        "failed_step": "" if is_tool_result_success(tool_result) else step_obj.step_id,
     }

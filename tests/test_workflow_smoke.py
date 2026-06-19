@@ -11,6 +11,7 @@ from core.tools.raster_tools import build_raster_tools
 from core.tools.registry import build_tools as build_registry_tools
 from core.tools.table_tools import build_table_tools
 from core.tools.vector_tools import build_vector_tools
+from core.workflow_executor import SUPPORTED_WORKFLOW_TOOLS, VIRTUAL_WORKFLOW_TOOLS
 from core.workflows.registry import build_executable_workflow, list_workflow_templates, match_workflow_template
 
 
@@ -113,6 +114,66 @@ class WorkflowSmokeTests(unittest.TestCase):
         self.assertEqual([step["tool_name"] for step in workflow["workflow_plan"]], ["describe_dataset", "table_to_points"])
         self.assertEqual(workflow["workflow_plan"][1]["validated_tool_args"]["output_name"], "stations_points")
         self.assertIn("frontend_payload", workflow)
+
+    def test_built_workflow_steps_are_enabled_for_execution(self) -> None:
+        enabled = set(SUPPORTED_WORKFLOW_TOOLS) | set(VIRTUAL_WORKFLOW_TOOLS)
+        sample_params = {
+            "upload_vector_profile": {"dataset_name": "points"},
+            "upload_raster_profile": {"dataset_name": "dem"},
+            "vector_clip_vector": {"dataset_name": "points", "clip_name": "boundary", "output_name": "points_clip"},
+            "vector_clip_raster": {"raster_name": "dem", "vector_name": "boundary", "output_name": "dem_clip"},
+            "table_to_points": {"dataset_name": "stations.csv", "x_col": "lon", "y_col": "lat", "crs": "EPSG:4326", "output_name": "stations_points"},
+            "raster_statistics": {"raster_name": "dem"},
+            "map_export": {"dataset_name": "points", "output_name": "points_map"},
+            "processing_report": {"report_title": "soil moisture report"},
+        }
+        missing = {
+            workflow_id: sorted({step["tool_name"] for step in build_executable_workflow(workflow_id, params)["workflow_plan"]} - enabled)
+            for workflow_id, params in sample_params.items()
+            if {step["tool_name"] for step in build_executable_workflow(workflow_id, params)["workflow_plan"]} - enabled
+        }
+        not_ready = {
+            workflow_id: build_executable_workflow(workflow_id, params)["missing_params"]
+            for workflow_id, params in sample_params.items()
+            if build_executable_workflow(workflow_id, params)["status"] != "ready"
+        }
+
+        self.assertEqual(not_ready, {})
+        self.assertEqual(missing, {})
+
+    def test_registered_workflow_required_tools_are_registered_or_executable(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            class StubManager:
+                operation_log: list[dict] = []
+                workdir = tmpdir
+
+                def workspace_summary(self):
+                    return {}
+
+                def list_datasets(self):
+                    return []
+
+                def list_artifacts(self):
+                    return []
+
+            registered = {tool.name for tool in build_registry_tools(StubManager())}
+        enabled_or_registered = set(SUPPORTED_WORKFLOW_TOOLS) | set(VIRTUAL_WORKFLOW_TOOLS) | registered
+        missing = {
+            template["workflow_id"]: sorted(set(template["required_tools"]) - enabled_or_registered)
+            for template in list_workflow_templates()
+            if set(template["required_tools"]) - enabled_or_registered
+        }
+
+        self.assertEqual(missing, {})
+
+    def test_processing_report_workflow_uses_generate_stage_report_contract(self) -> None:
+        workflow = build_executable_workflow("processing_report", {"report_title": "soil moisture report"})
+
+        self.assertEqual(workflow["status"], "ready")
+        step = workflow["workflow_plan"][0]
+        self.assertEqual(step["tool_name"], "generate_stage_report")
+        self.assertEqual(step["validated_tool_args"]["stage"], "proposal")
+        self.assertEqual(step["validated_tool_args"]["topic"], "soil moisture report")
 
     def test_registry_executable_workflow_reports_missing_params(self) -> None:
         workflow = build_executable_workflow("vector_clip_vector", {"dataset_name": "points"})

@@ -47,10 +47,11 @@ class ChineseEncodingTests(unittest.TestCase):
             "core/tools/map_tools.py",
             "core/tools/table_tools.py",
             "core/conversation_intent.py",
+            "core/result_interpreter.py",
             "ui_next/index.html",
             "ui_next/src/lib/api.ts",
         ]
-        markers = ["涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱", "鏅鸿兘", "锟斤拷", "�"]
+        markers = ["涓嬭浇", "鑾峰彇", "鍑嗗", "妫€绱", "鏅鸿兘", "鐗瑰緛", "娈嬪樊", "暂未识别到输出文件", "锟斤拷", "�"]
         hits: list[str] = []
         for rel in files:
             text = (PROJECT_ROOT / rel).read_text(encoding="utf-8")

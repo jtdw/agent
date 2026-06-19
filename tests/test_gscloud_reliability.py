@@ -36,6 +36,20 @@ class GSCloudReliabilityTests(unittest.TestCase):
             self.assertEqual(result["reason"], "storage_state_ready")
             self.assertNotIn("path", result)
 
+    def test_inspect_storage_state_rejects_csrf_only_cookie(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            path.write_text(
+                json.dumps({"cookies": [{"name": "gsc_csrftoken", "domain": ".gscloud.cn", "expires": 4102444800}]}),
+                encoding="utf-8",
+            )
+
+            result = inspect_storage_state(path)
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["reason"], "missing_authenticated_gscloud_cookie")
+            self.assertEqual(result["action"], "relogin")
+
     def test_inspect_storage_state_rejects_expired_gscloud_cookie(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state.json"

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .tools.registry import build_tools
 from .tool_context import ToolRuntimeContext
-from .tool_contracts import parse_tool_result, tool_result_error, tool_result_ok
+from .tool_contracts import aggregate_tool_results, is_tool_result_success, parse_tool_result, tool_result_error
 
 
 DEFAULT_DETERMINISTIC_TOOLS = {
@@ -17,6 +18,8 @@ DEFAULT_DETERMINISTIC_TOOLS = {
     "dem_terrain_derivatives",
     "raster_reproject",
     "export_dataset",
+    "generic_xgboost_workflow",
+    "submit_commercial_download_job",
 }
 
 
@@ -47,33 +50,12 @@ def _failure_result(tool_name: str, inputs: dict[str, Any], *, code: str, messag
 
 
 def _aggregate_result(results: list[dict[str, Any]], executed_tools: list[str]) -> str:
-    ok = all(bool(item.get("ok")) for item in results)
-    artifacts: list[dict[str, Any]] = []
-    for item in results:
-        item_artifacts = item.get("artifacts")
-        if isinstance(item_artifacts, list):
-            artifacts.extend(artifact for artifact in item_artifacts if isinstance(artifact, dict))
-    if ok:
-        return tool_result_ok(
-            "tool_executor",
-            inputs={"executed_tools": executed_tools},
-            outputs={"tool_results": results, "executed_tools": executed_tools},
-            artifacts=artifacts,
-            summary="Executed deterministic GIS tool plan.",
-            diagnostics={"tool_count": len(results)},
-            next_actions=["Review the outputs and continue with interpretation, mapping, or downstream processing."],
-        ).to_json()
-    first_error = next((item for item in results if not item.get("ok")), results[-1])
-    return tool_result_error(
-        "tool_executor",
-        inputs={"executed_tools": executed_tools},
-        error_code=str(first_error.get("error_code") or "TOOL_EXECUTION_FAILED"),
-        error_title=str(first_error.get("error_title") or "Deterministic tool plan failed"),
-        user_message=str(first_error.get("user_message") or "One deterministic tool failed."),
-        technical_detail=str(first_error.get("technical_detail") or "")[:1000],
-        diagnostics={"tool_results": results, "failed_tool": first_error.get("tool_name")},
-        next_actions=[str(item) for item in first_error.get("next_actions", []) if str(item).strip()],
-    ).to_json()
+    aggregate = aggregate_tool_results(results, tool_name="tool_executor")
+    aggregate["inputs"] = {"executed_tools": executed_tools}
+    aggregate["outputs"]["executed_tools"] = executed_tools
+    if aggregate["status"] == "succeeded" and not aggregate.get("next_actions"):
+        aggregate["next_actions"] = ["Review the outputs and continue with interpretation, mapping, or downstream processing."]
+    return json.dumps(aggregate, ensure_ascii=False, indent=2, default=str)
 
 
 def execute_validated_tool_plan(manager: Any, plan: dict[str, Any], *, allow_tools: set[str] | list[str] | tuple[str, ...] | None = None, context: ToolRuntimeContext | None = None) -> dict[str, Any]:
@@ -133,7 +115,7 @@ def execute_validated_tool_plan(manager: Any, plan: dict[str, Any], *, allow_too
                     detail=f"{type(exc).__name__}: {exc}",
                 )
         tool_results.append(parsed)
-        if not parsed.get("ok"):
+        if not is_tool_result_success(parsed):
             failed_tool = tool_name
             break
 
@@ -157,7 +139,9 @@ def execute_validated_tool_plan(manager: Any, plan: dict[str, Any], *, allow_too
         raw_reply_text = raw_reply
     return {
         "executed": True,
-        "ok": all(bool(item.get("ok")) for item in tool_results),
+        "ok": all(is_tool_result_success(item) for item in tool_results),
+        "status": "succeeded" if all(is_tool_result_success(item) for item in tool_results) else str((next((item for item in tool_results if not is_tool_result_success(item)), {}) or {}).get("status") or "failed"),
+        "success": all(is_tool_result_success(item) for item in tool_results),
         "tool_results": tool_results,
         "raw_reply": raw_reply_text,
         "executed_tools": executed_tools,

@@ -125,8 +125,8 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                         <div className="rounded-[22px] border border-white/30 bg-white/35 p-4 dark:border-white/10 dark:bg-slate-950/20">
                           <div className="mb-3 text-sm font-black">流水线步骤</div>
                           <div className="space-y-2">
-                            {view.steps.map((step, idx) => (
-                              <div key={`${step.name}-${idx}`} className="rounded-2xl bg-white/35 px-3 py-2 text-xs leading-5 dark:bg-white/5">
+                            {view.steps.map((step) => (
+                              <div key={`${step.name}-${step.status || step.summary || ''}`} className="rounded-2xl bg-white/35 px-3 py-2 text-xs leading-5 dark:bg-white/5">
                                 <div className="flex items-center gap-2 font-black"><CheckCircle2 size={14} strokeWidth={1.7} className="text-emerald-500" /> {step.name}</div>
                                 <div className="mt-1 text-slate-500 dark:text-slate-400">{step.summary || step.status}</div>
                               </div>
@@ -139,8 +139,8 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                         <div className="rounded-[22px] border border-cyan-glow/25 bg-cyan-glow/10 p-4 dark:border-cyan-glow/20 dark:bg-cyan-glow/5">
                           <div className="mb-3 text-sm font-black">下一步建议</div>
                           <div className="space-y-2">
-                            {view.recommendations.map((item, idx) => (
-                              <div key={`${item}-${idx}`} className="rounded-2xl bg-white/35 px-3 py-2 text-xs leading-5 text-slate-600 dark:bg-white/5 dark:text-slate-300">
+                            {view.recommendations.map((item) => (
+                              <div key={item} className="rounded-2xl bg-white/35 px-3 py-2 text-xs leading-5 text-slate-600 dark:bg-white/5 dark:text-slate-300">
                                 {item}
                               </div>
                             ))}

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .tool_contracts import is_tool_result_success
+
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
@@ -112,7 +114,7 @@ def _step_explanation(step: dict[str, Any]) -> dict[str, Any]:
     diagnostics_note = _diagnostics_text(diagnostics)
     warnings = [str(item) for item in _as_list(result.get("warnings")) if str(item).strip()]
     failure_reason = ""
-    if status == "failed" or not result.get("ok", True):
+    if status == "failed" or not is_tool_result_success(result):
         failure_reason = f"{result.get('error_code') or 'WORKFLOW_STEP_FAILED'} - {result.get('user_message') or result.get('error_title') or '该步骤执行失败'}"
     next_actions = [str(item) for item in _as_list(result.get("next_actions")) if str(item).strip()]
     return {
@@ -144,11 +146,14 @@ def _final_interpretation(workflow_result: dict[str, Any], steps: list[dict[str,
     text: list[str] = []
     if "map" in artifact_types or "plot" in artifact_types:
         text.append("地图结果可用于观察空间分布、局部异常和研究区内的梯度变化；异常区域只能作为线索，仍需结合字段含义、坐标系、采样密度和外部背景数据验证。")
-    if "dataset" in artifact_types:
+    workflow_tools = {str(_as_dict(step).get("tool_name") or "") for step in _as_list(workflow_result.get("steps")) if isinstance(step, dict)}
+    if "dataset" in artifact_types and "vector_clip_by_vector" in workflow_tools:
         clip_outputs = [_as_dict(_step_result(step).get("outputs")) for step in _as_list(workflow_result.get("steps")) if _as_dict(step).get("tool_name") == "vector_clip_by_vector"]
         feature_counts = [str(item.get("feature_count")) for item in clip_outputs if item.get("feature_count") not in (None, "")]
         suffix = f" 保留要素数：{', '.join(feature_counts)}。" if feature_counts else ""
-        text.append(f"裁剪或处理结果已经生成新的数据集，可继续用于制图、导出或后续空间分析。{suffix}")
+        text.append(f"矢量裁剪结果已经生成新的数据集，可继续用于制图、导出或后续空间分析。{suffix}")
+    elif "dataset" in artifact_types and not ({"train_xgboost_fusion_model", "generic_xgboost_workflow", "train_rf_fusion_model", "geographical_conformal_prediction"} & workflow_tools):
+        text.append("数据结果已经生成，可继续用于制图、导出或后续空间分析。")
     if {"metrics", "model", "summary"} & artifact_types or any("model_result_id" in _as_dict(_step_result(step).get("outputs")) for step in _as_list(workflow_result.get("steps"))):
         text.append("模型结果需要重点查看 R、RMSE、MAE、Bias、NSE、特征重要性和残差空间分布；这些指标说明预测精度、系统偏差、变量贡献和空间误差聚集情况。")
     if {"table", "file"} & artifact_types:
@@ -169,11 +174,11 @@ def _summary(workflow_result: dict[str, Any], context: dict[str, Any] | None) ->
     if not used_datasets:
         used_datasets.append(_dataset_label(context))
     return {
-        "completed": bool(workflow_result.get("ok")),
+        "completed": bool(workflow_result.get("success", workflow_result.get("ok"))),
         "workflow_id": str(workflow_result.get("workflow_id") or ""),
         "used_data": used_datasets,
         "final_results": [{"type": item.get("type"), "title": item.get("title") or item.get("name"), "path": item.get("path")} for item in artifacts],
-        "summary": str(workflow_result.get("final_summary") or ("Workflow completed." if workflow_result.get("ok") else "Workflow failed.")),
+        "summary": str(workflow_result.get("final_summary") or ("Workflow completed." if workflow_result.get("success", workflow_result.get("ok")) else "Workflow failed.")),
     }
 
 

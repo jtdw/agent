@@ -31,6 +31,13 @@ assert.match(mapStageSource, /function safeFitBounds/);
 assert.match(mapStageSource, /clientWidth|offsetWidth/);
 assert.match(mapStageSource, /Number\.isFinite/);
 assert.equal(mapStageSource.includes('right: 430'), false);
+assert.equal(layerPanelSource.includes('type="range"'), false);
+assert.equal(layerPanelSource.includes('onLayerOpacityChange'), false);
+assert.equal(layerPanelSource.includes('layerOpacity'), false);
+assert.equal(mapStageSource.includes('LayerOpacity'), false);
+assert.equal(mapStageSource.includes('layerOpacity'), false);
+assert.equal(mapStageSource.includes('setLayerPaintIfPresent'), false);
+assert.match(layerPanelSource, /GlowSwitch/);
 assert.equal(layerPanelSource.includes('图层透明度'), false);
 assert.equal(layerPanelSource.includes('图例'), false);
 assert.match(geometry.measurementLabel([[0, 0], [0, 1]], 'line'), /^长度/);
@@ -39,5 +46,9 @@ assert.match(geometry.measurementLabel([[0, 0], [0, 1], [1, 1]], 'polygon'), /^�
 assert.deepEqual(commands.parseMapTextCommand('隐藏 DEM'), { kind: 'layer', layer: 'dem', visible: false, reply: '已隐藏 DEM 图层。' });
 assert.deepEqual(commands.parseMapTextCommand('放大地图'), { kind: 'map', command: 'zoomIn', reply: '已放大地图。' });
 assert.deepEqual(commands.parseMapTextCommand('清空绘制'), { kind: 'draw', action: 'clear', reply: '已清空绘制内容。' });
+assert.equal(
+  commands.parseMapTextCommand('使用当前上传的数据demo_xgboost_soil_moisture.csv训练 XGBoost 土壤水分模型。目标列是 soil_moisture。开启空间分块验证。'),
+  null
+);
 
 console.log('map upgrade tests passed');

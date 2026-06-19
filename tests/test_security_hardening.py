@@ -106,7 +106,7 @@ class SecurityHardeningTests(unittest.TestCase):
                 )
 
                 self.assertEqual(alice_ok.status_code, 200)
-                self.assertEqual(bob_no_user.status_code, 404)
+                self.assertEqual(bob_no_user.status_code, 410)
                 self.assertEqual(bob_claims_alice.status_code, 403)
             finally:
                 api_server._workspace_services.clear()
@@ -132,7 +132,7 @@ class SecurityHardeningTests(unittest.TestCase):
 
                 response = client.get("/api/files/artifact?path=%2e%2e%2Foutside.txt")
 
-                self.assertIn(response.status_code, {403, 404})
+                self.assertEqual(response.status_code, 410)
                 self.assertNotEqual(response.text, "secret")
             finally:
                 api_server._workspace_services.clear()

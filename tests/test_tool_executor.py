@@ -19,7 +19,32 @@ from core.tool_contracts import parse_tool_result
 from core.tool_executor import DEFAULT_DETERMINISTIC_TOOLS, execute_validated_tool_plan
 
 
+def continue_current_step(plan, current_step, remaining_steps, execution_trace, user_request, **kwargs):
+    if not current_step:
+        return {"status": "ready", "decision": {"decision": "stop_success", "confidence": 0.9}}
+    return {
+        "status": "ready",
+        "decision": {
+            "decision": "continue",
+            "next_step_id": current_step.get("step_id") or current_step.get("tool_name"),
+            "selected_next_action": "",
+            "required_tool": current_step.get("tool_name") or "",
+            "required_inputs": current_step.get("validated_tool_args") or current_step.get("args") or {},
+            "reason": "run validated step",
+            "user_question": "",
+            "confidence": 0.9,
+        },
+    }
+
+
 class ToolExecutorTests(unittest.TestCase):
+    def active_plan_from_deterministic(self, service: GISWorkspaceService):
+        def build(prompt: str, context: dict, **kwargs):
+            plan = build_task_plan(prompt, context.get("intent") or {}, context, manager=service.manager)
+            return {"status": "ready", "mode": "active", "planner_source": "test", "executes_tools": False, "plan": plan}
+
+        return build
+
     def test_default_deterministic_tools_cover_common_gis_tasks(self) -> None:
         expected = {
             "describe_dataset",
@@ -167,10 +192,14 @@ class ToolExecutorTests(unittest.TestCase):
             service = self.make_service(Path(tmp))
             service.manager.put_table("stations", pd.DataFrame({"population": [10, 20], "rainfall": [1.2, 2.5]}))
 
-            with mock.patch.object(service, "_get_agent", side_effect=AssertionError("LLM should not be called")):
-                result = service.ask("check this dataset")
+            with mock.patch("core.service.build_llm_task_plan", side_effect=self.active_plan_from_deterministic(service)):
+                with mock.patch(
+                    "core.coordinated_executor.build_coordinator_decision",
+                    side_effect=continue_current_step,
+                ):
+                    result = service.ask("check this dataset")
 
-            self.assertEqual(result["mode"], "deterministic_tool")
+            self.assertEqual(result["mode"], "coordinated_workflow")
             self.assertEqual(result["model"], "conversation-coordinator")
             self.assertIn("stations", result["reply"])
 
@@ -185,10 +214,14 @@ class ToolExecutorTests(unittest.TestCase):
                 ),
             )
 
-            with mock.patch.object(service, "_get_agent", side_effect=AssertionError("LLM should not be called")):
-                result = service.ask("plot population density map")
+            with mock.patch("core.service.build_llm_task_plan", side_effect=self.active_plan_from_deterministic(service)):
+                with mock.patch(
+                    "core.coordinated_executor.build_coordinator_decision",
+                    side_effect=continue_current_step,
+                ):
+                    result = service.ask("plot population density map")
 
-            self.assertEqual(result["mode"], "deterministic_tool")
+            self.assertEqual(result["mode"], "coordinated_workflow")
             self.assertTrue(result["images"])
             self.assertTrue(Path(result["images"][0]).exists())
 
@@ -207,13 +240,17 @@ class ToolExecutorTests(unittest.TestCase):
                 gpd.GeoDataFrame({"name": ["a"], "geometry": [box(-1, -1, 2, 2)]}, crs="EPSG:4326"),
             )
 
-            with mock.patch.object(service, "_get_agent", side_effect=AssertionError("LLM should not be called")):
-                result = service.ask(
-                    "clip this shp to the study area",
-                    frontend_context={"active_dataset_id": "points", "selected_layer_id": "study_area"},
-                )
+            with mock.patch("core.service.build_llm_task_plan", side_effect=self.active_plan_from_deterministic(service)):
+                with mock.patch(
+                    "core.coordinated_executor.build_coordinator_decision",
+                    side_effect=continue_current_step,
+                ):
+                    result = service.ask(
+                        "clip this shp to the study area",
+                        frontend_context={"active_dataset_id": "points", "selected_layer_id": "study_area"},
+                    )
 
-            self.assertEqual(result["mode"], "deterministic_workflow")
+            self.assertEqual(result["mode"], "coordinated_workflow")
             self.assertIn("points_clipped", service.manager.datasets)
 
 

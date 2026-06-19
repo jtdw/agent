@@ -66,7 +66,7 @@ def relative_artifact_url(workdir: str | Path, file_path: str | Path, user_id: s
     return f"/api/files/artifact?{urlencode(params)}"
 
 
-def relative_shared_download_url(base_workdir: str | Path, file_path: str | Path, user_id: str = "", job_id: str = "") -> str:
+def relative_shared_download_url(base_workdir: str | Path, file_path: str | Path, user_id: str = "", job_id: str = "", session_id: str = "") -> str:
     path = Path(file_path or "").resolve()
     if not path.exists() or not path.is_file():
         return ""
@@ -76,38 +76,71 @@ def relative_shared_download_url(base_workdir: str | Path, file_path: str | Path
     except Exception:
         return ""
     rel_url_path = str(rel).replace("\\", "/")
-    return f"/api/downloads/artifact?{urlencode({'user_id': safe_key(user_id), 'job_id': job_id, 'path': rel_url_path})}"
+    params = {"user_id": safe_key(user_id), "job_id": job_id, "path": rel_url_path}
+    if str(session_id or "").strip():
+        params["session_id"] = str(session_id).strip()
+    return f"/api/downloads/artifact?{urlencode(params)}"
 
 
 def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> dict[str, Any]:
     outcome = response.get("task_outcome") if isinstance(response.get("task_outcome"), dict) else {}
     files: list[dict[str, str]] = []
     seen: set[str] = set()
-    sources: list[dict[str, Any]] = []
-    for result in dashboard.get("model_results", []) if isinstance(dashboard.get("model_results"), list) else []:
-        if isinstance(result, dict):
-            sources.extend([item for item in result.get("artifacts", []) if isinstance(item, dict)])
-    sources.extend([item for item in dashboard.get("artifacts", []) if isinstance(item, dict)] if isinstance(dashboard.get("artifacts"), list) else [])
-    for item in sources:
-        path = str(item.get("path") or item.get("display_path") or "")
+    user_result = response.get("user_facing_result") if isinstance(response.get("user_facing_result"), dict) else {}
+
+    def append_file(item: dict[str, Any]) -> None:
+        artifact_id = str(item.get("artifact_id") or item.get("id") or "")
         url = str(item.get("download_url") or "")
-        key = url or path
+        label = str(item.get("title") or item.get("label") or item.get("filename") or item.get("name") or "result file")
+        key = artifact_id or url or label
         if not key or key in seen:
-            continue
+            return
         seen.add(key)
         files.append(
             {
-                "artifact_id": str(item.get("artifact_id") or item.get("id") or ""),
-                "label": str(item.get("label") or item.get("name") or Path(path).name or "result file"),
-                "path": path,
+                "artifact_id": artifact_id,
+                "label": label,
+                "path": str(item.get("filename") or label),
                 "download_url": url,
-                "kind": str(item.get("type") or item.get("category") or "artifact"),
+                "kind": str(item.get("artifact_type") or item.get("kind") or item.get("type") or "artifact"),
             }
         )
+
+    if user_result:
+        for item in user_result.get("primary_artifacts", []) if isinstance(user_result.get("primary_artifacts"), list) else []:
+            if isinstance(item, dict):
+                append_file(item)
+        for group in user_result.get("grouped_artifacts", []) if isinstance(user_result.get("grouped_artifacts"), list) else []:
+            if not isinstance(group, dict):
+                continue
+            for item in group.get("artifacts", []) if isinstance(group.get("artifacts"), list) else []:
+                if isinstance(item, dict):
+                    append_file(item)
+
+    dashboard_sources: list[dict[str, Any]] = []
+    for result in dashboard.get("model_results", []) if isinstance(dashboard.get("model_results"), list) else []:
+        if isinstance(result, dict):
+            dashboard_sources.extend([item for item in result.get("artifacts", []) if isinstance(item, dict)])
+    dashboard_sources.extend([item for item in dashboard.get("artifacts", []) if isinstance(item, dict)] if isinstance(dashboard.get("artifacts"), list) else [])
+    by_id = {str(item.get("artifact_id") or item.get("id") or ""): item for item in dashboard_sources if str(item.get("artifact_id") or item.get("id") or "")}
+    by_path = {str(item.get("path") or item.get("display_path") or ""): item for item in dashboard_sources if str(item.get("path") or item.get("display_path") or "")}
+    response_sources = [
+        item
+        for key in ("artifacts", "files")
+        for item in (response.get(key) if isinstance(response.get(key), list) else [])
+        if isinstance(item, dict)
+    ]
+    sources = [*response_sources, *dashboard_sources]
+    for item in sources:
+        artifact_id = str(item.get("artifact_id") or item.get("id") or "")
+        path = str(item.get("path") or item.get("display_path") or "")
+        match = by_id.get(artifact_id) or by_path.get(path) or {}
+        merged = {**match, **item, "download_url": str(item.get("download_url") or match.get("download_url") or "")}
+        append_file(merged)
     return {
         "has_results": bool(outcome.get("has_results") or files),
         "title": str(outcome.get("summary") or "Processing results"),
-        "files": files[:12],
+        "files": files[:20],
         "result_paths": outcome.get("result_paths") if isinstance(outcome.get("result_paths"), list) else [],
         "recommendations": outcome.get("recommendations") if isinstance(outcome.get("recommendations"), list) else [],
     }

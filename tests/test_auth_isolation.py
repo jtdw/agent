@@ -1,6 +1,8 @@
 from pathlib import Path
+import os
 import tempfile
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
@@ -9,6 +11,21 @@ from core.commercial.service import CommercialService
 
 
 class AuthIsolationTests(unittest.TestCase):
+    def test_missing_user_id_requires_current_session_unless_anonymous_core_access_enabled(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"GIS_AGENT_ALLOW_ANONYMOUS": "0"}, clear=False),
+            mock.patch.object(api_server, "_require_current_request_user", return_value="u_current") as require_current,
+        ):
+            self.assertEqual(api_server._require_request_user_if_present(object(), ""), "u_current")
+            require_current.assert_called_once()
+
+        with (
+            mock.patch.dict(os.environ, {"GIS_AGENT_ALLOW_ANONYMOUS": "1"}, clear=False),
+            mock.patch.object(api_server, "_require_current_request_user", return_value="u_current") as require_current,
+        ):
+            self.assertEqual(api_server._require_request_user_if_present(object(), ""), "")
+            require_current.assert_not_called()
+
     def test_same_user_cannot_download_artifact_from_another_session(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             original_workdir = api_server.base_settings.workdir

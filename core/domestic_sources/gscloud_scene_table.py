@@ -127,6 +127,137 @@ def find_scene_row_by_id(rows: list[Any], scene_id: str):
     return None
 
 
+def _identifier_input_score(item) -> int:
+    try:
+        return int(
+            item.evaluate(
+                """
+                (el) => {
+                  const attr = (name) => (el.getAttribute(name) || '').trim();
+                  const text = [
+                    attr('placeholder'),
+                    attr('aria-label'),
+                    attr('title'),
+                    attr('name'),
+                    attr('id'),
+                    attr('class')
+                  ].join(' ');
+                  const lower = text.toLowerCase();
+                  const placeholder = attr('placeholder');
+                  const type = attr('type').toLowerCase();
+                  if (type === 'number') return 0;
+
+                  let context = '';
+                  for (let node = el, depth = 0; node && depth < 5; node = node.parentElement, depth += 1) {
+                    context += ' ' + ((node.innerText || '').replace(/\\s+/g, ' ').slice(0, 500));
+                    context += ' ' + ((node.className || '').toString());
+                  }
+                  const all = `${text} ${context}`;
+                  const pageLike = /分页|页码|跳页|跳转|上一页|下一页|pagination|pager|page-|page_|laypage|btn-next|btn-prev|共\\s*\\d+\\s*页|第\\s*\\d*\\s*共/i;
+                  const identifierLike = /数据标识|输入数据标识|data\\s*id|dataid|identifier/i;
+
+                  if (identifierLike.test(placeholder)) return 120;
+                  if (/标识/.test(placeholder) && !/页|页码|分页/.test(placeholder)) return 100;
+                  if (identifierLike.test(text)) return pageLike.test(lower) ? 50 : 90;
+                  if (identifierLike.test(all) && !pageLike.test(all)) return 70;
+                  return 0;
+                }
+                """
+            )
+        )
+    except Exception:
+        return 0
+
+
+def find_identifier_filter_input(page):
+    """Return the GSCloud data-identifier filter input, never the page jump box."""
+    try:
+        loc = page.locator("input")
+        scored: list[tuple[int, int, Any]] = []
+        for idx in range(loc.count()):
+            item = loc.nth(idx)
+            try:
+                if not item.is_visible(timeout=1000) or not item.is_enabled(timeout=1000):
+                    continue
+            except Exception:
+                continue
+            score = _identifier_input_score(item)
+            if score > 0:
+                scored.append((score, -idx, item))
+        if scored:
+            scored.sort(reverse=True, key=lambda value: (value[0], value[1]))
+            return scored[0][2]
+    except Exception:
+        pass
+    return None
+
+
+def _click_scene_search_button(page) -> bool:
+    selectors = [
+        "button:has-text('查询')",
+        "button:has-text('搜索')",
+        "button:has-text('检索')",
+        "button:has-text('筛选')",
+        "a:has-text('查询')",
+        "a:has-text('搜索')",
+        ".el-button:has-text('查询')",
+        ".el-button:has-text('搜索')",
+        "input[type='submit']",
+    ]
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            for idx in range(loc.count()):
+                item = loc.nth(idx)
+                if item.is_visible(timeout=1000) and item.is_enabled(timeout=1000):
+                    item.click(timeout=5000)
+                    page.wait_for_timeout(1800)
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def search_scene_row_by_id(page, scene_id: str, parse_row: Callable[[Any, int], dict[str, Any] | None] | None = None):
+    """Relocate a scene row through the table's identifier search box.
+
+    GSCloud scene tables can re-render or change pagination after filters are
+    reapplied. Searching by the selected scene id is safer than relying only on
+    the page number captured during the initial scan.
+    """
+    scene_id = str(scene_id or "").strip()
+    if not scene_id:
+        return None
+    inp = find_identifier_filter_input(page)
+    if inp is None:
+        return None
+    try:
+        inp.click(timeout=3000)
+        inp.fill("", timeout=3000)
+        inp.fill(scene_id, timeout=5000)
+        if not _click_scene_search_button(page):
+            inp.press("Enter")
+            page.wait_for_timeout(1800)
+    except Exception:
+        return None
+
+    for _ in range(10):
+        rows = get_scene_table_rows(page)
+        row = find_scene_row_by_id(rows, scene_id)
+        if row is not None:
+            return row
+        if parse_row is not None:
+            for idx, candidate in enumerate(rows):
+                try:
+                    parsed = parse_row(candidate, idx)
+                except Exception:
+                    parsed = None
+                if parsed and str(parsed.get("scene_id") or "").strip().upper() == scene_id.upper():
+                    return candidate
+        page.wait_for_timeout(800)
+    return None
+
+
 def click_scene_row_download(page, row, timeout_ms: int):
     last_error: Exception | None = None
     for selector in DOWNLOAD_BUTTON_SELECTORS:

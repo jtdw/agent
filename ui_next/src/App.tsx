@@ -7,7 +7,6 @@ import { useTheme } from './hooks/useTheme';
 import type { CommercialUser, ResultPanel } from './lib/api';
 import { mergeChatContext, type ChatContextPayload } from './lib/chatContext';
 import type { MapCommand, MapCommandType } from './components/mapCommands';
-import type { LayerOpacity } from './components/mapLayerPolicy';
 import type { ParsedMapTextCommand } from './components/mapTextCommands';
 import type { WorkflowAction } from './components/researchWorkflow';
 
@@ -51,11 +50,11 @@ export default function App() {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
   const [layerVisibility, setLayerVisibility] = useState({ dem: true, boundary: true, stations: true, soil: true });
-  const [layerOpacity, setLayerOpacity] = useState<LayerOpacity>({ dem: 1, boundary: 1, stations: 1, soil: 1, draw: 1 });
   const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
   const [externalPrompt, setExternalPrompt] = useState<{ id: number; prompt: string } | null>(null);
   const [latestResultPanel, setLatestResultPanel] = useState<ResultPanel | null>(null);
   const [chatContext, setChatContext] = useState<ChatContextPayload>({});
+  const [currentSessionId, setCurrentSessionId] = useState('');
   const updateChatContext = (patch: Partial<ChatContextPayload>) => setChatContext((current) => mergeChatContext(current, patch));
 
   const dispatchMapCommand = (type: MapCommandType) => {
@@ -100,15 +99,19 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, []);
 
+  useEffect(() => {
+    if (!user) setCurrentSessionId('');
+  }, [user]);
+
   return (
     <div className="relative isolate h-screen w-screen overflow-hidden text-slate-950 transition-colors duration-500 dark:text-slate-50">
       <SplashScreen visible={splash} />
       <Suspense fallback={<MapFallback />}>
-        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} layerOpacity={layerOpacity} mapCommand={mapCommand} onChatContextChange={updateChatContext} />
+        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} mapCommand={mapCommand} onChatContextChange={updateChatContext} />
       </Suspense>
       <Suspense fallback={chatOpen ? <PanelFallback side="left" /> : null}>
         <AnimatePresence>
-          {chatOpen && <ChatPanel user={user} setUser={setUser} onClose={() => setChatOpen(false)} onMapTextCommand={handleTextMapCommand} externalPrompt={externalPrompt} onResultPanel={setLatestResultPanel} chatContext={chatContext} />}
+          {chatOpen && <ChatPanel user={user} setUser={setUser} onClose={() => setChatOpen(false)} onMapTextCommand={handleTextMapCommand} externalPrompt={externalPrompt} onResultPanel={setLatestResultPanel} onSessionChange={setCurrentSessionId} chatContext={chatContext} />}
         </AnimatePresence>
       </Suspense>
       <Suspense fallback={toolsOpen ? <PanelFallback side="right" /> : null}>
@@ -116,13 +119,12 @@ export default function App() {
           {toolsOpen && (
             <LayerPanel
               user={user}
+              sessionId={currentSessionId}
               basemap={basemap}
               setBasemap={setBasemap}
               onClose={() => setToolsOpen(false)}
               layerVisibility={layerVisibility}
-              layerOpacity={layerOpacity}
               onLayerToggle={(id) => setLayerVisibility((v) => ({ ...v, [id]: !v[id as keyof typeof v] }))}
-              onLayerOpacityChange={(id, value) => setLayerOpacity((v) => ({ ...v, [id]: value }))}
               onLayerLocate={() => dispatchMapCommand('locate')}
               onRunWorkflowAction={runWorkflowAction}
             />
@@ -142,11 +144,13 @@ export default function App() {
           <ProductConsole
             user={user}
             setUser={setUser}
+            sessionId={currentSessionId}
             resultPanel={latestResultPanel}
             onOpenChat={() => setChatOpen(true)}
             onMapTextCommand={handleTextMapCommand}
             externalPrompt={externalPrompt}
             onResultPanel={setLatestResultPanel}
+            onSessionChange={setCurrentSessionId}
             chatContext={chatContext}
             onOpenMap={() => {
               setConsoleOpen(false);

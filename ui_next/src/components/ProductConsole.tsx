@@ -32,7 +32,7 @@ import { AuthPanel } from './AuthPanel';
 import { ChatWorkspace, type ExternalPromptCommand } from './ChatPanel';
 import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
-import { api, CommercialUser, DownloadJob, ResultPanel, WorkspaceDashboard } from '@/lib/api';
+import { api, CommercialUser, DiagnosticEventView, DownloadJob, DownloadManagementView, ResultPanel, WorkspaceDashboard } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import type { ChatContextPayload } from '@/lib/chatContext';
 import type { ParsedMapTextCommand } from './mapTextCommands';
@@ -56,6 +56,7 @@ type ConsoleNavItem = {
 type ProductConsoleProps = {
   user: CommercialUser | null;
   setUser: (user: CommercialUser | null) => void;
+  sessionId?: string;
   resultPanel?: ResultPanel | null;
   onOpenChat?: () => void;
   onOpenMap?: () => void;
@@ -74,10 +75,16 @@ type DownloadProduct = {
 };
 
 type JobLogData = {
-  job: DownloadJob;
-  scene_jobs: Array<Record<string, unknown>>;
-  tile_jobs: Array<Record<string, unknown>>;
-  audit_events: Array<Record<string, unknown>>;
+  job?: DownloadJob;
+  management_view?: DownloadManagementView;
+  diagnostic_event_views?: {
+    scene_jobs?: DiagnosticEventView[];
+    tile_jobs?: DiagnosticEventView[];
+    audit_events?: DiagnosticEventView[];
+  };
+  scene_jobs?: Array<Record<string, unknown>>;
+  tile_jobs?: Array<Record<string, unknown>>;
+  audit_events?: Array<Record<string, unknown>>;
 };
 
 const navItems: ConsoleNavItem[] = [
@@ -119,9 +126,9 @@ const downloadProducts: DownloadProduct[] = [
   { value: 'dem', label: 'DEM / 高程数据', outputSuffix: 'dem', requestLabel: 'DEM 数据' },
   { value: 'landsat8_oli_tirs', label: 'Landsat 8 OLI_TIRS', outputSuffix: 'landsat8', requestLabel: 'Landsat 8 OLI_TIRS 数据' },
   { value: 'sentinel2_msi', label: 'Sentinel-2 MSI', outputSuffix: 'sentinel2_msi', requestLabel: 'Sentinel-2 MSI 数据' },
-  { value: 'modnd1d_ndvi_daily', label: 'MODND1D NDVI 每日产品', outputSuffix: 'modnd1d_ndvi', requestLabel: 'MODND1D NDVI 每日产品' },
-  { value: 'modl1d_lst_daily', label: 'MODL1D 1KM 地表温度', outputSuffix: 'modl1d_lst', requestLabel: 'MODL1D 中国 1KM 地表温度每日产品' },
-  { value: 'modev1f_evi_5day', label: 'MODEV1F 250M EVI 五天合成', outputSuffix: 'modev1f_evi', requestLabel: 'MODEV1F 中国 250M EVI 五天合成产品' },
+  { value: 'modnd1t_ndvi_10day', label: 'MODND1T NDVI 旬合成', outputSuffix: 'modnd1t_ndvi', requestLabel: 'MODND1T 中国 500M NDVI 旬合成产品' },
+  { value: 'modl1t_lst_composite', label: 'MODLT1T 地表温度旬合成', outputSuffix: 'modl1t_lst', requestLabel: 'MODLT1T 中国 1KM 地表温度旬合成产品' },
+  { value: 'modev1t_evi_10day', label: 'MODEV1T 250M EVI 旬合成', outputSuffix: 'modev1t_evi', requestLabel: 'MODEV1T 中国 250M EVI 旬合成产品' },
   { value: 'mod021km_surface_reflectance', label: 'MOD021KM 1KM 地表反射率', outputSuffix: 'mod021km_reflectance', requestLabel: 'MOD021KM 1KM 地表反射率' }
 ];
 
@@ -223,7 +230,67 @@ function MetricCard({ label, value, hint, icon: Icon }: { label: string; value: 
 }
 
 function getJobName(job: DownloadJob) {
-  return job.output_name || job.region || job.resource_type || job.job_id;
+  return job.management_view?.display_title || job.output_name || job.region || job.resource_type || job.job_id;
+}
+
+function jobView(job?: DownloadJob | null): DownloadManagementView | null {
+  return job?.management_view || null;
+}
+
+function jobTaskId(job: DownloadJob) {
+  return jobView(job)?.task_id || job.job_id;
+}
+
+function jobStatus(job: DownloadJob) {
+  return jobView(job)?.status || job.status || job.state || 'running';
+}
+
+function jobProgress(job: DownloadJob) {
+  return Number(jobView(job)?.progress ?? job.progress ?? 0);
+}
+
+function jobStage(job: DownloadJob) {
+  return jobView(job)?.action_state?.stage || job.stage || '--';
+}
+
+function jobSourceName(job: DownloadJob) {
+  return jobView(job)?.source_name || [job.source_key, job.resource_type, job.region].filter(Boolean).join(' / ') || '--';
+}
+
+function jobActions(job: DownloadJob) {
+  return jobView(job)?.available_actions || [];
+}
+
+function canJob(job: DownloadJob, action: string) {
+  const actions = jobActions(job);
+  if (actions.length) return actions.includes(action);
+  const tone = normalizeTaskStatus(job.status).tone;
+  if (action === 'cancel') return tone === 'running' || tone === 'waiting' || tone === 'blocked';
+  if (action === 'retry') return tone === 'failed' || tone === 'canceled' || tone === 'blocked';
+  if (action === 'view_artifacts') return Boolean(jobView(job)?.artifact_refs?.length);
+  return false;
+}
+
+function jobUserMessage(job: DownloadJob) {
+  return jobView(job)?.user_message || '';
+}
+
+function attachManagementViews(jobs: DownloadJob[] = [], views: DownloadManagementView[] = []) {
+  if (!jobs.length && views.length) {
+    return views.map((view) => ({
+      job_id: view.task_id,
+      status: view.status,
+      progress: view.progress,
+      output_name: view.display_title,
+      source_key: view.source_name,
+      stage: view.action_state?.stage,
+      updated_at: view.updated_at,
+      management_view: view
+    }));
+  }
+  if (!views.length) return jobs;
+  const byId = new globalThis.Map(views.map((view) => [view.task_id, view]));
+  return jobs.map((job) => ({ ...job, management_view: job.management_view || byId.get(job.job_id) }));
 }
 
 function artifactIcon(kind: ConsoleArtifact['kind']) {
@@ -236,6 +303,7 @@ function artifactIcon(kind: ConsoleArtifact['kind']) {
 export function ProductConsole({
   user,
   setUser,
+  sessionId,
   resultPanel,
   onOpenChat,
   onOpenMap,
@@ -283,18 +351,19 @@ export function ProductConsole({
     }
     try {
       const [dashboardData, jobsData] = await Promise.all([
-        api.dashboard(userId),
-        api.jobs(userId)
+        api.dashboard(userId, sessionId),
+        api.jobs(userId, sessionId)
       ]);
+      const nextJobs = attachManagementViews(jobsData.jobs || [], jobsData.management_views || []);
       setDashboard(dashboardData);
-      setJobs(jobsData.jobs || []);
-      if (!selectedJobId && jobsData.jobs?.[0]?.job_id) setSelectedJobId(jobsData.jobs[0].job_id);
+      setJobs(nextJobs);
+      if (!selectedJobId && nextJobs[0]?.job_id) setSelectedJobId(nextJobs[0].job_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取控制台数据失败');
     } finally {
       setLoading(false);
     }
-  }, [selectedJobId, userId]);
+  }, [selectedJobId, sessionId, userId]);
 
   useEffect(() => {
     setLoading(true);
@@ -312,11 +381,10 @@ export function ProductConsole({
     if (!keyword) return jobs;
     return jobs.filter((job) => [
       job.job_id,
-      job.output_name,
-      job.region,
-      job.resource_type,
-      job.status,
-      job.stage
+      getJobName(job),
+      jobSourceName(job),
+      jobStatus(job),
+      jobStage(job)
     ].some((value) => String(value || '').toLowerCase().includes(keyword)));
   }, [jobs, query]);
 
@@ -384,12 +452,15 @@ export function ProductConsole({
         end_date: endDate,
         account_mode: accountMode,
         request_text: `控制台提交：下载 ${region} ${product.requestLabel}`,
-        output_name: outputName.trim() || defaultOutputName
+        output_name: outputName.trim() || defaultOutputName,
+        session_id: sessionId || chatContext?.session_id
       });
       const created = result.job as DownloadJob | undefined;
+      if (created && result.management_view) created.management_view = result.management_view;
       setNotice(result.auto_started ? '任务已启动，系统正在后台执行。' : `任务已创建：${result.reason || '等待处理'}`);
       await refresh();
-      if (created?.job_id) setSelectedJobId(created.job_id);
+      if (result.management_view?.task_id) setSelectedJobId(result.management_view.task_id);
+      else if (created?.job_id) setSelectedJobId(created.job_id);
       setActiveTab('tasks');
     } catch (e) {
       setPreflightOk(false);
@@ -413,7 +484,7 @@ export function ProductConsole({
     setLogLoading(true);
     setLogError('');
     try {
-      const result = await api.downloadJobLog(user.user_id, job.job_id);
+      const result = await api.downloadJobLog(user.user_id, job.job_id, sessionId);
       setLogData(result);
     } catch (e) {
       setLogError(e instanceof Error ? e.message : '读取任务日志失败');
@@ -427,7 +498,7 @@ export function ProductConsole({
     if (!user || !selectedJob?.job_id) return;
     setBusyJobId(selectedJob.job_id);
     try {
-      await api.downloadJobLogFile(user.user_id, selectedJob.job_id);
+      await api.downloadJobLogFile(user.user_id, selectedJob.job_id, sessionId);
     } catch (e) {
       setLogError(e instanceof Error ? e.message : '下载日志失败');
     } finally {
@@ -438,8 +509,8 @@ export function ProductConsole({
   const cancelJob = async (job: DownloadJob) => {
     setBusyJobId(job.job_id);
     try {
-      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在控制台取消任务。');
-      setJobs(result.jobs || []);
+      const result = await api.cancelDownloadJob(job.job_id, userId, '用户在控制台取消任务。', sessionId);
+      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
       setNotice(`已取消任务：${getJobName(job)}`);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '取消任务失败');
@@ -451,11 +522,13 @@ export function ProductConsole({
   const retryJob = async (job: DownloadJob) => {
     setBusyJobId(job.job_id);
     try {
-      const result = await api.retryDownloadJob(job.job_id, userId);
-      setJobs(result.jobs || []);
+      const result = await api.retryDownloadJob(job.job_id, userId, sessionId);
+      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
       setNotice(result.auto_started ? '已创建重试任务并开始后台执行。' : `已创建重试任务：${result.reason || '等待处理'}`);
       const newJob = result.job as DownloadJob | undefined;
-      if (newJob?.job_id) setSelectedJobId(newJob.job_id);
+      if (newJob && result.management_view) newJob.management_view = result.management_view;
+      if (result.management_view?.task_id) setSelectedJobId(result.management_view.task_id);
+      else if (newJob?.job_id) setSelectedJobId(newJob.job_id);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '重试任务失败');
     } finally {
@@ -466,10 +539,11 @@ export function ProductConsole({
   const deleteJob = async (job: DownloadJob) => {
     setBusyJobId(job.job_id);
     try {
-      const result = await api.deleteDownloadJob(job.job_id, userId);
-      setJobs(result.jobs || []);
+      const result = await api.deleteDownloadJob(job.job_id, userId, sessionId);
+      const nextJobs = attachManagementViews(result.jobs || [], result.management_views || []);
+      setJobs(nextJobs);
       setNotice(`已删除任务记录：${getJobName(job)}`);
-      if (selectedJobId === job.job_id) setSelectedJobId(result.jobs?.[0]?.job_id || '');
+      if (selectedJobId === job.job_id) setSelectedJobId(nextJobs[0]?.job_id || '');
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '删除任务失败');
     } finally {
@@ -481,7 +555,7 @@ export function ProductConsole({
     setExporting(true);
     setNotice('');
     try {
-      const result = await api.exportWorkspace(userId, 'all');
+      const result = await api.exportWorkspace(userId, sessionId, 'all');
       setNotice(`已打包 ${result.file_count} 个成果文件。`);
       await refresh();
       if (result.download_url) await api.downloadAuthenticated(result.download_url, 'workspace-export.zip');
@@ -505,6 +579,7 @@ export function ProductConsole({
     try {
       const result = await api.deleteWorkspaceArtifact({
         user_id: userId,
+        session_id: sessionId,
         artifact_id: artifact.artifactId,
         path: artifact.path
       });
@@ -513,6 +588,16 @@ export function ProductConsole({
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '删除结果文件失败');
     }
+  };
+
+  const downloadJobArtifact = async (job: DownloadJob) => {
+    const ref = jobView(job)?.artifact_refs?.[0];
+    if (ref?.artifact_id) {
+      const metadata = await api.artifactMetadata(ref.artifact_id, userId, sessionId);
+      await downloadArtifact(metadata.download_url || '', metadata.filename || metadata.title || ref.title || getJobName(job));
+      return;
+    }
+    setNotice('该任务没有可解析的 artifact_id，暂不能提供下载入口。');
   };
 
   const checkGscloudLoginHealth = async () => {
@@ -540,14 +625,14 @@ export function ProductConsole({
   };
 
   const renderJobActions = (job: DownloadJob) => {
-    const tone = normalizeTaskStatus(job.status).tone;
-    const active = tone === 'running' || tone === 'waiting' || tone === 'blocked';
-    const retryable = tone === 'failed' || tone === 'canceled' || tone === 'blocked';
+    const active = canJob(job, 'cancel');
+    const retryable = canJob(job, 'retry');
+    const viewable = canJob(job, 'view_artifacts');
     const busy = busyJobId === job.job_id;
     return (
       <div className="flex flex-wrap items-center gap-2">
-        {job.download_url && tone === 'succeeded' && (
-          <button className="console-secondary-button" onClick={() => downloadArtifact(job.download_url || '', job.output_name || `${job.job_id}.zip`)}>
+        {viewable && (
+          <button className="console-secondary-button" onClick={() => downloadJobArtifact(job)}>
             <Download size={14} /> 下载
           </button>
         )}
@@ -761,37 +846,33 @@ export function ProductConsole({
         <Panel className="p-5">
           <SectionHeader title="任务详情" description="当前任务参数、阶段、失败信息和质量检查。" action={renderJobActions(selectedJob)} />
           <div className="grid gap-4 lg:grid-cols-3">
-            <InfoItem label="任务编号" value={selectedJob.job_id} />
-            <InfoItem label="数据源" value={selectedJob.source_key || '--'} />
+            <InfoItem label="任务编号" value={jobTaskId(selectedJob)} />
+            <InfoItem label="数据源" value={jobSourceName(selectedJob)} />
             <InfoItem label="产品类型" value={selectedJob.resource_type || '--'} />
             <InfoItem label="区域" value={selectedJob.region || '--'} />
-            <InfoItem label="账号模式" value={selectedJob.account_mode || '--'} />
-            <InfoItem label="更新时间" value={selectedJob.updated_at || '--'} />
+            <InfoItem label="可用操作" value={jobActions(selectedJob).join(' / ') || '--'} />
+            <InfoItem label="更新时间" value={jobView(selectedJob)?.updated_at || selectedJob.updated_at || '--'} />
           </div>
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between text-sm">
-              <span className="font-semibold text-slate-700 dark:text-slate-200">当前阶段：{selectedJob.stage || '--'}</span>
-              <span className="text-slate-500 dark:text-slate-400">{formatPercent(selectedJob.progress)}%</span>
+              <span className="font-semibold text-slate-700 dark:text-slate-200">当前阶段：{jobStage(selectedJob)}</span>
+              <span className="text-slate-500 dark:text-slate-400">{formatPercent(jobProgress(selectedJob))}%</span>
             </div>
-            <ProgressBar value={selectedJob.progress} tone={normalizeTaskStatus(selectedJob.status).tone} />
+            <ProgressBar value={jobProgress(selectedJob)} tone={normalizeTaskStatus(jobStatus(selectedJob)).tone} />
           </div>
-          {selectedJob.artifact_quality?.length ? (
+          {jobView(selectedJob)?.warnings?.length ? (
             <div className="mt-4">
-              <StateMessage tone={selectedJob.artifact_quality.every((item) => item.ok !== false) ? 'success' : 'info'}>
-                成果质量：{selectedJob.artifact_quality.every((item) => item.ok !== false) ? '已通过基础校验' : '存在未通过校验的文件，请查看日志详情'}
+              <StateMessage tone="info">
+                {jobView(selectedJob)?.warnings?.join('；')}
               </StateMessage>
             </div>
           ) : null}
-          {selectedJob.failure_diagnostic?.user_message && (
+          {jobUserMessage(selectedJob) && (
             <div className="mt-4">
               <StateMessage tone="error">
-                <b>失败诊断：</b>{selectedJob.failure_diagnostic.user_message}
-                {selectedJob.failure_diagnostic.next_action ? <span> 建议：{selectedJob.failure_diagnostic.next_action}</span> : null}
+                <b>失败诊断：</b>{jobUserMessage(selectedJob)}
               </StateMessage>
             </div>
-          )}
-          {selectedJob.error_message && !selectedJob.failure_diagnostic?.user_message && (
-            <div className="mt-4"><StateMessage tone="error">{selectedJob.error_message}</StateMessage></div>
           )}
         </Panel>
       )}
@@ -814,9 +895,9 @@ export function ProductConsole({
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="truncate text-sm font-semibold">{getJobName(job)}</span>
-                  <StatusBadge status={job.status} />
+                  <StatusBadge status={jobStatus(job)} />
                 </div>
-                <div className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{job.stage || job.job_id}</div>
+                <div className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{jobStage(job)}</div>
               </button>
             ))}
           </div>
@@ -834,23 +915,22 @@ export function ProductConsole({
         ) : (
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-4">
-              <InfoItem label="状态" value={normalizeTaskStatus(logData.job.status).label} />
-              <InfoItem label="阶段" value={logData.job.stage || '--'} />
-              <InfoItem label="场景日志" value={logData.scene_jobs.length} />
-              <InfoItem label="审计事件" value={logData.audit_events.length} />
+              <InfoItem label="状态" value={normalizeTaskStatus(logData.management_view?.status || 'running').label} />
+              <InfoItem label="阶段" value={logData.management_view?.action_state?.stage || '--'} />
+              <InfoItem label="场景日志" value={logData.diagnostic_event_views?.scene_jobs?.length || 0} />
+              <InfoItem label="审计事件" value={logData.diagnostic_event_views?.audit_events?.length || 0} />
             </div>
             <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 shadow-inner dark:border-slate-700">
-              <div>job_id: {logData.job.job_id}</div>
-              <div>status: {logData.job.status || '--'}</div>
-              <div>stage: {logData.job.stage || '--'}</div>
-              <div>progress: {formatPercent(logData.job.progress)}%</div>
-              <div>resource_type: {logData.job.resource_type || '--'}</div>
-              <div>region: {logData.job.region || '--'}</div>
-              {logData.job.error_message && <div className="text-rose-300">error: {logData.job.error_message}</div>}
+              <div>task_id: {logData.management_view?.task_id || logData.job?.job_id || '--'}</div>
+              <div>status: {logData.management_view?.status || '--'}</div>
+              <div>stage: {logData.management_view?.action_state?.stage || '--'}</div>
+              <div>progress: {formatPercent(logData.management_view?.progress ?? 0)}%</div>
+              <div>source: {logData.management_view?.source_name || '--'}</div>
+              {logData.management_view?.user_message && <div className="text-rose-300">message: {logData.management_view.user_message}</div>}
             </div>
-            <LogGroup title="场景日志" items={logData.scene_jobs} empty="暂无场景日志" />
-            <LogGroup title="分幅日志" items={logData.tile_jobs} empty="暂无分幅日志" />
-            <LogGroup title="审计事件" items={logData.audit_events} empty="暂无审计事件" />
+            <LogGroup title="场景日志" items={logData.diagnostic_event_views?.scene_jobs || []} empty="暂无场景日志" />
+            <LogGroup title="分幅日志" items={logData.diagnostic_event_views?.tile_jobs || []} empty="暂无分幅日志" />
+            <LogGroup title="审计事件" items={logData.diagnostic_event_views?.audit_events || []} empty="暂无审计事件" />
             <button className="console-secondary-button" onClick={downloadJobLog} disabled={!selectedJob || busyJobId === selectedJob?.job_id}>
               {busyJobId === selectedJob?.job_id ? <Loader2 className="animate-spin" size={15} /> : <Download size={15} />} 下载原始日志
             </button>
@@ -997,14 +1077,20 @@ export function ProductConsole({
   const renderContent = () => {
     if (activeTab === 'chat') return renderChat();
     if (loading) return <LoadingState label="正在加载控制台数据" />;
-    if (error) return <StateMessage tone="error">{error}</StateMessage>;
-    if (activeTab === 'overview') return renderOverview();
-    if (activeTab === 'create') return renderCreateTask();
-    if (activeTab === 'tasks') return renderTasks();
-    if (activeTab === 'logs') return renderLogs();
-    if (activeTab === 'results') return renderResults();
-    if (activeTab === 'data') return renderDataAssets();
-    return renderSettingsV2();
+    const content =
+      activeTab === 'overview' ? renderOverview()
+      : activeTab === 'create' ? renderCreateTask()
+      : activeTab === 'tasks' ? renderTasks()
+      : activeTab === 'logs' ? renderLogs()
+      : activeTab === 'results' ? renderResults()
+      : activeTab === 'data' ? renderDataAssets()
+      : renderSettingsV2();
+    return (
+      <div className="space-y-4">
+        {error && <StateMessage tone="error">{error}</StateMessage>}
+        {content}
+      </div>
+    );
   };
 
   const activateNavItem = (item: ConsoleNavItem) => {
@@ -1090,44 +1176,44 @@ export function ProductConsole({
 }
 
 function JobCompactRow({ job, onSelect }: { job: DownloadJob; onSelect: () => void }) {
-  const status = normalizeTaskStatus(job.status);
+  const status = normalizeTaskStatus(jobStatus(job));
   return (
     <button onClick={onSelect} className="w-full rounded-2xl border border-slate-200/90 bg-white/86 p-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{getJobName(job)}</div>
-          <div className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{job.stage || job.job_id}</div>
+          <div className="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{jobStage(job)}</div>
         </div>
-        <StatusBadge status={job.status} />
+        <StatusBadge status={jobStatus(job)} />
       </div>
       <div className="mt-3">
-        <ProgressBar value={job.progress} tone={status.tone} />
+        <ProgressBar value={jobProgress(job)} tone={status.tone} />
       </div>
     </button>
   );
 }
 
 function JobDetailRow({ job, selected, onSelect, actions }: { job: DownloadJob; selected: boolean; onSelect: () => void; actions: ReactNode }) {
-  const status = normalizeTaskStatus(job.status);
+  const status = normalizeTaskStatus(jobStatus(job));
   return (
     <div className={cn('rounded-2xl border bg-white/86 p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md dark:bg-slate-900/78', selected ? 'border-cyan-300 ring-4 ring-cyan-100/80 dark:border-cyan-800 dark:ring-cyan-950/45' : 'border-slate-200/90 dark:border-slate-800')}>
       <div className="grid gap-4 xl:grid-cols-[1fr_220px_auto] xl:items-center">
         <button onClick={onSelect} className="min-w-0 text-left">
           <div className="flex flex-wrap items-center gap-2">
             <div className="truncate text-sm font-bold text-slate-950 dark:text-slate-50">{getJobName(job)}</div>
-            <StatusBadge status={job.status} />
+            <StatusBadge status={jobStatus(job)} />
           </div>
-          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{job.job_id}</div>
+          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{jobTaskId(job)}</div>
           <div className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-            {job.resource_type || '--'} · {job.region || '--'} · {job.stage || '等待阶段更新'}
+            {jobSourceName(job)} · {jobStage(job)}
           </div>
         </button>
         <div>
           <div className="mb-2 flex justify-between text-xs text-slate-500 dark:text-slate-400">
             <span>{status.description}</span>
-            <span>{formatPercent(job.progress)}%</span>
+            <span>{formatPercent(jobProgress(job))}%</span>
           </div>
-          <ProgressBar value={job.progress} tone={status.tone} />
+          <ProgressBar value={jobProgress(job)} tone={status.tone} />
         </div>
         <div>{actions}</div>
       </div>
@@ -1152,7 +1238,11 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
         return (
           <div key={artifact.artifactId || artifact.path || artifact.url} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
             <span className="flex min-w-0 items-center gap-3">
-              <Icon className="shrink-0 text-slate-400" size={17} />
+              {artifact.kind === 'visual' ? (
+                <img data-testid="console-artifact-image-preview" src={artifact.url} alt={artifact.label} loading="lazy" className="h-12 w-16 shrink-0 rounded-lg border border-slate-200 bg-slate-50 object-cover dark:border-slate-800 dark:bg-slate-950" />
+              ) : (
+                <Icon className="shrink-0 text-slate-400" size={17} />
+              )}
               <span className="min-w-0 truncate font-semibold">{artifact.label}</span>
             </span>
             <span className="flex shrink-0 items-center gap-2">
@@ -1170,7 +1260,7 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
   );
 }
 
-function LogGroup({ title, items, empty }: { title: string; items: Array<Record<string, unknown>>; empty: string }) {
+function LogGroup({ title, items, empty }: { title: string; items: DiagnosticEventView[]; empty: string }) {
   return (
     <div className="rounded-2xl border border-slate-200/90 bg-white/86 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/78">
       <div className="mb-3 text-sm font-bold text-slate-900 dark:text-slate-100">{title}</div>
@@ -1179,10 +1269,13 @@ function LogGroup({ title, items, empty }: { title: string; items: Array<Record<
       ) : (
         <div className="space-y-2">
           {items.slice(0, 12).map((item, index) => (
-            <div key={index} className="rounded-xl border border-slate-200/70 bg-slate-50/86 px-3 py-2 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950/78 dark:text-slate-300">
-              {Object.entries(item).slice(0, 5).map(([key, value]) => (
-                <span key={key} className="mr-3"><b>{key}</b>: {String(value || '--')}</span>
-              ))}
+            <div key={`${item.timestamp || ''}-${item.phase || ''}-${index}`} className="rounded-xl border border-slate-200/70 bg-slate-50/86 px-3 py-2 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950/78 dark:text-slate-300">
+              <span className="mr-3"><b>时间</b>: {item.timestamp || '--'}</span>
+              <span className="mr-3"><b>阶段</b>: {item.phase || '--'}</span>
+              <span className="mr-3"><b>级别</b>: {item.level || 'info'}</span>
+              <span className="mr-3"><b>摘要</b>: {item.summary || '--'}</span>
+              {item.error_code ? <span className="mr-3"><b>错误码</b>: {item.error_code}</span> : null}
+              {item.next_action ? <span className="mr-3"><b>下一步</b>: {item.next_action}</span> : null}
             </div>
           ))}
         </div>

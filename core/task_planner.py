@@ -6,6 +6,7 @@ from typing import Any
 
 from core.field_semantics import match_user_field_concept
 from core.object_resolver import resolve_object_reference
+from core.response_language import detect_response_language
 from core.semantic_parser import parse_user_semantics
 from core.task_slots import extract_task_slots
 from core.tool_contracts import ToolPrecondition
@@ -29,6 +30,14 @@ def _dataset_name(context: dict[str, Any]) -> str:
     dataset = context.get("active_dataset")
     if isinstance(dataset, dict):
         return str(dataset.get("name") or "")
+    return ""
+
+
+def _resolved_dataset_name(plan: dict[str, Any]) -> str:
+    resolved = _as_dict(_as_dict(plan.get("resolved_objects")).get("dataset"))
+    if resolved.get("ok"):
+        data = _as_dict(resolved.get("data"))
+        return str(data.get("dataset_id") or resolved.get("name") or data.get("name") or resolved.get("id") or "")
     return ""
 
 
@@ -81,6 +90,39 @@ def _prompt_has_target_hint(prompt: str) -> bool:
             "预测列",
         )
     )
+
+
+def _modeling_candidate_question(context: dict[str, Any], slots: dict[str, Any]) -> str:
+    dataset = _dataset_name(context) or str(slots.get("dataset_id") or "current dataset")
+    numeric_fields = [str(field) for field in context.get("numeric_fields", []) if str(field or "").strip()]
+    likely_targets = [str(field) for field in context.get("likely_target_fields", []) if str(field or "").strip()]
+    skip_tokens = ("id", "date", "time", "lon", "lng", "longitude", "lat", "latitude", "x", "y")
+
+    def _is_skip(field: str) -> bool:
+        lowered = field.lower()
+        return lowered in skip_tokens or lowered.endswith("_id")
+
+    target_candidates = [field for field in likely_targets if field in numeric_fields]
+    if not target_candidates:
+        target_candidates = [
+            field
+            for field in numeric_fields
+            if any(token in field.lower() for token in ("target", "label", "soil_moisture", "moisture", "yield"))
+        ]
+    if not target_candidates:
+        target_candidates = [field for field in numeric_fields if not _is_skip(field)]
+
+    target = str(slots.get("target_variable") or (target_candidates[0] if target_candidates else ""))
+    feature_fields = [str(field) for field in slots.get("feature_fields", []) if str(field or "").strip()]
+    if not feature_fields:
+        preferred_tokens = ("elevation", "slope", "precip", "ndvi", "lst", "temp", "rain", "lon", "lat")
+        preferred = [field for field in numeric_fields if field != target and any(token in field.lower() for token in preferred_tokens)]
+        remaining = [field for field in numeric_fields if field != target and field not in preferred and not _is_skip(field)]
+        feature_fields = [*preferred, *remaining]
+
+    target_text = ", ".join(target_candidates[:5]) or "not detected"
+    feature_text = ", ".join(feature_fields[:10]) or "not detected"
+    return f"请确认 {dataset} 的目标变量和特征列。目标变量候选: {target_text}。特征列候选: {feature_text}。"
 
 
 def _default_plan(task_type: str) -> dict[str, Any]:
@@ -302,8 +344,11 @@ def _remove_tool_args(plan: dict[str, Any], tool_name: str) -> None:
 def _build_validated_tool_args(plan: dict[str, Any], slots: dict[str, Any], context: dict[str, Any], manager: Any | None = None) -> None:
     if plan.get("should_ask_clarification"):
         return
-    dataset = str(slots.get("dataset_id") or _dataset_name(context) or "")
     task_type = str(slots.get("task_type") or plan.get("task_type") or "")
+    if task_type == "modeling":
+        dataset = str(_resolved_dataset_name(plan) or slots.get("dataset_id") or _dataset_name(context) or "")
+    else:
+        dataset = str(slots.get("dataset_id") or _dataset_name(context) or "")
     if task_type == "data_upload_analysis":
         if not dataset:
             return
@@ -335,13 +380,30 @@ def _build_validated_tool_args(plan: dict[str, Any], slots: dict[str, Any], cont
             return
         if not _validate_slot_field_membership(plan, context, [target, *features]) or plan.get("should_ask_clarification"):
             return
-        model_tool = "train_rf_fusion_model" if slots.get("model_type") == "random_forest" else "train_xgboost_fusion_model"
+        if slots.get("model_type") == "random_forest":
+            model_tool = "train_rf_fusion_model"
+        elif slots.get("model_type") == "generic_xgboost":
+            model_tool = "generic_xgboost_workflow"
+        else:
+            model_tool = "train_xgboost_fusion_model"
+        output_name = str(slots.get("output_name") or "") or _safe_output_prefix(dataset, "model")
         args = {
             "dataset_name": dataset,
             "target_col": target,
             "feature_cols": ",".join(features),
-            "output_name": _safe_output_prefix(dataset, "model"),
+            "output_name": output_name,
         }
+        if slots.get("time_column"):
+            args["date_col"] = str(slots["time_column"])
+        if slots.get("validation_method") == "spatial_block":
+            args["spatial_validation"] = True
+            args["validation_method"] = "spatial_block"
+            spatial_columns = [str(item) for item in slots.get("spatial_columns", []) if str(item or "").strip()]
+            if len(spatial_columns) >= 2:
+                args["lon_col"] = spatial_columns[0]
+                args["lat_col"] = spatial_columns[1]
+        if slots.get("requested_outputs"):
+            args["requested_outputs"] = ",".join(str(item) for item in slots.get("requested_outputs", []))
         _accept_tool_args(plan, manager, model_tool, args)
     elif task_type == "data_processing" and slots.get("spatial_operation") == "clip":
         ref = slots.get("referenced_artifact") if isinstance(slots.get("referenced_artifact"), dict) else {}
@@ -424,20 +486,26 @@ def _export_path(manager: Any | None, stem: str, suffix: str) -> str:
 
 def _prompt_requests_gcp(prompt: str) -> bool:
     text = str(prompt or "").lower()
-    return any(
-        token in text
-        for token in (
-            "gcp",
-            "conformal",
-            "uncertainty",
-            "prediction interval",
-            "prediction intervals",
-            "不确定性",
-            "共形预测",
-            "预测区间",
-        )
+    tokens = (
+        "gcp",
+        "conformal",
+        "uncertainty",
+        "uncertainty analysis",
+        "prediction interval",
+        "prediction intervals",
+        "interval width",
+        "coverage",
+        "geoconformal prediction",
+        "spatial conformal prediction",
+        "????",
+        "??????",
+        "????",
+        "????",
+        "?????",
+        "???",
+        "????",
     )
-
+    return any(token in text for token in tokens)
 
 def _recent_model_for_gcp(context: dict[str, Any], resolved_objects: dict[str, Any]) -> dict[str, Any]:
     resolved = _as_dict(_as_dict(resolved_objects.get("model_result")).get("data"))
@@ -537,11 +605,19 @@ def _build_gcp_workflow(plan: dict[str, Any], gcp_args: dict[str, Any]) -> bool:
 
 def _build_modeling_workflow(plan: dict[str, Any], prompt: str, secondary_intents: list[str], manager: Any | None = None) -> bool:
     validated = _as_dict(plan.get("validated_tool_args"))
-    model_tool = "train_rf_fusion_model" if "train_rf_fusion_model" in validated else "train_xgboost_fusion_model" if "train_xgboost_fusion_model" in validated else ""
+    if "generic_xgboost_workflow" in validated:
+        model_tool = "generic_xgboost_workflow"
+    elif "train_rf_fusion_model" in validated:
+        model_tool = "train_rf_fusion_model"
+    elif "train_xgboost_fusion_model" in validated:
+        model_tool = "train_xgboost_fusion_model"
+    else:
+        model_tool = ""
     if not model_tool:
         return False
     model_args = validated[model_tool]
-    map_requested = _prompt_requests_map(prompt)
+    gcp_requested = _prompt_requests_gcp(prompt) and model_tool == "train_xgboost_fusion_model"
+    map_requested = _prompt_requests_map(prompt) and not gcp_requested
     workflow = [
         {"step_id": "check_dataset", "tool_name": "describe_dataset", "validated_tool_args": {"dataset_name": str(model_args.get("dataset_name") or "")}, "expected_outputs": ["dataset summary"], "stop_on_failure": True},
         {
@@ -579,12 +655,35 @@ def _build_modeling_workflow(plan: dict[str, Any], prompt: str, secondary_intent
                 "stop_on_failure": True,
             }
         )
+    if gcp_requested:
+        workflow.append(
+            {
+                "step_id": "run_gcp",
+                "tool_name": "geographical_conformal_prediction",
+                "step_type": "uncertainty_analysis",
+                "validated_tool_args": {
+                    "calibration_dataset": "$steps.train_model.outputs.result_dataset",
+                    "observed_col": "$steps.train_model.outputs.target_column",
+                    "predicted_cols": "$steps.train_model.outputs.cv_prediction_column",
+                    "output_name": _safe_output_prefix(str(model_args.get("output_name") or "model"), "gcp"),
+                    "lon_col": "$steps.train_model.outputs.lon_col",
+                    "lat_col": "$steps.train_model.outputs.lat_col",
+                    "fold_col": "$steps.train_model.outputs.fold_column",
+                    "cv_available_col": "$steps.train_model.outputs.cv_available_column",
+                    "alpha": 0.1,
+                    "spatial_weighting": True,
+                },
+                "depends_on": ["train_model"],
+                "expected_outputs": ["model_result_id", "result_dataset", "metrics_dataset"],
+                "stop_on_failure": True,
+            }
+        )
     workflow.append(
         {
             "step_id": "interpret_model_result",
             "tool_name": "interpret_result",
             "validated_tool_args": {"referenced_step": "train_model"},
-            "depends_on": ["generate_prediction_map" if map_requested else "train_model"],
+            "depends_on": ["run_gcp" if gcp_requested else "generate_prediction_map" if map_requested else "train_model"],
             "expected_outputs": ["model result explanation"],
             "stop_on_failure": False,
         }
@@ -811,10 +910,13 @@ def _build_table_points_map_workflow(
     if not x_col or not y_col:
         missing.append("coordinate field")
     if missing:
+        zh = detect_response_language(prompt).startswith("zh")
         _add_missing_inputs(
             plan,
             missing,
-            "Please confirm the table dataset and its longitude/latitude fields before I convert it to points and map it.",
+            "请确认要转换的表格数据及其经度/纬度字段，然后再转为点图层并制图。"
+            if zh
+            else "Please confirm the table dataset and its longitude/latitude fields before I convert it to points and map it.",
         )
         return True
 
@@ -825,10 +927,13 @@ def _build_table_points_map_workflow(
 
     column = str(plan.get("resolved_fields", {}).get("map_field") or "")
     if not column:
+        zh = detect_response_language(prompt).startswith("zh")
         _add_missing_inputs(
             plan,
             ["map field"],
-            "Please specify which numeric field to map after converting the CSV table to points.",
+            "请指定表格转点后要用于制图的数值字段。"
+            if zh
+            else "Please specify which numeric field to map after converting the CSV table to points.",
         )
         return True
     if not _validate_slot_field_membership(plan, context, [column]) or plan.get("should_ask_clarification"):
@@ -1149,6 +1254,13 @@ def _attach_tool_preconditions(plan: dict[str, Any]) -> None:
             required_fields=["column when thematic mapping is requested"],
             optional_inputs=["title", "output_name"],
         ),
+        "generic_xgboost_workflow": ToolPrecondition(
+            name="generic_xgboost_workflow",
+            required_inputs=["dataset_name or raster_names", "target_col or target_raster_name", "feature_cols or raster_names", "output_name"],
+            required_dataset_type="table|vector|raster",
+            required_fields=["target_col", "feature_cols when using table/vector/sample_raster mode"],
+            optional_inputs=["mode", "task_type", "sample_dataset_name", "x_col", "y_col", "date_col", "group_col", "split_method"],
+        ),
         "train_xgboost_fusion_model": ToolPrecondition(
             name="train_xgboost_fusion_model",
             required_inputs=["dataset_name", "target_col", "feature_cols", "output_name"],
@@ -1288,9 +1400,30 @@ def _append_secondary_steps(plan: dict[str, Any], secondary_intents: list[str]) 
             plan["expected_outputs"].append("模型指标")
 
 
-def _apply_registered_workflow_priority(plan: dict[str, Any], prompt: str) -> None:
+def _prompt_has_ascii_token(prompt: str, token: str) -> bool:
+    return bool(re.search(rf"(?<![a-z0-9_]){re.escape(token)}(?![a-z0-9_])", str(prompt or "").lower()))
+
+
+def _registered_workflow_compatible(plan: dict[str, Any], template: dict[str, Any], prompt: str, context: dict[str, Any]) -> bool:
+    if str(plan.get("task_type") or "") == "modeling":
+        return False
+    workflow_id = str(template.get("workflow_id") or "")
+    data_type = _dataset_type(context)
+    lower = str(prompt or "").lower()
+    if workflow_id in {"upload_raster_profile", "raster_statistics"}:
+        return data_type == "raster" or any(_prompt_has_ascii_token(lower, token) for token in ("tif", "tiff", "dem")) or "raster" in lower
+    if workflow_id == "upload_vector_profile":
+        return data_type == "vector" or any(_prompt_has_ascii_token(lower, token) for token in ("shp", "geojson")) or "vector" in lower
+    if workflow_id == "table_to_points":
+        return data_type in {"table", "csv"} or "points" in lower
+    return True
+
+
+def _apply_registered_workflow_priority(plan: dict[str, Any], prompt: str, context: dict[str, Any]) -> None:
     template = match_workflow_template(prompt)
     if not template:
+        return
+    if not _registered_workflow_compatible(plan, template, prompt, context):
         return
 
     plan["workflow_template"] = template
@@ -1313,7 +1446,7 @@ def _extract_output_name(prompt: str, default_name: str) -> str:
 
 
 def _registered_workflow_params(workflow_id: str, prompt: str, context: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
-    dataset = _dataset_name(context)
+    dataset = _resolved_dataset_name(plan) or _dataset_name(context)
     fields = [str(field) for field in context.get("available_fields", []) if str(field or "").strip()]
     lower_fields = {field.lower(): field for field in fields}
     validated = _as_dict(plan.get("validated_tool_args"))
@@ -1362,11 +1495,13 @@ def _registered_workflow_params(workflow_id: str, prompt: str, context: dict[str
         return {"report_title": _extract_output_name(prompt, "processing_report")}
     if workflow_id == "raster_statistics":
         raster_name = dataset if _dataset_type(context) == "raster" else _active_or_first_raster(context)
-        return {"raster_name": raster_name}
+        return {"dataset_name": raster_name, "raster_name": raster_name}
     return dict(_as_dict(validated.get(workflow_id)))
 
 
 def _attach_executable_registered_workflow(plan: dict[str, Any], prompt: str, context: dict[str, Any]) -> None:
+    if plan.get("should_ask_clarification"):
+        return
     template = _as_dict(plan.get("workflow_template"))
     workflow_id = str(template.get("workflow_id") or "")
     if not workflow_id:
@@ -1418,7 +1553,7 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
         )
         return plan
 
-    if task_type == "modeling" and _prompt_requests_gcp(text):
+    if task_type == "modeling" and _prompt_requests_gcp(text) and not any(token in text.lower() for token in ("xgboost", "xgb", "train", "训练")):
         model = _recent_model_for_gcp(context, resolved_objects)
         gcp_args = _build_gcp_args_from_recent_model(model)
         if not gcp_args.get("date_col"):
@@ -1475,9 +1610,12 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
                 "请指定要制图的字段或主题；如果不确定，我可以先预览字段并推荐适合制图的列。",
             )
     elif task_type == "modeling":
+        modeling_tools = ["profile_missing_values", "train_xgboost_fusion_model", "train_rf_fusion_model"]
+        if slots.get("model_type") == "generic_xgboost":
+            modeling_tools = ["profile_missing_values", "generic_xgboost_workflow", "train_xgboost_fusion_model", "train_rf_fusion_model"]
         plan.update(
             required_inputs=["dataset", "target column", "feature columns"],
-            recommended_tools=["profile_missing_values", "train_xgboost_fusion_model", "train_rf_fusion_model"],
+            recommended_tools=modeling_tools,
             execution_steps=[
                 f"检查 {dataset or '当前数据集'} 的缺失值和候选特征。",
                 "确认目标变量与特征列后训练模型。",
@@ -1499,6 +1637,8 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             )
         if not plan.get("resolved_fields", {}).get("feature_fields"):
             _add_missing_inputs(plan, ["feature columns"])
+        if plan.get("should_ask_clarification"):
+            plan["clarification_question"] = _modeling_candidate_question(context, slots)
     elif task_type == "data_processing":
         plan.update(
             required_inputs=["dataset", "processing operation"],
@@ -1594,7 +1734,7 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     if slot_missing:
         _add_missing_inputs(plan, slot_missing)
 
-    _apply_registered_workflow_priority(plan, text)
+    _apply_registered_workflow_priority(plan, text, context)
     plan["required_inputs"] = list(dict.fromkeys(plan.get("required_inputs", [])))
     plan["missing_inputs"] = list(dict.fromkeys(plan.get("missing_inputs", [])))
     plan["recommended_tools"] = list(dict.fromkeys(plan.get("recommended_tools", [])))

@@ -1,9 +1,9 @@
-import { Check, Clipboard, Copy, LogIn, Play, XCircle } from 'lucide-react';
+import { Check, Clipboard, Copy, LogIn, Package, Play, ShieldCheck, XCircle } from 'lucide-react';
 import { isValidElement, useEffect, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
-import { type ChatArtifact, type ChatMessage } from '@/lib/api';
+import { type ChatArtifact, type ChatMessage, type PresentationResult, type UserFacingResult } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { ArtifactDownloadCard } from './ArtifactDownloadCard';
 
@@ -93,7 +93,194 @@ function MarkdownBlocks({ content }: { content: string }) {
 }
 
 function artifactsFromMessage(message: ChatMessage): ChatArtifact[] {
-  return (message.meta?.artifacts || []).filter((item): item is ChatArtifact => Boolean(item?.artifact_id && item?.download_url));
+  const seen = new Set<string>();
+  return (message.meta?.artifacts || []).filter((item): item is ChatArtifact => {
+    if (!item?.artifact_id || seen.has(item.artifact_id)) return false;
+    seen.add(item.artifact_id);
+    return true;
+  });
+}
+
+function userFacingResultFromMessage(message: ChatMessage): UserFacingResult | null {
+  const result = message.meta?.user_facing_result;
+  return result && typeof result === 'object' ? result : null;
+}
+
+function presentationResultFromMessage(message: ChatMessage): PresentationResult | null {
+  const result = message.meta?.presentation_result;
+  return result && typeof result === 'object' ? result : null;
+}
+
+function artifactKey(artifact: ChatArtifact) {
+  return artifact.artifact_id || artifact.filename || artifact.title || 'artifact';
+}
+
+function technicalDetailsEnabled() {
+  if (import.meta.env.VITE_SHOW_TECHNICAL_DETAILS === 'true') return true;
+  try {
+    return localStorage.getItem('gis-agent-developer-mode') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function UserFacingResultCard({
+  result,
+  sessionId,
+  onDeleted
+}: {
+  result: UserFacingResult;
+  sessionId?: string;
+  onDeleted?: (artifactId: string) => void;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const primary = (result.primary_artifacts || []).filter((item) => item?.artifact_id);
+  const previews = (result.preview_artifacts || []).filter((item) => item?.artifact_id);
+  const primaryIds = new Set(primary.map((item) => item.artifact_id));
+  const previewOnly = previews.filter((item) => !primaryIds.has(item.artifact_id));
+  const groups = result.grouped_artifacts || [];
+  const bundles = [result.download_bundle?.recommended, result.download_bundle?.all].filter((item): item is ChatArtifact => Boolean(item?.artifact_id));
+  const debug = { ...(result.technical_details || {}), ...(result.debug || {}) };
+  const showTechnicalDetails = technicalDetailsEnabled();
+
+  return (
+    <section data-testid="user-facing-result-card" className="mt-3 space-y-3 rounded-2xl border border-slate-200/85 bg-white/70 p-3 shadow-sm dark:border-slate-800 dark:bg-slate-950/35">
+      {result.summary && <div className="text-sm font-bold leading-6 text-slate-800 dark:text-slate-100">{result.summary}</div>}
+      {Boolean(result.key_findings?.length) && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {result.key_findings?.slice(0, 6).map((item, index) => (
+            <div key={`${item}-${index}`} className="rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700 dark:bg-slate-900 dark:text-slate-200">{item}</div>
+          ))}
+        </div>
+      )}
+      {Boolean(result.insights?.length) && (
+        <div className="space-y-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
+          {result.insights?.slice(0, 5).map((item, index) => <div key={`${item}-${index}`}>• {item}</div>)}
+        </div>
+      )}
+      {Boolean(result.warnings?.length) && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+          {result.warnings?.slice(0, 4).map((item, index) => <div key={`${item}-${index}`}>• {item}</div>)}
+        </div>
+      )}
+      {bundles.length > 0 && (
+        <div data-testid="download-bundle-actions" className="grid gap-2">
+          {bundles.map((artifact) => (
+            <ArtifactDownloadCard key={artifactKey(artifact)} artifact={artifact} sessionId={sessionId} onDeleted={onDeleted} />
+          ))}
+        </div>
+      )}
+      {(primary.length > 0 || previewOnly.length > 0) && (
+        <div className="artifact-download-list">
+          {[...primary, ...previewOnly].map((artifact) => (
+            <ArtifactDownloadCard key={artifactKey(artifact)} artifact={artifact} sessionId={sessionId} onDeleted={onDeleted} />
+          ))}
+        </div>
+      )}
+      {showAll && groups.length > 0 && (
+        <div data-testid="artifact-group-list" className="space-y-3">
+          {groups.map((group) => (
+            <div key={group.group} className="space-y-2">
+              <div className="flex items-center gap-2 text-xs font-black text-slate-500 dark:text-slate-400"><Package size={13} />{group.group}</div>
+              {(group.artifacts || []).filter((item) => item?.artifact_id).map((artifact) => (
+                <ArtifactDownloadCard key={artifactKey(artifact)} artifact={artifact} sessionId={sessionId} onDeleted={onDeleted} />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {groups.length > 0 && (
+        <button type="button" onClick={() => setShowAll((value) => !value)} className="chat-copy-button">
+          {showAll ? '收起文件' : '展开全部文件'}
+        </button>
+      )}
+      {Boolean(result.next_actions?.length) && (
+        <div className="space-y-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
+          {result.next_actions?.slice(0, 5).map((item, index) => <div key={`${item}-${index}`}>下一步：{item}</div>)}
+        </div>
+      )}
+      {showTechnicalDetails && Object.keys(debug).length > 0 && (
+        <details data-testid="technical-details" className="rounded-xl border border-slate-200 bg-slate-50 p-2 text-xs dark:border-slate-800 dark:bg-slate-900/60">
+          <summary className="cursor-pointer font-bold text-slate-600 dark:text-slate-300">查看技术详情</summary>
+          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap text-[11px] leading-5 text-slate-500 dark:text-slate-400">{JSON.stringify(debug, null, 2)}</pre>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function PresentationResultCard({ result }: { result: PresentationResult }) {
+  const status = String(result.status || '');
+  const statusLabel = status === 'succeeded'
+    ? 'Succeeded'
+    : status === 'awaiting_confirmation'
+      ? 'Awaiting confirmation'
+      : status === 'blocked'
+        ? 'Blocked'
+        : status === 'running'
+          ? 'Running'
+          : status === 'failed'
+            ? 'Failed'
+            : 'Result';
+  return (
+    <section data-testid="presentation-result-card" className="mt-3 space-y-3 rounded-2xl border border-slate-200/85 bg-white/75 p-3 shadow-sm dark:border-slate-800 dark:bg-slate-950/35">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={cn(
+          'rounded-full px-2 py-0.5 text-[10px] font-black uppercase tracking-wide',
+          status === 'succeeded' && 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-200',
+          status === 'failed' && 'bg-rose-50 text-rose-700 dark:bg-rose-950/35 dark:text-rose-200',
+          status === 'blocked' && 'bg-amber-50 text-amber-700 dark:bg-amber-950/35 dark:text-amber-200',
+          status === 'awaiting_confirmation' && 'bg-blue-50 text-blue-700 dark:bg-blue-950/35 dark:text-blue-200',
+          status === 'running' && 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200',
+        )}>{statusLabel}</span>
+        {result.schema_version && <span className="text-[11px] font-semibold text-slate-400">{result.schema_version}</span>}
+      </div>
+      {result.concise_summary && <div className="text-sm font-bold leading-6 text-slate-800 dark:text-slate-100">{result.concise_summary}</div>}
+      {Boolean(result.executed_steps?.length) && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {result.executed_steps?.slice(0, 6).map((step, index) => (
+            <div key={`${step.step_id || index}-${step.tool_name || ''}`} className="rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700 dark:bg-slate-900 dark:text-slate-200">
+              <div>{step.step_id || step.tool_name || `step ${index + 1}`}</div>
+              <div className="mt-0.5 text-[11px] font-semibold text-slate-500">{step.tool_name || 'tool'} · {step.status || 'unknown'}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {Boolean(result.result_highlights?.length) && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {result.result_highlights?.slice(0, 8).map((item, index) => (
+            <div key={`${item}-${index}`} className="rounded-xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-200">{item}</div>
+          ))}
+        </div>
+      )}
+      {Boolean(result.artifact_refs?.length) && (
+        <div className="space-y-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
+          {result.artifact_refs?.slice(0, 8).map((artifact) => (
+            <div key={artifact.artifact_id}>Artifact: {artifact.title || artifact.artifact_id}</div>
+          ))}
+        </div>
+      )}
+      {Boolean(result.map_layer_refs?.length) && (
+        <div className="space-y-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
+          {result.map_layer_refs?.slice(0, 6).map((layer) => (
+            <div key={layer.layer_id}>Layer: {layer.name || layer.layer_id}</div>
+          ))}
+        </div>
+      )}
+      {Boolean(result.warnings?.length) && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+          {result.warnings?.slice(0, 4).map((item, index) => <div key={`${item}-${index}`}>{item}</div>)}
+        </div>
+      )}
+      {result.error_summary && <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-800 dark:border-rose-900 dark:bg-rose-950/30 dark:text-rose-200">{result.error_summary}</div>}
+      {result.clarification_question && <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">{result.clarification_question}</div>}
+      {Boolean(result.next_action_suggestions?.length) && (
+        <div className="space-y-1 text-xs leading-5 text-slate-600 dark:text-slate-300">
+          {result.next_action_suggestions?.slice(0, 5).map((item, index) => <div key={`${item}-${index}`}>Next: {item}</div>)}
+        </div>
+      )}
+    </section>
+  );
 }
 
 export function ChatMessageRenderer({
@@ -106,6 +293,7 @@ export function ChatMessageRenderer({
   onResume,
   onCancel,
   onClarification,
+  onConfirmAction,
   sessionId
 }: {
   message: ChatMessage;
@@ -117,15 +305,21 @@ export function ChatMessageRenderer({
   onResume?: (jobId: string) => void;
   onCancel?: (jobId: string) => void;
   onClarification?: (value: string, label: string) => void;
+  onConfirmAction?: (prompt: string, confirmedActionId: string) => void;
   sessionId?: string;
 }) {
   const artifacts = artifactsFromMessage(message);
+  const presentationResult = presentationResultFromMessage(message);
+  const userResult = userFacingResultFromMessage(message);
+  const resultPreference = presentationResult || userResult;
   const [deletedArtifactIds, setDeletedArtifactIds] = useState<Set<string>>(() => new Set());
   const visibleArtifacts = artifacts.filter((artifact) => !deletedArtifactIds.has(artifact.artifact_id));
   const [selection, setSelection] = useState('');
   const { copied, copyText } = useCopyToast();
   const action = message.meta?.action_required;
   const jobId = String(action?.job_id || '');
+  const confirmationPrompt = String(action?.confirmation_prompt || '');
+  const confirmedActionId = String(action?.confirmed_action_id || '');
 
   useEffect(() => {
     const onSelectionChange = () => setSelection(window.getSelection()?.toString().trim() || '');
@@ -136,6 +330,26 @@ export function ChatMessageRenderer({
   return (
     <div className="chat-message-renderer">
       <MarkdownBlocks content={content} />
+      {presentationResult && <PresentationResultCard result={presentationResult} />}
+      {presentationResult && visibleArtifacts.length > 0 && (
+        <div data-testid="presentation-artifact-download-list" className="artifact-download-list">
+          {visibleArtifacts.map((artifact) => (
+            <ArtifactDownloadCard
+              key={artifactKey(artifact)}
+              artifact={artifact}
+              sessionId={sessionId}
+              onDeleted={(artifactId) => setDeletedArtifactIds((current) => new Set(current).add(artifactId))}
+            />
+          ))}
+        </div>
+      )}
+      {!presentationResult && resultPreference && (
+        <UserFacingResultCard
+          result={resultPreference as UserFacingResult}
+          sessionId={sessionId}
+          onDeleted={(artifactId) => setDeletedArtifactIds((current) => new Set(current).add(artifactId))}
+        />
+      )}
       {action?.type === 'login_required' && (
         <div data-testid="gscloud-login-required" className="mt-3 rounded-2xl border border-amber-300/35 bg-amber-100/45 p-3 dark:bg-amber-400/10">
           <div className="text-sm font-black">需要登录地理空间数据云账号</div>
@@ -151,11 +365,26 @@ export function ChatMessageRenderer({
           {action.options.map((option) => <button key={option.value} type="button" onClick={() => onClarification?.(option.value, option.label)} className="glass-button px-3 py-2 text-xs font-black">{option.label}</button>)}
         </div>
       )}
-      {visibleArtifacts.length > 0 && (
+      {action?.type === 'confirmation_required' && confirmationPrompt && confirmedActionId && (
+        <div data-testid="download-confirmation-required" className="mt-3 rounded-2xl border border-amber-300/35 bg-amber-100/45 p-3 dark:bg-amber-400/10">
+          <div className="text-sm font-black">需要确认后执行</div>
+          <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-300">{String(action.message || '请确认产品、区域、账号、费用和覆盖风险后再继续。')}</p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => onConfirmAction?.(confirmationPrompt, confirmedActionId)}
+              className="glass-button inline-flex items-center gap-1.5 px-3 py-2 text-xs font-black text-emerald-700"
+            >
+              <ShieldCheck size={14} />确认执行
+            </button>
+          </div>
+        </div>
+      )}
+      {!presentationResult && !userResult && visibleArtifacts.length > 0 && (
         <div data-testid="artifact-download-list" className="artifact-download-list">
           {visibleArtifacts.map((artifact) => (
             <ArtifactDownloadCard
-              key={artifact.artifact_id || artifact.download_url}
+              key={artifactKey(artifact)}
               artifact={artifact}
               sessionId={sessionId}
               onDeleted={(artifactId) => setDeletedArtifactIds((current) => new Set(current).add(artifactId))}

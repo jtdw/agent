@@ -20,6 +20,13 @@ HTML_ERROR_MARKERS = (
     "error",
 )
 
+NON_AUTH_GSCLOUD_COOKIE_NAMES = {
+    "gsc_csrftoken",
+    "csrftoken",
+    "csrf_token",
+    "csrf",
+}
+
 
 BUILTIN_REGION_BOUNDS: dict[str, tuple[float, float, float, float]] = {
     "成都": (102.9, 30.05, 104.9, 31.45),
@@ -83,6 +90,19 @@ def inspect_storage_state(path: str | Path, *, include_path: bool = False) -> di
             "gscloud_cookie_count": len(gscloud),
             "expired_cookie_count": len(expiring),
         }, state_path, include_path)
+    authenticated = [
+        cookie for cookie in valid
+        if str(cookie.get("name") or "").strip().lower() not in NON_AUTH_GSCLOUD_COOKIE_NAMES
+    ]
+    if not authenticated:
+        return _with_optional_path({
+            "ok": False,
+            "reason": "missing_authenticated_gscloud_cookie",
+            "action": "relogin",
+            "cookie_count": len(cookies),
+            "gscloud_cookie_count": len(gscloud),
+            "valid_gscloud_cookie_count": len(valid),
+        }, state_path, include_path)
     return _with_optional_path({
         "ok": True,
         "reason": "storage_state_ready",
@@ -90,6 +110,7 @@ def inspect_storage_state(path: str | Path, *, include_path: bool = False) -> di
         "cookie_count": len(cookies),
         "gscloud_cookie_count": len(gscloud),
         "valid_gscloud_cookie_count": len(valid),
+        "authenticated_gscloud_cookie_count": len(authenticated),
     }, state_path, include_path)
 
 

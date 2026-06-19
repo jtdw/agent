@@ -17,6 +17,7 @@ from .gscloud_scene_table import (
     get_scene_table_rows,
     goto_scene_page,
     scan_scene_table_pages,
+    search_scene_row_by_id,
     select_scene_records,
     update_scene_status,
 )
@@ -26,7 +27,7 @@ from .registry import get_source
 def parse_modev1f_cells(cells: list[str], row_index: int) -> dict[str, Any] | None:
     if len(cells) < 6:
         return None
-    scene_id = next((c for c in cells if c.upper().startswith("MODEV1F.")), "")
+    scene_id = next((c for c in cells if c.upper().startswith(("MODEV1T.", "MODEV1F."))), "")
     if not scene_id:
         return None
     date = next((c for c in cells if re.match(r"\d{4}-\d{2}-\d{2}", c)), "")
@@ -76,7 +77,7 @@ def download_modev1f_china_evi_5day(
     sync_playwright, PlaywrightTimeoutError = _ensure_playwright()
     timeout_ms = max(30, int(timeout_seconds or 1800)) * 1000
     max_scenes = max(1, int(max_scenes or 1))
-    target_dir = Path(manager.workdir) / "domestic_downloads" / "gscloud" / "modev1f"
+    target_dir = Path(manager.workdir) / "domestic_downloads" / "gscloud" / "modev1t"
     target_dir.mkdir(parents=True, exist_ok=True)
     downloaded: list[Path] = []
     candidates: list[dict[str, Any]] = []
@@ -145,7 +146,18 @@ def download_modev1f_china_evi_5day(
                 )
                 row = find_scene_row_by_id(get_scene_table_rows(page), item["scene_id"])
                 if row is None:
-                    raise RuntimeError(f"已选中 {item['scene_id']}，但在第 {item.get('page_no')} 页未能重新定位该记录。")
+                    update_scene_status(
+                        status_path,
+                        state="DOWNLOADING",
+                        pages_scanned=pages_scanned,
+                        selected_count=len(selected),
+                        downloaded_count=len(downloaded),
+                        current_scene=item["scene_id"],
+                        message=f"第 {item.get('page_no')} 页未重新定位到 {item['scene_id']}，正在改用数据标识搜索。",
+                    )
+                    row = search_scene_row_by_id(page, item["scene_id"], parse_row=_parse_modev1f_row)
+                if row is None:
+                    raise RuntimeError(f"已选中 {item['scene_id']}，但按第 {item.get('page_no')} 页和数据标识搜索都未能重新定位该记录。")
                 try:
                     download = _click_row_download(page, row, timeout_ms)
                 except PlaywrightTimeoutError as exc:

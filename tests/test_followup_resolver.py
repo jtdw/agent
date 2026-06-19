@@ -69,6 +69,16 @@ class FollowupResolverFrontendContextTests(unittest.TestCase):
         self.assertEqual(resolved["referenced_object"]["type"], "model_result")
         self.assertEqual(resolved["referenced_object"]["id"], "xgb_soil")
 
+    def test_important_factors_followup_uses_recent_model_result(self) -> None:
+        state = ConversationState(last_model_result={"model": "generic_xgboost", "output_prefix": "gxgb"}).to_dict()
+
+        resolved = resolve_followup("Which factors are most important for this model?", state, {"model_results": []})
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["reason"], "matched_recent_model_result")
+        self.assertEqual(resolved["referenced_object"]["type"], "model_result")
+        self.assertEqual(resolved["referenced_object"]["data"]["model"], "generic_xgboost")
+
     def test_selected_model_result_id_resolves_matching_dashboard_record(self) -> None:
         state = ConversationState(selected_model_result={"id": "model_result_xgb_002", "source": "frontend_context"}).to_dict()
         dashboard = {

@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 
 import geopandas as gpd
+import numpy as np
+import rasterio
+from rasterio.transform import from_origin
 from shapely.geometry import Point
 
 from core.config import Settings
@@ -56,6 +59,58 @@ class CheckpointMapLayerServiceTests(unittest.TestCase):
             self.assertEqual(layer["artifact_id"], artifact["artifact_id"])
             self.assertTrue(layer["map_ready"])
             self.assertEqual(layer["meta"]["artifact_id"], artifact["artifact_id"])
+
+    def test_workspace_layers_promotes_unloaded_vector_artifact(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            path = service.manager.derived_dir / "downloaded_points.geojson"
+            gdf = gpd.GeoDataFrame({"name": ["sample"], "geometry": [Point(104.0, 30.0)]}, crs="EPSG:4326")
+            gdf.to_file(path, driver="GeoJSON")
+            artifact = service.manager.register_artifact(
+                artifact_id="artifact_downloaded_points",
+                path=str(path),
+                type="geojson",
+                title="downloaded_points.geojson",
+            )
+
+            payload = MapLayerService(service).workspace_layers(user_id="u_test")
+
+            layer = next((item for item in payload["layers"] if item["artifact_id"] == artifact["artifact_id"]), None)
+            self.assertIsNotNone(layer)
+            self.assertEqual(layer["type"], "vector")
+            self.assertTrue(layer["map_ready"])
+
+    def test_workspace_layers_promotes_unloaded_raster_artifact(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            path = service.manager.derived_dir / "downloaded_dem.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                height=2,
+                width=2,
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(104.0, 31.0, 0.1, 0.1),
+            ) as dst:
+                dst.write(np.array([[1, 2], [3, 4]], dtype="float32"), 1)
+            artifact = service.manager.register_artifact(
+                artifact_id="artifact_downloaded_dem",
+                path=str(path),
+                type="raster",
+                title="downloaded_dem.tif",
+            )
+
+            payload = MapLayerService(service).workspace_layers(user_id="u_test")
+
+            layer = next((item for item in payload["layers"] if item["artifact_id"] == artifact["artifact_id"]), None)
+            self.assertIsNotNone(layer)
+            self.assertEqual(layer["type"], "raster")
+            self.assertTrue(layer["map_ready"])
+            self.assertTrue(layer["preview_url"].startswith("/api/map/raster-preview?"))
 
     def test_large_county_admin_vector_layer_is_not_truncated(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

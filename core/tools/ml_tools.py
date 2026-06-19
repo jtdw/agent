@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.gcp_uncertainty import run_gcp_uncertainty_analysis
+from core.model_visualization import generate_model_visualizations
 from core.tools import ml_helpers as _helpers
 
 ML_TOOL_NAMES = {
@@ -27,6 +29,7 @@ _LEGACY_DEPENDENCIES = (
     'RandomForestRegressor',
     'SimpleImputer',
     'TensorDataset',
+    'XGBRegressor',
     '_FusionLSTM',
     '_append_spatial_coordinates',
     '_artifact_safe_name',
@@ -208,6 +211,11 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
         bandwidth: float = 0.0,
         kernel: str = "gaussian",
         bin_count: int = 5,
+        fold_col: str = "",
+        cv_available_col: str = "",
+        spatial_weighting: bool = True,
+        spatial_bandwidth: float = 0.0,
+        report_title: str = "",
     ) -> str:
         """对一个或多个模型预测结果执行地理共形预测（GCP），输出位置相关预测区间、覆盖率和区间宽度等不确定性指标；若缺少空间坐标则自动退化为全局 split conformal。"""
         inputs = {
@@ -221,6 +229,10 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             "date_col": date_col,
             "alpha": alpha,
             "calibration_ratio": calibration_ratio,
+            "fold_col": fold_col,
+            "cv_available_col": cv_available_col,
+            "spatial_weighting": spatial_weighting,
+            "spatial_bandwidth": spatial_bandwidth,
         }
         pred_cols = _parse_columns(predicted_cols)
         validation_errors: list[dict[str, Any]] = []
@@ -280,6 +292,215 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                 next_actions=merge_next_actions(validation_errors),
                 technical_detail=str(first.get("technical_detail") or ""),
             ).to_json()
+
+        cal_df = _prepare_dataframe(calibration_dataset, manager).copy()
+        target_name = target_dataset_name.strip() or calibration_dataset
+        target_df, _target_gdf = _prepare_dataframe_with_geometry(target_name, manager)
+        target_df = target_df.copy()
+        coord_lon_col = lon_col if lon_col and lon_col in cal_df.columns and lon_col in target_df.columns else ""
+        coord_lat_col = lat_col if lat_col and lat_col in cal_df.columns and lat_col in target_df.columns else ""
+        if not coord_lon_col:
+            coord_lon_col = next((col for col in cal_df.columns if str(col).lower() in {"lon", "longitude", "lng", "x"} and col in target_df.columns), "")
+        if not coord_lat_col:
+            coord_lat_col = next((col for col in cal_df.columns if str(col).lower() in {"lat", "latitude", "y"} and col in target_df.columns), "")
+        if calibration_filter.strip():
+            cal_df = cal_df.loc[_build_mask_from_query(cal_df, calibration_filter, "calibration_filter")].copy()
+        if target_filter.strip():
+            target_df = target_df.loc[_build_mask_from_query(target_df, target_filter, "target_filter")].copy()
+
+        all_metrics: list[dict[str, Any]] = []
+        all_images: list[dict[str, Any]] = []
+        all_skipped_images: list[dict[str, Any]] = []
+        all_warnings: list[str] = []
+        result_df: pd.DataFrame | None = None
+        report_sections: list[str] = []
+        interval_summaries: list[dict[str, Any]] = []
+        effective_bandwidth = float(spatial_bandwidth) if float(spatial_bandwidth or 0) > 0 else float(bandwidth or 0)
+
+        for index, pred_col in enumerate(pred_cols):
+            analysis = run_gcp_uncertainty_analysis(
+                data=cal_df,
+                target_data=target_df,
+                observed_col=observed_col,
+                predicted_col=pred_col,
+                output_name=output_name,
+                output_dir=manager.plot_dir,
+                lon_col=coord_lon_col,
+                lat_col=coord_lat_col,
+                alpha=float(alpha),
+                calibration_ratio=float(calibration_ratio),
+                calibration_selection=calibration_selection,
+                spatial_weighting=bool(spatial_weighting),
+                spatial_bandwidth=effective_bandwidth,
+                fold_col=fold_col,
+                cv_available_col=cv_available_col,
+                date_col=date_col,
+            )
+            predictions = analysis["predictions"].copy()
+            predictions[f"{pred_col}_gcp_radius"] = predictions["interval_width"] / 2.0
+            predictions[f"{pred_col}_gcp_lower"] = predictions["prediction_interval_lower"]
+            predictions[f"{pred_col}_gcp_upper"] = predictions["prediction_interval_upper"]
+            predictions[f"{pred_col}_gcp_width"] = predictions["interval_width"]
+            predictions[f"{pred_col}_gcp_covered"] = predictions["covered"]
+            if result_df is None:
+                result_df = predictions
+            else:
+                for col in [
+                    f"{pred_col}_gcp_radius",
+                    f"{pred_col}_gcp_lower",
+                    f"{pred_col}_gcp_upper",
+                    f"{pred_col}_gcp_width",
+                    f"{pred_col}_gcp_covered",
+                ]:
+                    result_df[col] = predictions[col]
+            metrics_row = dict(analysis["metrics"])
+            metrics_row["predicted"] = pred_col
+            metrics_row["nominal_coverage"] = metrics_row.get("target_coverage")
+            metrics_row["global_qhat"] = metrics_row.get("q_hat")
+            metrics_row["kernel"] = kernel
+            metrics_row["calibration_dataset"] = calibration_dataset
+            metrics_row["target_dataset"] = target_name
+            all_metrics.append(metrics_row)
+            if index == 0:
+                all_images.extend(analysis.get("images", []))
+                all_skipped_images.extend(analysis.get("skipped_images", []))
+            all_warnings.extend(str(item) for item in analysis.get("warnings", []))
+            report_sections.append(str(analysis.get("report_markdown") or ""))
+            interval_summaries.append({
+                "predicted": pred_col,
+                "method": metrics_row.get("method"),
+                "global_qhat": metrics_row.get("q_hat"),
+                "n_calibration": metrics_row.get("n_calibration"),
+                "n_target": metrics_row.get("n_target"),
+                "interval_columns": {
+                    "radius": f"{pred_col}_gcp_radius",
+                    "lower": f"{pred_col}_gcp_lower",
+                    "upper": f"{pred_col}_gcp_upper",
+                    "width": f"{pred_col}_gcp_width",
+                    "covered": f"{pred_col}_gcp_covered",
+                },
+            })
+
+        result_df = result_df if result_df is not None else target_df.copy()
+        saved_name = manager.put_table(f"{output_name}_gcp_predictions", result_df)
+        metrics_df = pd.DataFrame(all_metrics)
+        metrics_df = metrics_df.map(lambda value: _json(value) if isinstance(value, (dict, list)) else value)
+        metrics_name = manager.put_table(f"{output_name}_gcp_metrics", metrics_df)
+        metrics_payload = all_metrics[0] if len(all_metrics) == 1 else {"models": all_metrics}
+        metrics_json_path = _save_json_artifact(manager, f"{output_name}_gcp_metrics", metrics_payload)
+        report_text = (f"# {report_title or output_name + ' GCP Report'}\n\n" + "\n\n".join(report_sections)).strip() + "\n"
+        report_path = _save_markdown_artifact(manager, f"{output_name}_gcp_report", report_text)
+        summary_path = _save_json_artifact(manager, f"{output_name}_gcp_summary", {
+            "calibration_dataset": calibration_dataset,
+            "target_dataset": target_name,
+            "observed_col": observed_col,
+            "predicted_cols": pred_cols,
+            "alpha": float(alpha),
+            "spatial_weighting": bool(spatial_weighting),
+            "bandwidth": effective_bandwidth or None,
+            "warnings": all_warnings,
+            "skipped_images": all_skipped_images,
+            "models": interval_summaries,
+        })
+
+        task_id = f"geographical_conformal_prediction_{uuid4().hex[:10]}"
+        model_result_id = generate_model_result_id("GCP", output_name)
+        owner_user_id = getattr(manager, "current_user_id", "")
+        session_id = getattr(manager, "current_session_id", "")
+
+        def artifact_payload(
+            artifact_id: str,
+            path: str | Path,
+            type_name: str,
+            title: str,
+            description: str,
+            mime_type: str,
+            preview_available: bool = False,
+        ) -> dict[str, Any]:
+            return {
+                "artifact_id": artifact_id,
+                "path": str(path),
+                "type": type_name,
+                "title": title,
+                "description": description,
+                "quality_status": "created",
+                "preview_available": preview_available,
+                "mime_type": mime_type,
+                "source_tool": "geographical_conformal_prediction",
+                "owner_user_id": owner_user_id,
+                "session_id": session_id,
+            }
+
+        artifacts: list[dict[str, Any]] = [
+            artifact_payload(f"dataset_{uuid4().hex[:10]}", manager.get(saved_name).path, "dataset", f"{saved_name} GCP predictions", "GCP prediction intervals table.", "text/csv"),
+            artifact_payload(f"metrics_{uuid4().hex[:10]}", manager.get(metrics_name).path, "metrics", f"{metrics_name} GCP metrics", "GCP metrics table.", "text/csv"),
+            artifact_payload(f"gcpjson_{uuid4().hex[:10]}", metrics_json_path, "gcp_metrics_json", f"{output_name} GCP metrics JSON", "GCP metrics JSON.", "application/json"),
+            artifact_payload(f"report_{uuid4().hex[:10]}", report_path, "report", f"{output_name} GCP report", "GCP uncertainty analysis report.", "text/markdown"),
+            artifact_payload(f"summary_{uuid4().hex[:10]}", summary_path, "summary", f"{output_name} GCP summary", "GCP configuration and output summary.", "application/json"),
+        ]
+        for image in all_images:
+            if isinstance(image, dict) and image.get("path"):
+                artifacts.append(
+                    artifact_payload(
+                        f"image_{uuid4().hex[:10]}",
+                        str(image.get("path")),
+                        "image",
+                        str(image.get("title") or image.get("name") or "GCP image"),
+                        "GCP uncertainty visualization.",
+                        "image/png",
+                        True,
+                    )
+                )
+
+        manager.register_model_result(
+            model_result_id=model_result_id,
+            task_id=task_id,
+            dataset_id=calibration_dataset,
+            model_name="GCP",
+            output_prefix=output_name,
+            result_dataset=saved_name,
+            metrics_dataset=metrics_name,
+            metrics_path=str(manager.get(metrics_name).path),
+            figure_path=str(all_images[0].get("path") or "") if all_images and isinstance(all_images[0], dict) else "",
+            artifact_ids=[str(item.get("artifact_id") or "") for item in artifacts],
+            artifacts=artifacts,
+            metrics=metrics_payload,
+            diagnostics={
+                "calibration_dataset": calibration_dataset,
+                "target_dataset": target_name,
+                "observed_col": observed_col,
+                "predicted_cols": pred_cols,
+                "spatial_ready": any(row.get("method") == "gcp" for row in all_metrics),
+                "summary": interval_summaries,
+                "warnings": all_warnings,
+            },
+        )
+        return tool_result_ok(
+            "geographical_conformal_prediction",
+            inputs=inputs,
+            task_id=task_id,
+            outputs={
+                "model_result_id": model_result_id,
+                "result_dataset": saved_name,
+                "metrics_dataset": metrics_name,
+                "metrics_json_path": str(metrics_json_path),
+                "report_path": str(report_path),
+                "summary_path": str(summary_path),
+                "interval_columns": interval_summaries,
+                "methods": sorted({str(row.get("method") or "") for row in all_metrics}),
+                "spatial_ready": any(row.get("method") == "gcp" for row in all_metrics),
+                "images": all_images,
+                "skipped_images": all_skipped_images,
+            },
+            artifacts=artifacts,
+            summary=(
+                f"GCP uncertainty analysis completed. Result dataset: {saved_name}. "
+                f"Metrics dataset: {metrics_name}. Report: {report_path}."
+            ),
+            diagnostics={"metrics": all_metrics, "summary": interval_summaries, "warnings": all_warnings},
+            warnings=all_warnings,
+            next_actions=["Explain empirical coverage and interval width.", "Inspect high uncertainty regions or samples."],
+        ).to_json()
 
         cal_df = _prepare_dataframe(calibration_dataset, manager).copy()
         target_name = target_dataset_name.strip() or calibration_dataset
@@ -909,10 +1130,14 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
         colsample_bytree: float = 0.9,
         random_state: int = 42,
         spatial_validation: bool = True,
+        validation_method: str = "",
+        lon_col: str = "",
+        lat_col: str = "",
         spatial_block_count: int = 5,
         add_spatial_coordinates: bool = True,
         moran_k_neighbors: int = 8,
         moran_permutations: int = 199,
+        requested_outputs: str = "",
     ) -> str:
         """训练 XGBoost 回归模型。对点图层会自动保留 geometry、添加空间坐标特征、执行空间分块交叉验证、计算残差 Moran's I，并输出残差空间分布图。"""
         inputs = {
@@ -923,6 +1148,10 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             "date_col": date_col,
             "split_date": split_date,
             "spatial_validation": spatial_validation,
+            "validation_method": validation_method,
+            "lon_col": lon_col,
+            "lat_col": lat_col,
+            "requested_outputs": requested_outputs,
         }
         errors = validate_dataset_exists(manager, dataset_name)
         features_for_validation: list[str] = []
@@ -970,15 +1199,37 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
         resolved_columns = _resolve_existing_columns(df, [target_col, *features])
         target_col = resolved_columns[0]
         features = resolved_columns[1:]
-        spatial_enabled = bool(spatial_validation and source_gdf is not None)
-        spatial_gdf = None
+        spatial_requested = bool(spatial_validation) or str(validation_method or "").lower() == "spatial_block"
+        spatial_enabled = False
+        spatial_frame = None
         projected_crs = None
 
-        if spatial_enabled:
-            spatial_gdf, projected_crs = _append_spatial_coordinates(source_gdf.copy())
+        if spatial_requested and source_gdf is not None:
+            spatial_frame, projected_crs = _append_spatial_coordinates(source_gdf.copy())
+            spatial_enabled = True
             if add_spatial_coordinates:
                 for coord_col in ["__spatial_x__", "__spatial_y__"]:
-                    df[coord_col] = spatial_gdf[coord_col]
+                    df[coord_col] = spatial_frame[coord_col]
+                    if coord_col not in features:
+                        features.append(coord_col)
+        elif spatial_requested:
+            coords, coord_diag = _resolve_spatial_coordinates(dataset_name, df, manager, lon_col=lon_col, lat_col=lat_col)
+            if coords is None or not bool(coord_diag.get("spatial_ready")):
+                return tool_result_error(
+                    "train_xgboost_fusion_model",
+                    inputs=inputs,
+                    error_code="SPATIAL_COORDINATES_REQUIRED",
+                    error_title="Spatial coordinates required",
+                    user_message="Spatial block validation requires coordinate fields for table data.",
+                    diagnostics=coord_diag,
+                    next_actions=["Provide lon_col and lat_col, or add longitude/latitude fields to the table."],
+                ).to_json()
+            spatial_frame = coords.rename(columns={"__coord_x__": "__spatial_x__", "__coord_y__": "__spatial_y__"})
+            projected_crs = coord_diag.get("projected_crs")
+            spatial_enabled = True
+            if add_spatial_coordinates:
+                for coord_col in ["__spatial_x__", "__spatial_y__"]:
+                    df[coord_col] = spatial_frame[coord_col]
                     if coord_col not in features:
                         features.append(coord_col)
 
@@ -1015,16 +1266,27 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
         df[cv_fold_col] = pd.Series(pd.NA, index=df.index, dtype="object")
         df[cv_available_col] = False
 
-        if spatial_enabled and spatial_gdf is not None:
-            valid_spatial_gdf = spatial_gdf.loc[valid_target].copy()
-            block_series = _make_spatial_blocks(valid_spatial_gdf, n_blocks=spatial_block_count, random_state=random_state)
+        if spatial_enabled and spatial_frame is not None:
+            valid_spatial_mask = valid_target & spatial_frame[["__spatial_x__", "__spatial_y__"]].notna().all(axis=1)
+            if int(valid_spatial_mask.sum()) < 2:
+                return tool_result_error(
+                    "train_xgboost_fusion_model",
+                    inputs=inputs,
+                    error_code="SPATIAL_COORDINATES_REQUIRED",
+                    error_title="Spatial coordinates required",
+                    user_message="Spatial block validation requires at least two rows with target values and valid coordinates.",
+                    diagnostics={"valid_spatial_rows": int(valid_spatial_mask.sum())},
+                    next_actions=["Check lon_col and lat_col values, or disable spatial_validation."],
+                ).to_json()
+            valid_spatial_frame = spatial_frame.loc[valid_spatial_mask].copy()
+            block_series = _make_spatial_blocks(valid_spatial_frame, n_blocks=spatial_block_count, random_state=random_state)
             unique_blocks = int(block_series.nunique())
             if unique_blocks < 2:
                 raise ValueError("空间分块数量不足，无法进行空间交叉验证。")
 
             df[cv_pred_col] = np.nan
             gkf = GroupKFold(n_splits=unique_blocks)
-            valid_index = df.index[valid_target]
+            valid_index = block_series.index
             x_valid = df.loc[valid_index, features]
             y_valid = df.loc[valid_index, target_col]
             groups = block_series.loc[valid_index]
@@ -1050,13 +1312,13 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
 
             df[resid_col] = df[target_col] - df[cv_pred_col]
             metrics = {
-                "spatial_cv": _calc_metrics(df.loc[valid_target, target_col], df.loc[valid_target, cv_pred_col]),
+                "spatial_cv": _calc_metrics(df.loc[valid_index, target_col], df.loc[valid_index, cv_pred_col]),
                 "final_model_in_sample": _calc_metrics(df.loc[valid_target, target_col], df.loc[valid_target, pred_col]),
             }
             spatial_diag = _calc_global_moran_i(
                 df[resid_col],
-                spatial_gdf["__spatial_x__"],
-                spatial_gdf["__spatial_y__"],
+                spatial_frame["__spatial_x__"],
+                spatial_frame["__spatial_y__"],
                 k_neighbors=moran_k_neighbors,
                 permutations=moran_permutations,
                 random_state=random_state,
@@ -1097,12 +1359,129 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
         else:
             saved_name = manager.put_table(output_name, df)
 
+        primary_prediction_col = cv_pred_col if cv_pred_col in df.columns and df[cv_pred_col].notna().any() else pred_col
+        prediction_columns = []
+        for candidate in ("station_id", "id", "ID", date_col, lon_col, lat_col, coord_lon_col if "coord_lon_col" in locals() else "", coord_lat_col if "coord_lat_col" in locals() else "", cv_fold_col):
+            if candidate and candidate in df.columns and candidate not in prediction_columns:
+                prediction_columns.append(candidate)
+        predictions_df = df[prediction_columns].copy() if prediction_columns else pd.DataFrame(index=df.index)
+        predictions_df.insert(0, "sample_index", df.index)
+        predictions_df["y_true"] = df[target_col]
+        predictions_df["y_pred"] = df[primary_prediction_col]
+        predictions_df["residual"] = df[target_col] - df[primary_prediction_col]
+        predictions_df["prediction_source_column"] = primary_prediction_col
+        predictions_name = manager.put_table(
+            f"{output_name}_predictions",
+            predictions_df,
+            filename=f"{_artifact_safe_name(output_name)}_predictions.csv",
+        )
+
+        residual_columns = [target_col, pred_col, resid_col]
+        if cv_pred_col in df.columns:
+            residual_columns.append(cv_pred_col)
+        if date_col and date_col in df.columns:
+            residual_columns.append(date_col)
+        for coord_col in (lon_col, lat_col):
+            if coord_col and coord_col in df.columns:
+                residual_columns.append(coord_col)
+        residual_columns = list(dict.fromkeys([col for col in residual_columns if col in df.columns]))
+        residuals_name = manager.put_table(f"{output_name}_residuals", df[residual_columns].copy())
+        standard_importance_name = manager.put_table(
+            f"{output_name}_feature_importance",
+            importance_df,
+            filename=f"{_artifact_safe_name(output_name)}_feature_importance.csv",
+        )
         importance_name = manager.put_table(f"{output_name}_xgb_importance", importance_df)
         metrics_name = manager.put_table(f"{output_name}_xgb_metrics", pd.DataFrame([{"scope": key, **value} for key, value in metrics.items()]))
         if spatial_diag:
             moran_table_name = manager.put_table(f"{output_name}_moran_i", pd.DataFrame([spatial_diag]))
         model_path = manager.derived_dir / f"{_artifact_safe_name(output_name)}_xgb_model.joblib"
         joblib.dump(model, model_path)
+        standard_model_path = manager.derived_dir / f"{_artifact_safe_name(output_name)}_model.joblib"
+        joblib.dump(model, standard_model_path)
+
+        visualization_pred_col = cv_pred_col if cv_pred_col in df.columns and df[cv_pred_col].notna().any() else pred_col
+        visualization_mask = valid_target & df[visualization_pred_col].notna()
+        visualization_metrics = (
+            metrics.get("spatial_cv")
+            if isinstance(metrics, dict) and isinstance(metrics.get("spatial_cv"), dict)
+            else metrics.get("overall")
+            if isinstance(metrics, dict) and isinstance(metrics.get("overall"), dict)
+            else metrics
+        )
+        coord_lon_col = lon_col if lon_col and lon_col in df.columns else ""
+        coord_lat_col = lat_col if lat_col and lat_col in df.columns else ""
+        if not coord_lon_col:
+            coord_lon_col = next((col for col in df.columns if str(col).lower() in {"lon", "longitude", "lng", "x"}), "")
+        if not coord_lat_col:
+            coord_lat_col = next((col for col in df.columns if str(col).lower() in {"lat", "latitude", "y"}), "")
+        visualization_result = generate_model_visualizations(
+            y_true=df.loc[visualization_mask, target_col],
+            y_pred=df.loc[visualization_mask, visualization_pred_col],
+            residuals=df.loc[visualization_mask, resid_col],
+            feature_importance=importance_df,
+            metrics=visualization_metrics if isinstance(visualization_metrics, dict) else {},
+            output_name=output_name,
+            output_dir=manager.plot_dir,
+            lon=df.loc[visualization_mask, coord_lon_col] if coord_lon_col else None,
+            lat=df.loc[visualization_mask, coord_lat_col] if coord_lat_col else None,
+        )
+        image_outputs = visualization_result.get("images") if isinstance(visualization_result.get("images"), list) else []
+        skipped_images = visualization_result.get("skipped_images") if isinstance(visualization_result.get("skipped_images"), list) else []
+        visualization_warnings = visualization_result.get("warnings") if isinstance(visualization_result.get("warnings"), list) else []
+        metrics_payload = {
+            "dataset": dataset_name,
+            "target_col": target_col,
+            "feature_cols": features,
+            "prediction_column": primary_prediction_col,
+            "sample_count": int(valid_target.sum()),
+            "validation_method": "spatial_block" if spatial_enabled else ("date_split" if date_col and split_date else "overall"),
+            "metrics": metrics,
+            "spatial_validation": bool(spatial_enabled),
+            "spatial_diagnostics": spatial_diag,
+        }
+        metrics_json_path = _save_json_artifact(manager, f"{output_name}_metrics", metrics_payload)
+        top_features = importance_df.head(5).to_dict(orient="records")
+        report_lines = [
+            f"# XGBoost 建模报告：{output_name}",
+            "",
+            f"- 使用数据：{dataset_name}",
+            f"- 目标列：{target_col}",
+            f"- 特征列：{', '.join(features)}",
+            f"- 样本量：{int(valid_target.sum())}",
+            f"- 验证方式：{'空间分块验证' if spatial_enabled else ('时间划分' if date_col and split_date else '整体样本评估')}",
+            "",
+            "## 精度指标",
+            "",
+            "```json",
+            _json(metrics),
+            "```",
+            "",
+            "## 重要特征",
+            "",
+            *[f"- {item.get('feature')}: {float(item.get('importance') or 0):.6g}" for item in top_features],
+            "",
+            "## 残差与空间诊断",
+            "",
+            f"- 残差列：{resid_col}",
+            f"- 空间验证：{'已启用' if spatial_enabled else '未启用'}",
+            f"- Moran's I：{spatial_diag.get('moran_i') if isinstance(spatial_diag, dict) else '未计算'}",
+            "",
+            "## 输出文件",
+            "",
+            f"- 预测结果：{_artifact_safe_name(output_name)}_predictions.csv",
+            f"- 残差结果：{_artifact_safe_name(output_name)}_residuals.csv",
+            f"- 特征重要性：{_artifact_safe_name(output_name)}_xgb_importance.csv",
+            f"- 指标 JSON：{_artifact_safe_name(output_name)}_metrics.json",
+            f"- 模型文件：{_artifact_safe_name(output_name)}_model.joblib",
+            "",
+            "## 下一步建议",
+            "",
+            "- 检查重要特征是否符合土壤水分、水文和遥感机理。",
+            "- 对高残差样本或区域继续检查观测质量、空间因子和时间匹配。",
+            "- 如需不确定性分析，可继续执行 GCP 地理共形预测。",
+        ]
+        report_path = _save_markdown_artifact(manager, f"{output_name}_report", "\n".join(report_lines))
 
         meta_path = _save_json_artifact(manager, f"{output_name}_xgb_summary", {
             "dataset": dataset_name,
@@ -1130,6 +1509,8 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             "metrics": metrics,
             "spatial_diagnostics": spatial_diag,
             "residual_map": str(residual_map_path) if residual_map_path else None,
+            "images": image_outputs,
+            "skipped_images": skipped_images,
         })
         manager.log_operation("XGBoost 融合训练", f"{dataset_name} -> {saved_name}", "model")
 
@@ -1144,6 +1525,18 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             reply_lines.append(f"Moran's I 结果表: {moran_table_name}。")
         if residual_map_path is not None:
             reply_lines.append(f"残差空间分布图: {residual_map_path}。")
+        if image_outputs:
+            reply_lines.append(
+                "Model visualization images: "
+                + ", ".join(str(item.get("path") or "") for item in image_outputs if isinstance(item, dict))
+                + "."
+            )
+        if skipped_images:
+            reply_lines.append(
+                "Skipped optional images: "
+                + "; ".join(f"{item.get('name')}: {item.get('reason')}" for item in skipped_images if isinstance(item, dict))
+                + "."
+            )
         if spatial_diag and spatial_diag.get("moran_i") is not None:
             detail = f"残差 Moran's I = {spatial_diag['moran_i']:.4f}"
             if spatial_diag.get("p_value") is not None:
@@ -1151,11 +1544,29 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             reply_lines.append(detail + "。")
         artifacts = [
             ArtifactInfo(
+                artifact_id=f"predictions_{uuid4().hex[:10]}",
+                path=str(manager.get(predictions_name).path),
+                type="predictions",
+                title=f"{output_name}_predictions.csv",
+                description="XGBoost 标准预测结果表，包含 y_true、y_pred 和 residual。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
                 artifact_id=f"dataset_{uuid4().hex[:10]}",
                 path=str(manager.get(saved_name).path),
                 type="dataset",
                 title=f"{saved_name} XGBoost predictions",
                 description="XGBoost 预测结果数据集。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"residuals_{uuid4().hex[:10]}",
+                path=str(manager.get(residuals_name).path),
+                type="residuals",
+                title=f"{residuals_name} residuals",
+                description="XGBoost residual diagnostics table.",
                 quality_status="created",
                 preview_available=False,
             ),
@@ -1170,19 +1581,46 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             ),
             ArtifactInfo(
                 artifact_id=f"table_{uuid4().hex[:10]}",
-                path=str(manager.get(importance_name).path),
+                path=str(manager.get(standard_importance_name).path),
                 type="feature_importance",
-                title=f"{importance_name} feature importance",
+                title=f"{output_name}_feature_importance.csv",
                 description="XGBoost 特征重要性表。",
                 quality_status="created",
                 preview_available=False,
             ),
             ArtifactInfo(
+                artifact_id=f"table_{uuid4().hex[:10]}",
+                path=str(manager.get(importance_name).path),
+                type="feature_importance",
+                title=f"{importance_name} legacy feature importance",
+                description="XGBoost 特征重要性表（兼容旧命名）。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
                 artifact_id=f"model_{uuid4().hex[:10]}",
-                path=str(model_path),
+                path=str(standard_model_path),
                 type="model",
-                title=f"{output_name} XGBoost model",
+                title=f"{output_name}_model.joblib",
                 description="训练后的 XGBoost 模型文件。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"metrics_json_{uuid4().hex[:10]}",
+                path=str(metrics_json_path),
+                type="metrics_json",
+                title=f"{output_name}_metrics.json",
+                description="XGBoost 精度指标、验证方式和诊断信息 JSON。",
+                quality_status="created",
+                preview_available=False,
+            ),
+            ArtifactInfo(
+                artifact_id=f"report_{uuid4().hex[:10]}",
+                path=str(report_path),
+                type="report",
+                title=f"{output_name}_report.md",
+                description="XGBoost 建模报告。",
                 quality_status="created",
                 preview_available=False,
             ),
@@ -1220,9 +1658,29 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                     preview_available=True,
                 )
             )
+        image_artifacts = [
+            {
+                "artifact_id": f"image_{uuid4().hex[:10]}",
+                "path": str(item.get("path") or ""),
+                "type": "image",
+                "title": str(item.get("title") or item.get("name") or f"{output_name} model image"),
+                "description": str(item.get("description") or "XGBoost model visualization image."),
+                "quality_status": "created",
+                "preview_available": True,
+                "mime_type": "image/png",
+                "source_tool": "train_xgboost_fusion_model",
+                "owner_user_id": getattr(manager, "current_user_id", ""),
+                "session_id": getattr(manager, "current_session_id", ""),
+                "meta": {"image_name": str(item.get("name") or ""), "output_name": output_name},
+            }
+            for item in image_outputs
+            if isinstance(item, dict) and item.get("path")
+        ]
+        artifacts.extend(image_artifacts)
         task_id = f"train_xgboost_fusion_model_{uuid4().hex[:10]}"
         model_result_id = generate_model_result_id("XGBoost", output_name)
-        artifact_dicts = [item.to_dict() for item in artifacts]
+        artifact_dicts = [item.to_dict() if isinstance(item, ArtifactInfo) else item for item in artifacts]
+        first_figure_path = str(image_outputs[0].get("path") or "") if image_outputs and isinstance(image_outputs[0], dict) else ""
         manager.register_model_result(
             model_result_id=model_result_id,
             task_id=task_id,
@@ -1232,11 +1690,18 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             result_dataset=saved_name,
             metrics_dataset=metrics_name,
             metrics_path=str(manager.get(metrics_name).path),
-            figure_path=str(residual_map_path) if residual_map_path else "",
+            figure_path=str(residual_map_path) if residual_map_path else first_figure_path,
             artifact_ids=[str(item.get("artifact_id") or "") for item in artifact_dicts if item.get("artifact_id")],
             artifacts=artifact_dicts,
             metrics=metrics.get("spatial_cv") if isinstance(metrics.get("spatial_cv"), dict) else metrics.get("overall") if isinstance(metrics.get("overall"), dict) else metrics,
-            diagnostics={"metrics": metrics, "spatial_diagnostics": spatial_diag, "features": features, "target_col": target_col},
+            diagnostics={
+                "metrics": metrics,
+                "spatial_diagnostics": spatial_diag,
+                "features": features,
+                "target_col": target_col,
+                "visualization_warnings": visualization_warnings,
+                "skipped_images": skipped_images,
+            },
         )
         return tool_result_ok(
             "train_xgboost_fusion_model",
@@ -1245,18 +1710,39 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             outputs={
                 "model_result_id": model_result_id,
                 "result_dataset": saved_name,
+                "target_column": target_col,
                 "prediction_column": pred_col,
+                "cv_prediction_column": cv_pred_col if cv_pred_col in df.columns else "",
                 "residual_column": resid_col,
+                "predictions_dataset": predictions_name,
+                "residuals_dataset": residuals_name,
                 "metrics_dataset": metrics_name,
                 "importance_dataset": importance_name,
+                "standard_importance_dataset": standard_importance_name,
                 "moran_dataset": moran_table_name,
-                "model_path": str(model_path),
+                "model_path": str(standard_model_path),
+                "legacy_model_path": str(model_path),
+                "metrics_json_path": str(metrics_json_path),
+                "report_path": str(report_path),
                 "summary_path": str(meta_path),
                 "residual_map_path": str(residual_map_path) if residual_map_path else "",
+                "fold_column": cv_fold_col if cv_fold_col in df.columns else "",
+                "cv_scope_column": cv_scope_col if cv_scope_col in df.columns else "",
+                "cv_available_column": cv_available_col if cv_available_col in df.columns else "",
+                "lon_col": coord_lon_col,
+                "lat_col": coord_lat_col,
+                "images": image_outputs,
+                "skipped_images": skipped_images,
             },
             artifacts=artifacts,
             summary="\n".join(reply_lines),
-            diagnostics={"metrics": metrics, "spatial_diagnostics": spatial_diag},
+            diagnostics={
+                "metrics": metrics,
+                "spatial_diagnostics": spatial_diag,
+                "visualization_warnings": visualization_warnings,
+                "skipped_images": skipped_images,
+            },
+            warnings=[str(item) for item in visualization_warnings],
             next_actions=["解释模型指标、特征重要性和残差空间分布。", "检查残差是否存在空间聚集，并考虑补充空间特征。"],
         ).to_json()
 

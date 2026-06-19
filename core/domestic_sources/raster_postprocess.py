@@ -27,13 +27,49 @@ def _result_dataset_names(result: dict[str, Any]) -> list[str]:
 
 def _raster_dataset_names(manager: DataManager, names: list[str]) -> list[str]:
     rasters: list[str] = []
+    seen_paths: set[Path] = set()
+    seen_fingerprints: set[tuple[Any, ...]] = set()
+
+    def _normal_name(path: Path) -> str:
+        name = path.name.lower()
+        return re.sub(r"^[0-9a-f]{32}_", "", name)
+
     for name in names:
         try:
             record = manager.get(name)
         except Exception:
             continue
-        if record.data_type == "raster":
-            rasters.append(name)
+        if record.data_type != "raster":
+            continue
+        try:
+            raster_path = Path(manager.get_raster_path(name)).resolve()
+        except Exception:
+            raster_path = Path(record.path).resolve()
+        if raster_path in seen_paths:
+            continue
+        seen_paths.add(raster_path)
+        try:
+            with rasterio.open(raster_path) as src:
+                stat = raster_path.stat()
+                fingerprint = (
+                    _normal_name(raster_path),
+                    int(stat.st_size),
+                    str(src.crs) if src.crs else "",
+                    int(src.count),
+                    str(src.dtypes[0]) if src.dtypes else "",
+                    int(src.width),
+                    int(src.height),
+                    round(abs(float(src.transform.a)), 12),
+                    round(abs(float(src.transform.e)), 12),
+                    tuple(round(float(v), 9) for v in src.bounds),
+                )
+        except Exception:
+            fingerprint = ()
+        if fingerprint and fingerprint in seen_fingerprints:
+            continue
+        if fingerprint:
+            seen_fingerprints.add(fingerprint)
+        rasters.append(name)
     return rasters
 
 
@@ -329,7 +365,7 @@ def standardize_raster_download_result(
     """
 
     existing = result.get("raster_standardization")
-    if isinstance(existing, dict) and existing.get("action") in {"mosaicked", "mosaicked_and_clipped", "single_raster", "skipped", "failed"}:
+    if isinstance(existing, dict) and existing.get("action") in {"mosaicked", "mosaicked_and_clipped", "single_raster", "single_raster_clipped", "skipped", "failed"}:
         return result
 
     dataset_names = _ensure_raster_datasets_from_paths(manager, result, output_name=output_name)
@@ -342,6 +378,42 @@ def standardize_raster_download_result(
     if len(raster_names) == 1:
         name = raster_names[0]
         path = str(manager.get_raster_path(name))
+        clip_name = _existing_clip_vector(manager, clip_vector)
+        if clip_name:
+            output_stem = Path(output_name or name).stem
+            try:
+                final_dataset, final_path = _write_mosaic(
+                    manager,
+                    [name],
+                    output_name=f"{output_stem}_clipped",
+                    clip_vector=clip_name,
+                )
+            except Exception as exc:
+                message = str(exc)
+                if fail_on_mosaic_error:
+                    raise RuntimeError(message)
+                result["mosaic_error"] = message
+                result["raster_standardization"] = {"action": "failed", "reason": "single_raster_clip_failed"}
+                return result
+
+            result["dataset_name"] = final_dataset
+            result["final_dataset_name"] = final_dataset
+            result["path"] = final_path
+            result["output_path"] = final_path
+            result["final_output_path"] = final_path
+            package_path = _package_final_raster(manager, final_path, output_name)
+            if package_path:
+                result["zip_path"] = package_path
+                result["package_path"] = package_path
+            result["raster_standardization"] = {
+                "action": "single_raster_clipped",
+                "source_dataset": name,
+                "input_raster_count": 1,
+                "clip_vector": clip_name,
+                "path": final_path,
+            }
+            return result
+
         result.setdefault("dataset_name", name)
         result.setdefault("path", path)
         result.setdefault("output_path", path)

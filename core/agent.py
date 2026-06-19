@@ -20,6 +20,7 @@ else:
     _AGENT_DEPENDENCY_IMPORT_ERROR = None
 
 from .config import Settings
+from .agent_policy import load_global_agent_policy
 from .llm_config import validate_llm_config
 if TYPE_CHECKING:
     from .data_manager import DataManager
@@ -55,17 +56,12 @@ except Exception:  # pragma: no cover
     start_gscloud_tile_process = None  # type: ignore
 
 
-SYSTEM_PROMPT = """
-你是一个交互式 AI GIS 智能体，负责基于当前工作区数据、对话上下文和工具结果完成数据检查、处理、空间分析、制图、建模与结果解释。
-
-工作原则：
-1. 必须基于用户提供的上下文、当前工作区和工具返回结果回答。
-2. 不得编造字段名、文件路径、坐标系、统计值、模型指标或图件内容。
-3. 如果缺少关键输入，先做最小化追问；如果上下文足够，优先调用合适工具验证后再回答。
-4. 每次工具调用都应服务于当前任务计划，不要做无关操作。
-5. 解释结果时说明已完成操作、使用的数据、关键结果、输出文件、含义、风险和下一步建议。
-6. 外部数据下载、账号、验证码、付费或平台凭据相关流程必须遵守权限和安全边界，不绕过访问控制。
-""".strip()
+SYSTEM_PROMPT = (
+    load_global_agent_policy()
+    + "\n\n"
+    + "职责范围：基于当前工作区数据、对话上下文、候选 Tool Cards、GIS 知识片段和真实工具结果，"
+    + "完成数据检查、处理、空间分析、制图、建模与结果解释。"
+)
 
 
 def _remove_default_agent_admin_tool_hints(prompt: str) -> str:
@@ -333,9 +329,9 @@ class GISAgent:
             )
         return blocks
 
-    def register_file(self, file_path: str) -> str:
-        dataset_name = self.manager.load_path(file_path)
-        return f"已加载数据: {dataset_name}\n{self.manager.dataset_brief()}"
+    def register_file(self, file_path: str, dataset_name: str = "", original_filename: str = "") -> str:
+        loaded_name = self.manager.load_path(file_path, name=dataset_name or None, original_filename=original_filename)
+        return f"上传成功：{original_filename or Path(file_path).name}（数据集：{loaded_name}）"
 
     def _append_direct_reply(self, user_text: str, reply: str, history: list[Any] | None) -> tuple[str, list[Any]]:
         messages = list(history or [])
@@ -792,7 +788,12 @@ class GISAgent:
         if not user_id:
             return json.dumps({"ok": False, "error": "没有识别到用户邮箱或 user_id。示例：为 test@example.com 提交..."}, ensure_ascii=False, indent=2)
         region = "四川省" if "四川" in text else ""
-        account_mode = "platform" if "平台账号" in text else "own"
+        if any(marker in text for marker in ("\u81ea\u5df1\u7684\u8d26\u53f7", "\u81ea\u6709\u8d26\u53f7", "\u4e2a\u4eba\u8d26\u53f7")):
+            account_mode = "own"
+        elif "\u5e73\u53f0\u8d26\u53f7" in text:
+            account_mode = "platform"
+        else:
+            account_mode = commercial.default_account_mode(user_id, "gscloud")
         output_name = self._extract_output_name(text, default=("sichuan_dem" if region == "四川省" else "gscloud_dem"))
         max_tiles = self._extract_max_tiles(text, default=0)
 

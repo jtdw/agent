@@ -30,6 +30,7 @@ export default defineConfig({
       env: {
         GIS_AGENT_WORKDIR: realBackendWorkdir,
         LLM_PROVIDER: 'fake',
+        GIS_AGENT_E2E_LLM_FIXTURES: '1',
         ENABLE_LLM_INTENT_CLASSIFIER: '0',
         GIS_AGENT_ENABLE_LLM_INTENT: '0',
         FALLBACK_TO_RULE_CLASSIFIER: '1',

@@ -27,6 +27,30 @@ class GSCloudDownloadRecoveryTests(unittest.TestCase):
             )
         )
 
+    def test_detects_chrome_error_page_when_body_mentions_gscloud_download_url(self) -> None:
+        text = (
+            "\u627e\u4e0d\u5230\u4ee5\u4e0b Web \u5730\u5740\u7684\u7f51\u9875:\n"
+            "https://bjdl.gscloud.cn/sources/download/306/utm_srtm_57_06?sid=x&uid=1\n"
+            "HTTP ERROR 404"
+        )
+
+        self.assertTrue(
+            is_gscloud_transient_download_error(
+                "chrome-error://chromewebdata/",
+                "\u627e\u4e0d\u5230\u6b64 bjdl.gscloud.cn \u9875",
+                text,
+            )
+        )
+
+    def test_detects_direct_gscloud_download_url_even_before_error_body_is_readable(self) -> None:
+        self.assertTrue(
+            is_gscloud_transient_download_error(
+                "https://bjdl.gscloud.cn/sources/download/306/utm_srtm_57_06?sid=x&uid=1",
+                "",
+                "",
+            )
+        )
+
     def test_does_not_flag_normal_access_table(self) -> None:
         self.assertFalse(
             is_gscloud_transient_download_error(
@@ -41,8 +65,8 @@ class GSCloudDownloadRecoveryTests(unittest.TestCase):
         self.assertEqual(normalize_refresh_attempts("3"), 3)
         self.assertEqual(normalize_refresh_attempts("99"), 8)
 
-    def test_tile_download_event_timeout_is_capped_for_fast_recovery(self) -> None:
-        self.assertEqual(per_tile_download_timeout_ms(1800), 45_000)
+    def test_tile_download_event_timeout_allows_slow_gscloud_file_preparation(self) -> None:
+        self.assertEqual(per_tile_download_timeout_ms(1800), 240_000)
         self.assertEqual(per_tile_download_timeout_ms(10), 30_000)
 
     def test_download_entrypoints_use_refresh_recovery(self) -> None:
@@ -59,6 +83,20 @@ class GSCloudDownloadRecoveryTests(unittest.TestCase):
             with self.subTest(path=str(path)):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn("recover_gscloud_download_from_error_page", source)
+
+    def test_stable_tile_downloader_restores_search_page_and_persists_failure_steps(self) -> None:
+        source = Path("core/domestic_sources/gscloud_stable_downloader.py").read_text(encoding="utf-8")
+
+        self.assertIn("def _restore_identifier_search_page", source)
+        self.assertIn("def _click_and_wait_for_download", source)
+        self.assertIn('page.on("download"', source)
+        self.assertIn("_restore_identifier_search_page(page, start_url)", source)
+        self.assertIn(".download-img", source)
+        self.assertIn("td:last-child img", source)
+        self.assertLess(
+            source.index("_update_status(status_path, download_steps=step_records"),
+            source.index("if not downloaded:"),
+        )
 
 
 if __name__ == "__main__":

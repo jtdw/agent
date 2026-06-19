@@ -68,6 +68,22 @@ class ModelResultDiscoveryTests(unittest.TestCase):
             self.assertEqual(results[0]["model_result_id"], "model_result_registered")
             self.assertEqual(results[0]["metrics"]["RMSE"], 0.1)
 
+    def test_dashboard_skips_stale_model_metric_artifact_instead_of_failing(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            missing_path = service.manager.derived_dir / "stale_demo_xgb_metrics.csv"
+            service.manager.register_artifact(
+                artifact_id="stale_metrics",
+                path=str(missing_path),
+                type="metrics",
+                title="stale_demo_xgb_metrics.csv",
+            )
+
+            dashboard = service.dashboard()
+
+            self.assertIn("model_results", dashboard)
+            self.assertFalse(any(result.get("metrics_dataset") == "stale_demo_xgb_metrics" for result in dashboard["model_results"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,8 +18,8 @@ from .gscloud_products import (
     LANDSAT8_OLI_TIRS,
     MOD021KM_1KM_SURFACE_REFLECTANCE,
     MODEV1F_CHINA_250M_EVI_5DAY,
-    MODL1D_CHINA_1KM_LST_DAILY,
-    MODND1D_CHINA_500M_NDVI_DAILY,
+    MODL1T_CHINA_1KM_LST_COMPOSITE,
+    MODND1T_CHINA_500M_NDVI_10DAY,
     SENTINEL2_MSI,
 )
 from .gscloud_reliability import inspect_storage_state, validate_download_artifact
@@ -30,6 +30,7 @@ from .gscloud_scene_table import (
     get_scene_table_rows,
     goto_scene_page,
     scan_scene_table_pages,
+    search_scene_row_by_id,
     select_scene_records,
 )
 from .gscloud_sentinel2 import _parse_sentinel2_row
@@ -106,8 +107,8 @@ def _select_landsat_records(records: list[dict[str, Any]], options: dict[str, An
 
 VERIFICATION_SPECS: dict[str, VerificationSpec] = {
     LANDSAT8_OLI_TIRS.key: VerificationSpec(LANDSAT8_OLI_TIRS.key, _parse_landsat_row, _try_select_landsat_available, _select_landsat_records),
-    MODND1D_CHINA_500M_NDVI_DAILY.key: VerificationSpec(MODND1D_CHINA_500M_NDVI_DAILY.key, _parse_modnd1d_row, _try_select_data_available, _select_modnd1d_records),
-    MODL1D_CHINA_1KM_LST_DAILY.key: VerificationSpec(MODL1D_CHINA_1KM_LST_DAILY.key, _parse_modl1d_row, _try_select_data_available, _select_modl1d_records),
+    MODND1T_CHINA_500M_NDVI_10DAY.key: VerificationSpec(MODND1T_CHINA_500M_NDVI_10DAY.key, _parse_modnd1d_row, _try_select_data_available, _select_modnd1d_records),
+    MODL1T_CHINA_1KM_LST_COMPOSITE.key: VerificationSpec(MODL1T_CHINA_1KM_LST_COMPOSITE.key, _parse_modl1d_row, _try_select_data_available, _select_modl1d_records),
     MODEV1F_CHINA_250M_EVI_5DAY.key: VerificationSpec(MODEV1F_CHINA_250M_EVI_5DAY.key, _parse_modev1f_row, _try_select_data_available, _select_default_records),
     MOD021KM_1KM_SURFACE_REFLECTANCE.key: VerificationSpec(MOD021KM_1KM_SURFACE_REFLECTANCE.key, _parse_mod021km_row, _try_select_data_available, _select_default_records),
     SENTINEL2_MSI.key: VerificationSpec(SENTINEL2_MSI.key, _parse_sentinel2_row, _try_select_data_available, _select_sentinel2_records),
@@ -206,7 +207,9 @@ def verify_gscloud_scene_download(
             )
             row = find_scene_row_by_id(get_scene_table_rows(page), scene["scene_id"])
             if row is None:
-                raise RuntimeError(f"已选中 {scene['scene_id']}，但无法在第 {scene.get('page_no')} 页重新定位该行。")
+                row = search_scene_row_by_id(page, scene["scene_id"], parse_row=spec.parse_row)
+            if row is None:
+                raise RuntimeError(f"已选中 {scene['scene_id']}，但按第 {scene.get('page_no')} 页和数据标识搜索都无法重新定位该行。")
             hits = _download_selector_hits(row)
             if not hits:
                 raise RuntimeError(f"已定位 {scene['scene_id']}，但未找到可点击下载入口。")

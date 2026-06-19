@@ -58,6 +58,14 @@ async function sendChat(page: Page, text: string): Promise<{ requestBody: ChatAs
   return { requestBody, responseBody, response };
 }
 
+function presentation(body: Record<string, unknown>) {
+  return (body.presentation_result || {}) as Record<string, unknown>;
+}
+
+function artifactRefs(body: Record<string, unknown>) {
+  return ((presentation(body).artifact_refs || []) as Array<Record<string, unknown>>);
+}
+
 async function selectFirstArtifact(page: Page) {
   page.context().on('page', (popup) => void popup.close().catch(() => {}));
   await page.getByTestId('analysis-panel-open').click();
@@ -73,17 +81,19 @@ test('real backend browser flow uploads GeoJSON, maps, and explains selected res
   await uploadFixture(page, 'e2e_counties.geojson');
 
   const check = await sendChat(page, 'check this dataset');
-  expect(['deterministic_tool', 'deterministic_workflow']).toContain(check.responseBody.mode);
+  expect(check.responseBody.mode).toBe('coordinated_workflow');
+  expect(presentation(check.responseBody).status).toBe('succeeded');
 
   const map = await sendChat(page, 'plot population density map');
-  expect(['deterministic_tool', 'deterministic_workflow']).toContain(map.responseBody.mode);
-  expect(((map.responseBody.result_panel as Record<string, unknown>)?.files as unknown[] | undefined)?.length).toBeGreaterThan(0);
+  expect(map.responseBody.mode).toBe('coordinated_workflow');
+  expect(presentation(map.responseBody).status).toBe('succeeded');
+  expect(artifactRefs(map.responseBody).length).toBeGreaterThan(0);
 
   await selectFirstArtifact(page);
   const followup = await sendChat(page, '这个结果说明什么');
   const context = followup.requestBody.frontend_context || {};
-  expect(context.selected_artifact_id || context.selected_artifact_path).toBeTruthy();
-  expect(['builtin', 'deterministic_context', 'deterministic_tool', 'deterministic_workflow']).toContain(followup.responseBody.mode);
+  expect(context.selected_artifact_id).toBeTruthy();
+  expect(['builtin', 'deterministic_context', 'coordinated_workflow', 'clarification']).toContain(followup.responseBody.mode);
 });
 
 test('real backend browser flow uploads CSV and runs table-to-points map workflow', async ({ page }) => {
@@ -92,15 +102,15 @@ test('real backend browser flow uploads CSV and runs table-to-points map workflo
   await uploadFixture(page, 'e2e_points.csv');
 
   const map = await sendChat(page, 'plot population density map');
-  expect(map.responseBody.mode).toBe('deterministic_workflow');
-  const files = ((map.responseBody.result_panel as Record<string, unknown>)?.files as Array<Record<string, unknown>> | undefined) || [];
-  expect(files.length).toBeGreaterThan(0);
-  expect(files.some((item) => item.kind === 'derived' && String(item.path || '').endsWith('.geojson'))).toBeTruthy();
-  expect(String(map.responseBody.reply || '')).toContain('table_to_points');
+  expect(map.responseBody.mode).toBe('coordinated_workflow');
+  expect(presentation(map.responseBody).status).toBe('succeeded');
+  expect(artifactRefs(map.responseBody).length).toBeGreaterThan(0);
+  const steps = (presentation(map.responseBody).executed_steps || []) as Array<Record<string, unknown>>;
+  expect(steps.some((item) => item.tool_name === 'table_to_points')).toBeTruthy();
 
   await selectFirstArtifact(page);
   const followup = await sendChat(page, '这个结果说明什么');
   const context = followup.requestBody.frontend_context || {};
-  expect(context.selected_artifact_id || context.selected_artifact_path).toBeTruthy();
-  expect(['deterministic_context', 'deterministic_tool', 'deterministic_workflow', 'builtin']).toContain(followup.responseBody.mode);
+  expect(context.selected_artifact_id).toBeTruthy();
+  expect(['deterministic_context', 'coordinated_workflow', 'clarification', 'builtin']).toContain(followup.responseBody.mode);
 });

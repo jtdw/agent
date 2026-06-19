@@ -212,6 +212,36 @@ def resolve_followup(prompt: str, state: Any, dashboard: Any) -> dict[str, Any]:
     if selected_model and _has_any(text, ("模型效果", "模型结果", "这个模型", "指标", "效果怎么样")):
         return {"resolved": True, "reason": "matched_frontend_selected_model_result", "referenced_object": _frontend_model_object(selected_model, dashboard_dict)}
 
+    if _has_any(
+        lower,
+        (
+            "this model",
+            "the model",
+            "important factors",
+            "most important",
+            "feature importance",
+            "important features",
+            "which factors",
+            "关键因素",
+            "重要因素",
+            "特征重要性",
+            "哪些因素最重要",
+        ),
+    ):
+        if selected_model:
+            return {"resolved": True, "reason": "matched_frontend_selected_model_result", "referenced_object": _frontend_model_object(selected_model, dashboard_dict)}
+        model = _first_model_result(state_dict, dashboard_dict)
+        if model:
+            return {
+                "resolved": True,
+                "reason": "matched_recent_model_result",
+                "referenced_object": {
+                    "type": "model_result",
+                    "label": str(model.get("model") or model.get("output_prefix") or "模型结果"),
+                    "data": model,
+                },
+            }
+
     if _has_any(text, ("这个地方", "这个区域", "这个点", "这里", "异常")):
         if selected_feature:
             return {"resolved": True, "reason": "matched_frontend_selected_feature", "referenced_object": _frontend_feature_object(selected_feature)}

@@ -60,6 +60,260 @@ class ChatResponseContractTests(unittest.TestCase):
         self.assertIn("登录", result["reply"])
         self.assertIn("DEM", result["reply"])
 
+    def test_api_artifact_decoration_hides_internal_paths_and_scope_ids(self) -> None:
+        from api_server import _decorate_response_artifacts
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.manager.set_runtime_scope(user_id="u_1", session_id="s_1")
+            service.current_session_id = "s_1"
+            artifact_path = service.manager.derived_dir / "xgb_metrics.csv"
+            artifact_path.write_text("metric,value\nRMSE,0.1\n", encoding="utf-8")
+            artifact = service.manager.register_artifact(path=str(artifact_path), type="metrics", title="xgb_metrics.csv")
+            raw_response = {
+                "artifacts": [artifact],
+                "user_facing_result": {
+                    "primary_artifacts": [artifact],
+                    "download_bundle": None,
+                    "debug": {},
+                },
+                "messages": [{"role": "assistant", "content": "ok", "meta": {"artifacts": [artifact], "user_facing_result": {"primary_artifacts": [artifact]}}}],
+            }
+
+            decorated = _decorate_response_artifacts(service, "u_1", raw_response)
+
+            payloads = [
+                decorated["artifacts"][0],
+                decorated["user_facing_result"]["primary_artifacts"][0],
+                decorated["messages"][0]["meta"]["artifacts"][0],
+                decorated["messages"][0]["meta"]["user_facing_result"]["primary_artifacts"][0],
+            ]
+            for payload in payloads:
+                self.assertEqual(payload["artifact_id"], artifact["artifact_id"])
+                self.assertIn("/api/artifacts/", payload["download_url"])
+                self.assertEqual(payload["filename"], "xgb_metrics.csv")
+                self.assertNotIn("path", payload)
+                self.assertNotIn("absolute_path", payload)
+                self.assertNotIn("owner_user_id", payload)
+                self.assertNotIn("session_id", payload)
+
+    def test_response_quality_gate_sanitizes_public_debug_leaks(self) -> None:
+        from core.response_quality import validate_response_before_send
+
+        raw = {
+            "reply": "已完成。\nworkspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv",
+            "user_facing_result": {
+                "summary": "已完成",
+                "primary_artifacts": [],
+                "technical_details": {"path": "workspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv"},
+                "debug": {"raw_workflow_result": {"steps": [{"input": {"path": "secret"}}]}},
+            },
+            "artifacts": [
+                {
+                    "artifact_id": "a1",
+                    "path": "workspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv",
+                    "owner_user_id": "u_1",
+                    "session_id": "s_1",
+                }
+            ],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "output: {'path': 'workspace/users/u_1/x.csv'}",
+                    "meta": {"plan": {"input": "raw"}, "diagnostics": {"x": 1}},
+                }
+            ],
+        }
+
+        cleaned = validate_response_before_send(raw, user_id="u_1", session_id="s_1")
+        rendered = str(cleaned)
+
+        self.assertNotIn("workspace\\users", cleaned["reply"])
+        self.assertNotIn("workspace/users", rendered)
+        self.assertNotIn("owner_user_id", rendered)
+        self.assertNotIn("session_id", rendered)
+        self.assertNotIn("'input': 'raw'", rendered)
+        self.assertIn("quality_warnings", cleaned["user_facing_result"])
+
+    def test_response_quality_preserves_sanitized_presentation_fields(self) -> None:
+        from core.response_quality import validate_response_before_send
+
+        raw = {
+            "reply": "ok",
+            "normalized_results": [
+                {
+                    "status": "succeeded",
+                    "step_id": "plot",
+                    "tool_name": "plot_dataset",
+                    "outputs": {"result_dataset": "map", "path": "workspace/users/u1/sessions/s1/x.png"},
+                    "diagnostics": {"crs": "EPSG:4326", "log_path": "workspace/users/u1/log.txt"},
+                    "artifacts": [{"artifact_id": "a1", "path": "workspace/users/u1/sessions/s1/x.png"}],
+                    "extra_raw": {"path": "secret"},
+                }
+            ],
+            "presentation_result": {"status": "succeeded", "artifact_refs": [{"artifact_id": "a1"}]},
+            "execution_summary": {"status": "succeeded", "artifact_count": 1},
+            "execution_trace": {"results": [{"outputs": {"path": "secret"}}]},
+            "coordinator_execution": {"tool_results": [{"outputs": {"path": "secret"}}]},
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "ok",
+                    "meta": {
+                        "normalized_results": [
+                            {
+                                "status": "succeeded",
+                                "step_id": "plot",
+                                "tool_name": "plot_dataset",
+                                "outputs": {"result_dataset": "map", "path": "workspace/users/u1/sessions/s1/x.png"},
+                                "diagnostics": {"crs": "EPSG:4326"},
+                            }
+                        ],
+                        "presentation_result": {"status": "succeeded", "artifact_refs": [{"artifact_id": "a1"}]},
+                        "execution_summary": {"status": "succeeded"},
+                        "execution_trace": {"results": []},
+                    },
+                }
+            ],
+        }
+
+        cleaned = validate_response_before_send(raw, user_id="u1", session_id="s1")
+        rendered = str(cleaned)
+
+        self.assertIn("presentation_result", cleaned)
+        self.assertIn("execution_summary", cleaned)
+        self.assertEqual(cleaned["normalized_results"][0]["outputs"]["result_dataset"], "map")
+        self.assertEqual(cleaned["normalized_results"][0]["diagnostics"]["crs"], "EPSG:4326")
+        self.assertNotIn("execution_trace", rendered)
+        self.assertNotIn("coordinator_execution", rendered)
+        self.assertNotIn("workspace/users", rendered)
+        self.assertNotIn("log_path", rendered)
+
+    def test_result_interpreter_does_not_read_raw_workflow_result_as_success(self) -> None:
+        import json
+
+        from core.result_interpreter import interpret_result
+
+        workflow_result = {
+            "ok": True,
+            "workflow_id": "wf_1",
+            "steps": [
+                {
+                    "step_id": "train_model",
+                    "tool_name": "train_xgboost_fusion_model",
+                    "status": "success",
+                    "validated_tool_args": {"dataset_name": "demo"},
+                    "tool_result": {
+                        "ok": True,
+                        "tool_name": "train_xgboost_fusion_model",
+                        "inputs": {"dataset_name": "demo"},
+                        "outputs": {"model_result_id": "m1"},
+                        "artifacts": [{"artifact_id": "a1", "path": "workspace/users/u_1/derived/predictions.csv", "type": "dataset", "title": "predictions"}],
+                        "diagnostics": {"metrics": {"spatial_cv": {"RMSE": 0.12, "MAE": 0.09, "NSE": 0.7, "Bias": 0.01, "n": 48}}},
+                    },
+                }
+            ],
+            "final_artifacts": [{"artifact_id": "a1", "path": "workspace/users/u_1/derived/predictions.csv", "type": "dataset", "title": "predictions"}],
+            "final_summary": "Workflow completed successfully.",
+            "failed_step": "",
+            "diagnostics": {"executed_steps": ["train_model"]},
+            "next_actions": [],
+        }
+
+        reply = interpret_result(
+            "训练 XGBoost",
+            {"intent": "modeling"},
+            {"task_type": "modeling"},
+            json.dumps(workflow_result, ensure_ascii=False),
+            {"active_dataset": {"name": "demo"}},
+            {},
+        )
+
+        self.assertIn("canonical", reply.lower())
+        self.assertNotIn("XGBoost", reply)
+        self.assertNotIn("RMSE", reply)
+        self.assertNotIn("input:", reply)
+        self.assertNotIn("output:", reply)
+        self.assertNotIn("workspace/users", reply)
+        self.assertNotIn("裁剪或处理结果", reply)
+
+
+    def test_coordinated_chat_meta_prefers_presentation_result_without_legacy_tool_results(self) -> None:
+        import json
+        from unittest import mock
+
+        import pandas as pd
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.current_session_id = service.create_new_session()
+            service.manager.put_table("stations", pd.DataFrame({"x": [1, 2], "y": [3, 4]}))
+            active_plan = {
+                "status": "ready",
+                "mode": "active",
+                "planner_source": "test",
+                "executes_tools": False,
+                "plan": {
+                    "primary_goal": "describe_dataset",
+                    "task_type": "data_upload_analysis",
+                    "intent": "analysis",
+                    "operation": "",
+                    "input_assets": [],
+                    "asset_roles": {},
+                    "requested_downloads": [],
+                    "study_area": {},
+                    "time_range": {},
+                    "spatial_resolution": "",
+                    "candidate_tools": ["describe_dataset"],
+                    "selected_tools": ["describe_dataset"],
+                    "workflow_plan": [
+                        {"step_id": "describe", "tool_name": "describe_dataset", "validated_tool_args": {"dataset_name": "stations"}},
+                    ],
+                    "tool_plan": [],
+                    "validated_tool_args": {},
+                    "expected_outputs": [],
+                    "requires_confirmation": False,
+                    "clarification_question": "",
+                    "confidence": 0.9,
+                    "source_attribution": {},
+                    "explicit_history_references": [],
+                },
+            }
+
+            def decide(plan, current_step, remaining_steps, execution_trace, user_request, **kwargs):
+                if current_step:
+                    return {
+                        "status": "ready",
+                        "decision": {
+                            "decision": "continue",
+                            "next_step_id": current_step["step_id"],
+                            "selected_next_action": "",
+                            "required_tool": current_step["tool_name"],
+                            "required_inputs": current_step.get("validated_tool_args") or {},
+                            "reason": "run canonical step",
+                            "user_question": "",
+                            "confidence": 0.9,
+                        },
+                    }
+                return {"status": "ready", "decision": {"decision": "stop_success", "confidence": 0.9}}
+
+            with mock.patch("core.service.build_llm_task_plan", return_value=active_plan):
+                with mock.patch("core.coordinated_executor.build_coordinator_decision", side_effect=decide):
+                    result = service.ask("describe stations")
+
+            assistant = [item for item in service.manager.database.list_messages(service.current_session_id) if item["role"] == "assistant"][-1]
+            meta = assistant["meta"]
+            rendered = json.dumps(meta, ensure_ascii=False, default=str)
+
+            self.assertIn("presentation_result", meta)
+            self.assertIn("execution_summary", meta)
+            self.assertEqual(meta["presentation_result"]["schema_version"], "presentation-result/v1")
+            self.assertEqual(meta["execution_summary"]["schema_version"], "execution-summary/v1")
+            self.assertEqual(meta["result_rendering_path"], "presentation_result")
+            self.assertNotIn("tool_results", meta)
+            self.assertNotIn("workflow_result", rendered)
+            self.assertNotIn("workspace\\users", rendered)
+            self.assertEqual(result["mode"], "coordinated_workflow")
 
     def test_response_postprocess_dedupes_result_sections(self) -> None:
         raw = "\n".join(

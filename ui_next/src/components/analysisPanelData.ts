@@ -10,6 +10,10 @@ export type AnalysisMetricRow = {
   R?: number | string | null;
   RMSE?: number | string | null;
   NSE?: number | string | null;
+  target_coverage?: number | string | null;
+  empirical_coverage?: number | string | null;
+  mean_interval_width?: number | string | null;
+  interval_score?: number | string | null;
   [key: string]: unknown;
 };
 
@@ -107,19 +111,43 @@ function bestByRmse(rows: ModelMetricDatum[]) {
   return rows.filter((row) => Number.isFinite(row.r)).reduce((best, row) => row.r > best.r ? row : best, rows[0]);
 }
 
+function gcpMetricRow(rows: AnalysisMetricRow[]) {
+  return rows.find((row) => {
+    const name = modelName(row).toLowerCase();
+    return name.includes('gcp') || row.empirical_coverage !== undefined || row.target_coverage !== undefined || row.mean_interval_width !== undefined;
+  });
+}
+
+function metricCards(rows: AnalysisMetricRow[], bestModel?: ModelMetricDatum) {
+  const gcp = gcpMetricRow(rows);
+  if (gcp) {
+    return [
+      { label: 'Target Coverage', value: fmt(num(gcp.target_coverage)) },
+      { label: 'Empirical Coverage', value: fmt(num(gcp.empirical_coverage)) },
+      { label: 'Mean Width', value: fmt(num(gcp.mean_interval_width)) },
+      { label: 'Interval Score', value: fmt(num(gcp.interval_score)) }
+    ];
+  }
+  return bestModel ? [
+    { label: 'R', value: fmt(num(bestModel.r)) },
+    { label: 'RMSE', value: fmt(num(bestModel.rmse)) },
+    { label: 'NSE', value: fmt(num(bestModel.nse)) }
+  ] : [];
+}
+
 function downloads(dashboard: unknown, resultPanel?: ResultPanel | null): AnalysisDownload[] {
   if (resultPanel?.files?.length) {
     return resultPanel.files
       .map((item) => {
         const url = String(item.download_url || '');
         if (!url) return null;
-        const name = String(item.label || item.path || '成果文件');
+        const name = String(item.filename || item.label || item.name || '成果文件');
         const lower = name.toLowerCase();
         const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
         return { artifactId: String(item.artifact_id || ''), label: name, url, kind };
       })
       .filter((item): item is AnalysisDownload => Boolean(item))
-      .slice(0, 12);
+      .slice(0, 20);
   }
   const root = asRecord(dashboard);
   const modelArtifacts = asArray(root.model_results).flatMap((result) => asArray(result.artifacts));
@@ -130,7 +158,7 @@ function downloads(dashboard: unknown, resultPanel?: ResultPanel | null): Analys
       const url = String(item.download_url || '');
       if (!url || seen.has(url)) return null;
       seen.add(url);
-      const name = String(item.label || item.name || item.path || '成果文件');
+      const name = String(item.filename || item.label || item.name || item.title || '成果文件');
       const lower = name.toLowerCase();
       const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
       return { artifactId: String(item.artifact_id || item.id || ''), label: name, url, kind };
@@ -159,13 +187,10 @@ function recommendations(dashboard: unknown, resultPanel?: ResultPanel | null): 
 export function buildAnalysisPanelView(dashboard: unknown, resultPanel?: ResultPanel | null): AnalysisPanelView {
   const root = asRecord(dashboard);
   const latest = asRecord(root.latest_pipeline);
-  const rows = chartRows(metricRows(root));
+  const rawRows = metricRows(root);
+  const rows = chartRows(rawRows);
   const bestModel = rows.length ? bestByRmse(rows) : undefined;
-  const cards = bestModel ? [
-    { label: 'R', value: fmt(num(bestModel.r)) },
-    { label: 'RMSE', value: fmt(num(bestModel.rmse)) },
-    { label: 'NSE', value: fmt(num(bestModel.nse)) }
-  ] : [];
+  const cards = metricCards(rawRows, bestModel);
   const files = downloads(root, resultPanel);
   const steps = pipelineSteps(root);
   const advice = recommendations(root, resultPanel);

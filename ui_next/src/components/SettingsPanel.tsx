@@ -3,6 +3,7 @@ import { Globe2, Languages, Ruler, Settings, X } from 'lucide-react';
 import { useState } from 'react';
 import { GlassCard } from './GlassCard';
 import { ModalPortal } from './ModalPortal';
+import { CapabilityManagementPanel } from './CapabilityManagementPanel';
 
 export function SettingsPanel() {
   const [open, setOpen] = useState(false);
@@ -32,6 +33,7 @@ export function SettingsPanel() {
                     </div>
                   ))}
                 </div>
+                <CapabilityManagementPanel />
               </GlassCard>
             </motion.div>
             </motion.div>

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from ..data_manager import DataManager
-from ..domestic_sources.gscloud_adapter import gscloud_platform_state_path, gscloud_user_state_path
+from ..domestic_sources.gscloud_adapter import _find_region_gdf_for_tile_plan, gscloud_platform_state_path, gscloud_user_state_path
 from ..domestic_sources.gscloud_landsat import download_landsat8_oli_tirs_scenes
 from ..domestic_sources.gscloud_modev1f import download_modev1f_china_evi_5day
 from ..domestic_sources.gscloud_mod021km import download_mod021km_surface_reflectance
@@ -15,6 +16,7 @@ from ..domestic_sources.gscloud_modl1d import download_modl1d_china_lst_daily
 from ..domestic_sources.gscloud_modnd1d import download_modnd1d_china_ndvi_daily
 from ..domestic_sources.gscloud_reliability import classify_gscloud_failure, inspect_storage_state, resolve_download_region, validate_map_ready_artifact
 from ..domestic_sources.gscloud_sentinel2 import download_sentinel2_msi_scenes
+from ..domestic_sources.raster_postprocess import standardize_raster_download_result
 from .service import CommercialService
 
 
@@ -27,6 +29,51 @@ def _safe_write_json(path: Path, data: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     tmp.replace(path)
+
+
+def _safe_dataset_stem(value: str) -> str:
+    clean = re.sub(r"[^0-9A-Za-z_.\-\u4e00-\u9fff]+", "_", str(value or "").strip()).strip("._-")
+    return clean or "download_region"
+
+
+def _resolve_scene_clip_vector(
+    manager: DataManager,
+    resolved_region: dict[str, Any],
+    actual_region: str,
+    current: dict[str, Any],
+) -> str:
+    explicit_dataset = str(current.get("region_dataset") or resolved_region.get("region_dataset") or "").strip()
+    try:
+        gdf, source_name, _source_type = _find_region_gdf_for_tile_plan(
+            manager,
+            region=actual_region,
+            region_dataset=explicit_dataset,
+        )
+        if gdf is not None and not gdf.empty and source_name:
+            return str(source_name)
+    except Exception:
+        pass
+
+    bounds = resolved_region.get("bounds")
+    if not isinstance(bounds, (list, tuple)) or len(bounds) != 4:
+        return ""
+    try:
+        import geopandas as gpd
+        from shapely.geometry import box
+
+        minx, miny, maxx, maxy = [float(value) for value in bounds]
+        gdf = gpd.GeoDataFrame(
+            [{"region": actual_region or resolved_region.get("region") or "download_region"}],
+            geometry=[box(minx, miny, maxx, maxy)],
+            crs="EPSG:4326",
+        )
+        return manager.put_vector(
+            f"{_safe_dataset_stem(actual_region)}_download_boundary",
+            gdf,
+            filename=f"{_safe_dataset_stem(actual_region)}_download_boundary.geojson",
+        )
+    except Exception:
+        return ""
 
 
 def _resolve_storage_state_with_fallback(service: CommercialService, workdir: Path, job: dict[str, Any]) -> str:
@@ -74,12 +121,12 @@ def main() -> int:
         manager = DataManager(workdir)
         job = service.get_job(job_id)
         product_key = str(current.get("product_key") or job.get("resource_type") or "")
-        if "modl1d" in product_key:
-            stage = "scanning_gscloud_modl1d"
-        elif "modnd1d" in product_key:
-            stage = "scanning_gscloud_modnd1d"
-        elif "modev1f" in product_key:
-            stage = "scanning_gscloud_modev1f"
+        if "modl1" in product_key or "lst_composite" in product_key:
+            stage = "scanning_gscloud_modl1t"
+        elif "modnd1" in product_key or "ndvi_10day" in product_key:
+            stage = "scanning_gscloud_modnd1t"
+        elif "modev1t" in product_key or "modev1f" in product_key:
+            stage = "scanning_gscloud_modev1t"
         elif "mod021km" in product_key:
             stage = "scanning_gscloud_mod021km"
         elif "sentinel2" in product_key:
@@ -151,13 +198,13 @@ def main() -> int:
         })
         _safe_write_json(status_path, current)
 
-        if "modl1d" in product_key:
-            service._update_job(job_id, status="running", progress=35, stage="filtering_modl1d_available_lst")
+        if "modl1" in product_key or "lst_composite" in product_key:
+            service._update_job(job_id, status="running", progress=35, stage="filtering_modl1t_available_lst")
             result = download_modl1d_china_lst_daily(
                 manager=manager,
                 storage_state_path=state_path,
                 region=actual_region,
-                output_name=job.get("output_name") or "modl1d_lst",
+                output_name=job.get("output_name") or "modl1t_lst",
                 year=str(current.get("year") or ""),
                 start_date=str(current.get("start_date") or job.get("start_date") or ""),
                 end_date=str(current.get("end_date") or job.get("end_date") or ""),
@@ -168,13 +215,13 @@ def main() -> int:
                 auto_load=bool(current.get("auto_load", True)),
                 status_path=status_path,
             )
-        elif "modnd1d" in product_key:
-            service._update_job(job_id, status="running", progress=35, stage="filtering_modnd1d_available_ndvi")
+        elif "modnd1" in product_key or "ndvi_10day" in product_key:
+            service._update_job(job_id, status="running", progress=35, stage="filtering_modnd1t_available_ndvi")
             result = download_modnd1d_china_ndvi_daily(
                 manager=manager,
                 storage_state_path=state_path,
                 region=actual_region,
-                output_name=job.get("output_name") or "modnd1d_ndvi",
+                output_name=job.get("output_name") or "modnd1t_ndvi",
                 year=str(current.get("year") or ""),
                 start_date=str(current.get("start_date") or job.get("start_date") or ""),
                 end_date=str(current.get("end_date") or job.get("end_date") or ""),
@@ -185,13 +232,13 @@ def main() -> int:
                 auto_load=bool(current.get("auto_load", True)),
                 status_path=status_path,
             )
-        elif "modev1f" in product_key:
-            service._update_job(job_id, status="running", progress=35, stage="filtering_modev1f_available_evi")
+        elif "modev1t" in product_key or "modev1f" in product_key:
+            service._update_job(job_id, status="running", progress=35, stage="filtering_modev1t_available_evi")
             result = download_modev1f_china_evi_5day(
                 manager=manager,
                 storage_state_path=state_path,
                 region=actual_region,
-                output_name=job.get("output_name") or "modev1f_evi",
+                output_name=job.get("output_name") or "modev1t_evi",
                 year=str(current.get("year") or ""),
                 start_date=str(current.get("start_date") or job.get("start_date") or ""),
                 end_date=str(current.get("end_date") or job.get("end_date") or ""),
@@ -251,6 +298,22 @@ def main() -> int:
                 auto_load=bool(current.get("auto_load", True)),
                 status_path=status_path,
             )
+
+        clip_vector = _resolve_scene_clip_vector(manager, resolved_region, actual_region, current)
+        service._update_job(job_id, status="running", progress=86, stage="standardizing_scene_raster")
+        current.update({
+            "state": "STANDARDIZING_RASTER",
+            "message": "场景产品下载完成，正在执行标准栅格流程：解压、按区域边界裁剪、注册和打包。",
+            "clip_vector": clip_vector,
+            "updated_at": _now(),
+        })
+        _safe_write_json(status_path, current)
+        result = standardize_raster_download_result(
+            manager=manager,
+            result=result,
+            output_name=str(job.get("output_name") or current.get("output_name") or actual_region or "gscloud_scene"),
+            clip_vector=clip_vector,
+        )
 
         service._update_job(job_id, status="running", progress=90, stage="packaging_scene_result")
         quality_checks = []

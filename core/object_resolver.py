@@ -125,6 +125,39 @@ def _text_blob(item: dict[str, Any]) -> str:
     return " ".join(str(part or "") for part in parts)
 
 
+def _explicit_mentions(prompt: str) -> list[str]:
+    return [item.strip() for item in re.findall(r"@\{([^}]+)\}", str(prompt or "")) if item.strip()]
+
+
+def _dataset_ref_values(item: dict[str, Any]) -> set[str]:
+    values = {
+        str(item.get("name") or ""),
+        str(item.get("dataset_id") or ""),
+        str(item.get("id") or ""),
+        Path(str(item.get("path") or "")).stem,
+    }
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    values.update({str(meta.get("original_filename") or ""), Path(str(meta.get("original_filename") or "")).stem})
+    return {normalize_field_name(value) for value in values if str(value or "").strip()}
+
+
+def _match_explicit_dataset_reference(prompt: str, datasets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    mentions = [normalize_field_name(item) for item in _explicit_mentions(prompt)]
+    if not mentions:
+        return None
+    for mention in mentions:
+        matches = [item for item in datasets if mention in _dataset_ref_values(item)]
+        if len(matches) == 1:
+            return _ok("dataset", matches[0], confidence=1.0, source="explicit_mention")
+        if len(matches) > 1:
+            candidates = [
+                {"name": str(item.get("name") or item.get("dataset_id") or ""), "type": item.get("type") or item.get("data_type") or "", "score": 1.0, "data": item}
+                for item in matches
+            ]
+            return _empty("dataset", "Multiple dataset candidates matched explicit mention.", candidates=candidates[:5], clarify=True)
+    return _empty("dataset", "Explicit dataset mention was not found in the workspace.")
+
+
 def _looks_clipped(item: dict[str, Any]) -> bool:
     blob = normalize_field_name(_text_blob(item))
     return any(token in blob for token in ("clip", "clipped", "vectorclip", "裁剪"))
@@ -157,6 +190,11 @@ def _dataset_candidate_score(prompt: str, item: dict[str, Any], object_type: str
 def _resolve_dataset(prompt: str, context: dict[str, Any], state: dict[str, Any], manager: Any | None, object_type: str) -> dict[str, Any]:
     active = _active_dataset(context, state)
     text = normalize_field_name(prompt)
+    datasets = _collect_datasets(context, manager)
+    if object_type == "dataset":
+        explicit = _match_explicit_dataset_reference(prompt, datasets)
+        if explicit is not None:
+            return explicit
     if object_type == "dataset" and active and any(token in text for token in ("这个数据", "当前数据", "thisdata", "currentdata", "dataset")):
         return _ok("dataset", active, confidence=0.96, source="active_dataset")
 
@@ -167,7 +205,6 @@ def _resolve_dataset(prompt: str, context: dict[str, Any], state: dict[str, Any]
         if active and str(active.get("type") or active.get("data_type") or "") == "vector":
             return _ok("layer", active, confidence=0.82, source="active_dataset")
 
-    datasets = _collect_datasets(context, manager)
     scored = [
         {"name": str(item.get("name") or item.get("dataset_id") or ""), "type": item.get("type") or item.get("data_type") or "", "score": _dataset_candidate_score(prompt, item, object_type), "data": item}
         for item in datasets

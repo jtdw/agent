@@ -7,20 +7,30 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import api_server
-from core.config import Settings
-from core.service import GISWorkspaceService
+from core.commercial.service import CommercialService
 
 
 class CheckpointArtifactApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.service = GISWorkspaceService(Settings(api_key="", workdir=Path(self.tmp.name) / "workspace"))
+        self.original_workdir = api_server.base_settings.workdir
+        self.original_commercial = api_server.commercial_service
+        self.original_services = dict(api_server._workspace_services)
+        root = Path(self.tmp.name) / "workspace"
         api_server._workspace_services.clear()
-        api_server._workspace_services["anonymous"] = self.service
+        api_server.base_settings.workdir = root
+        api_server.base_settings.ensure_dirs()
+        api_server.commercial_service = CommercialService(root)
         self.client = TestClient(api_server.app)
+        self.user_id = self.client.post("/api/auth/register", json={"email": "artifact@example.com", "password": "password1"}).json()["user"]["user_id"]
+        self.service = api_server.workspace_for(self.user_id)
+        self.service.set_request_context(self.user_id, self.service.current_session_id)
 
     def tearDown(self) -> None:
         api_server._workspace_services.clear()
+        api_server._workspace_services.update(self.original_services)
+        api_server.base_settings.workdir = self.original_workdir
+        api_server.commercial_service = self.original_commercial
         self.tmp.cleanup()
 
     def test_artifact_metadata_and_download_use_artifact_id(self) -> None:

@@ -6,8 +6,16 @@ from typing import Any
 import pandas as pd
 from langchain.tools import tool
 
+from core.station_data import stm_archive_to_training_dataframe
 from core.tool_contracts import tool_result_error, tool_result_ok
 from core.tool_preconditions import validate_dataset_exists
+from core.workflows.data_package import (
+    build_data_package_profiles,
+    dumps_result,
+    ingest_data_package as _ingest_data_package,
+    plan_data_package_analysis as _plan_data_package_analysis,
+)
+from core.workflows.stm_soil_moisture import run_stm_soil_moisture_xgboost_workflow as _run_stm_xgb_workflow
 
 
 def _json(value: Any) -> str:
@@ -43,10 +51,134 @@ def build_common_tools(manager: Any) -> list[Any]:
         return manager.dataset_brief()
 
     @tool
-    def load_dataset(file_path: str, dataset_name: str = "") -> str:
-        """Load a local dataset path into the current session workspace."""
-        loaded_name = manager.load_path(file_path=file_path, name=dataset_name or None)
+    def inspect_zip_datasets(file_path: str) -> str:
+        """List loadable dataset candidates inside a zip archive before choosing one."""
+        return _json({"candidates": manager.inspect_zip_datasets(file_path)})
+
+    @tool
+    def load_dataset(file_path: str, dataset_name: str = "", zip_member: str = "") -> str:
+        """Load a local dataset path into the current session workspace. For multi-dataset zip files, pass zip_member from inspect_zip_datasets."""
+        loaded_name = manager.load_path(file_path=file_path, name=dataset_name or None, zip_member=zip_member)
         return f"Dataset loaded: {loaded_name}\n{manager.dataset_brief()}"
+
+    @tool
+    def ingest_data_package(file_path: str, user_goal: str = "", output_prefix: str = "") -> str:
+        """Safely unpack a zip data package, load all supported datasets, profile them, and recommend an analysis plan."""
+        return dumps_result(_ingest_data_package(manager, file_path, user_goal=user_goal, output_prefix=output_prefix))
+
+    @tool
+    def plan_data_package_analysis(user_goal: str = "") -> str:
+        """Build an analysis plan from the current workspace dataset profiles and the user's goal."""
+        profiles = build_data_package_profiles(manager)
+        return dumps_result(_plan_data_package_analysis(profiles, user_goal))
+
+    @tool
+    def convert_stm_station_archive_to_training_table(
+        archive_path: str,
+        preferred_depth: str = "0.050000",
+        year: str = "2019",
+        output_name: str = "stm_soil_moisture_training",
+        aggregate: str = "daily",
+    ) -> str:
+        """Convert an ISMN/SMN-SDR .stm station zip archive into a modeling-ready table dataset."""
+        inputs = {
+            "archive_path": archive_path,
+            "preferred_depth": preferred_depth,
+            "year": year,
+            "output_name": output_name,
+            "aggregate": aggregate,
+        }
+        try:
+            df = stm_archive_to_training_dataframe(
+                archive_path,
+                preferred_depth=preferred_depth,
+                year=year,
+                aggregate=aggregate,
+            )
+            if df.empty:
+                return tool_result_error(
+                    "convert_stm_station_archive_to_training_table",
+                    inputs=inputs,
+                    error_code="STM_NO_VALID_ROWS",
+                    error_title="No valid STM observations",
+                    user_message="The station archive did not contain valid observations for the requested depth and year.",
+                    diagnostics={"preferred_depth": preferred_depth, "year": year, "aggregate": aggregate},
+                    next_actions=["Check the archive depth labels and year range, then retry with matching parameters."],
+                ).to_json()
+            saved_name = manager.put_table(output_name, df)
+            record = manager.get(saved_name)
+            target_col = "soil_moisture_mean" if aggregate.strip().lower() == "daily" else "soil_moisture"
+            return tool_result_ok(
+                "convert_stm_station_archive_to_training_table",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "row_count": int(len(df)),
+                    "station_count": int(df["station_id"].nunique()) if "station_id" in df else 0,
+                    "target_col": target_col,
+                    "path": str(record.path),
+                    "columns": list(df.columns),
+                },
+                artifacts=[
+                    {
+                        "artifact_id": f"dataset:{saved_name}",
+                        "path": str(record.path),
+                        "type": "dataset",
+                        "title": f"{saved_name}.csv",
+                        "description": "Modeling-ready soil moisture station training table converted from STM files.",
+                        "quality_status": "created",
+                        "preview_available": True,
+                    }
+                ],
+                summary=f"Converted STM station archive to training table {saved_name} with {len(df)} rows.",
+                diagnostics={
+                    "preferred_depth": preferred_depth,
+                    "year": year,
+                    "aggregate": aggregate,
+                    "source_archive": archive_path,
+                },
+                next_actions=[
+                    "Use table_to_points to create station points.",
+                    "Use batch_register_points_to_rasters to sample DEM/NDVI/LST or other raster features.",
+                    "Use generic_xgboost_workflow with the reported target_col.",
+                ],
+            ).to_json()
+        except Exception as exc:
+            return tool_result_error(
+                "convert_stm_station_archive_to_training_table",
+                inputs=inputs,
+                error_code="STM_CONVERSION_FAILED",
+                error_title="STM conversion failed",
+                user_message="Failed to convert the station archive into a training table.",
+                technical_detail=f"{type(exc).__name__}: {exc}",
+                next_actions=["Confirm the file is a zip archive containing ISMN/SMN-SDR .stm files."],
+            ).to_json()
+
+    @tool
+    def run_stm_soil_moisture_xgboost_workflow(
+        archive_path: str = "",
+        raster_names: str = "",
+        preferred_depth: str = "0.050000",
+        year: str = "2019",
+        output_prefix: str = "stm_soil_moisture",
+        aggregate: str = "daily",
+        min_samples: int = 8,
+        encode_aspect_circular: bool = True,
+    ) -> str:
+        """Run STM station archive conversion, point creation, raster sampling, and conditional XGBoost modeling."""
+        return _json(
+            _run_stm_xgb_workflow(
+                manager,
+                archive_path=archive_path,
+                raster_names=raster_names,
+                preferred_depth=preferred_depth,
+                year=year,
+                output_prefix=output_prefix,
+                aggregate=aggregate,
+                min_samples=min_samples,
+                encode_aspect_circular=encode_aspect_circular,
+            )
+        )
 
     @tool
     def describe_dataset(dataset_name: str) -> str:
@@ -161,7 +293,12 @@ def build_common_tools(manager: Any) -> list[Any]:
     return [
         workspace_status,
         list_datasets,
+        inspect_zip_datasets,
         load_dataset,
+        ingest_data_package,
+        plan_data_package_analysis,
+        convert_stm_station_archive_to_training_table,
+        run_stm_soil_moisture_xgboost_workflow,
         describe_dataset,
         preview_table,
         rename_dataset,
@@ -173,4 +310,3 @@ def build_common_tools(manager: Any) -> list[Any]:
         sync_all_to_database,
         query_workspace_database,
     ]
-

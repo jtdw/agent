@@ -184,8 +184,21 @@ class ToolContractTests(unittest.TestCase):
         reply = interpret_result(
             "画人口密度图",
             {"intent": "map_generation"},
-            {"task_type": "map_generation"},
-            raw,
+            {
+                "task_type": "map_generation",
+                "normalized_results": [
+                    {
+                        "status": "failed",
+                        "step_id": "plot",
+                        "tool_name": "plot_dataset",
+                        "outputs": {},
+                        "artifacts": [],
+                        "errors": [{"code": "FIELD_NOT_FOUND", "message": "未找到字段 population。"}],
+                        "next_actions": ["请选择 density 字段，或先计算人口字段。"],
+                    }
+                ],
+            },
+            "",
             {"active_dataset": {"name": "population_layer"}},
             {},
         )
@@ -593,6 +606,8 @@ class ToolContractTests(unittest.TestCase):
                     {
                         "observed": [float(i) for i in rows],
                         "pred": [float(i) + (0.2 if i % 2 else -0.1) for i in rows],
+                        "lon": [100.0 + (i % 10) * 0.01 for i in rows],
+                        "lat": [30.0 + (i // 10) * 0.01 for i in rows],
                     }
                 ),
             )
@@ -604,6 +619,8 @@ class ToolContractTests(unittest.TestCase):
                     "observed_col": "observed",
                     "predicted_cols": "pred",
                     "output_name": "gcp_out",
+                    "lon_col": "lon",
+                    "lat_col": "lat",
                     "calibration_ratio": 0.7,
                     "alpha": 0.1,
                 }
@@ -618,7 +635,24 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(model_result["model"], "GCP")
             artifact_types = {item["type"] for item in model_result["artifacts"]}
             self.assertIn("metrics", artifact_types)
-            self.assertIn("summary", artifact_types)
+            self.assertIn("report", artifact_types)
+            self.assertIn("image", artifact_types)
+            artifacts = model_result["artifacts"]
+            artifact_names = {Path(item["path"]).name for item in artifacts}
+            self.assertIn("gcp_out_gcp_predictions.csv", artifact_names)
+            self.assertIn("gcp_out_gcp_metrics.json", artifact_names)
+            self.assertIn("gcp_out_gcp_report.md", artifact_names)
+            self.assertIn("gcp_out_gcp_prediction_intervals.png", artifact_names)
+            self.assertIn("gcp_out_gcp_interval_width_spatial.png", artifact_names)
+            for artifact in artifacts:
+                self.assertEqual(artifact.get("owner_user_id"), service.manager.current_user_id)
+                self.assertEqual(artifact.get("session_id"), service.manager.current_session_id)
+                self.assertEqual(artifact.get("source_tool"), "geographical_conformal_prediction")
+                if artifact["type"] == "image":
+                    self.assertEqual(artifact.get("mime_type"), "image/png")
+                    self.assertTrue(artifact.get("preview_available"))
+                    self.assertTrue(Path(artifact["path"]).exists())
+                    self.assertGreater(Path(artifact["path"]).stat().st_size, 0)
 
     def test_gcp_missing_predicted_field_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
