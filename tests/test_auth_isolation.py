@@ -11,6 +11,42 @@ from core.commercial.service import CommercialService
 
 
 class AuthIsolationTests(unittest.TestCase):
+    def test_chat_sessions_creates_one_reusable_session_for_new_user(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            original_workdir = api_server.base_settings.workdir
+            original_commercial = api_server.commercial_service
+            original_services = dict(api_server._workspace_services)
+            try:
+                root = Path(tmp) / "server"
+                root.mkdir(parents=True, exist_ok=True)
+                api_server._workspace_services.clear()
+                api_server.base_settings.workdir = root
+                api_server.base_settings.ensure_dirs()
+                api_server.commercial_service = CommercialService(root)
+                client = TestClient(api_server.app)
+                registered = client.post(
+                    "/api/auth/register",
+                    json={"email": "new-chat@example.com", "password": "password1"},
+                )
+                self.assertEqual(registered.status_code, 200)
+
+                first = client.get("/api/chat/sessions")
+                second = client.get("/api/chat/sessions")
+
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(second.status_code, 200)
+                first_body = first.json()
+                second_body = second.json()
+                self.assertEqual(len(first_body["sessions"]), 1)
+                self.assertEqual(len(second_body["sessions"]), 1)
+                self.assertEqual(first_body["current_session_id"], second_body["current_session_id"])
+                self.assertEqual(first_body["sessions"][0]["interaction_mode"], "chat_only")
+            finally:
+                api_server._workspace_services.clear()
+                api_server._workspace_services.update(original_services)
+                api_server.base_settings.workdir = original_workdir
+                api_server.commercial_service = original_commercial
+
     def test_missing_user_id_requires_current_session_unless_anonymous_core_access_enabled(self) -> None:
         with (
             mock.patch.dict(os.environ, {"GIS_AGENT_ALLOW_ANONYMOUS": "0"}, clear=False),

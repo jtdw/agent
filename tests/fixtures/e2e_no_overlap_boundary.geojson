@@ -1,0 +1,1 @@
+{"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"name": "far"}, "geometry": {"type": "Polygon", "coordinates": [[[10000, 10000], [10100, 10000], [10100, 10100], [10000, 10100], [10000, 10000]]]}}]}

@@ -61,9 +61,12 @@ def _safe_extract_zip(zip_path: Path, target_dir: Path) -> None:
 
 def _candidate_admin_archives(manager: DataManager) -> list[Path]:
     project_root = Path(__file__).resolve().parents[1]
-    shared = _shared_workdir(manager.workdir)
+    workdir = getattr(manager, "workdir", None)
+    if workdir is None:
+        return []
+    shared = _shared_workdir(Path(workdir))
     roots = [
-        manager.workdir / "local_library" / "data" / "administrative",
+        Path(workdir) / "local_library" / "data" / "administrative",
         shared / "local_library" / "data" / "administrative",
         project_root / "local_library" / "data" / "administrative",
     ]

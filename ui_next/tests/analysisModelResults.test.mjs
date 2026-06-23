@@ -24,7 +24,7 @@ const dashboard = {
       metrics_dataset: 'soil_demo_xgb_metrics',
       metrics: { R: 0.91, RMSE: 0.12, NSE: 0.8 },
       artifacts: [
-        { label: '指标表', path: 'workspace/derived/soil_demo_xgb_metrics.csv', download_url: '/api/files/artifact?path=derived/soil_demo_xgb_metrics.csv' }
+        { artifact_id: 'artifact_soil_demo_xgb_metrics', label: '指标表', path: 'workspace/derived/soil_demo_xgb_metrics.csv', download_url: '/api/files/artifact?path=derived/soil_demo_xgb_metrics.csv' }
       ],
       recommendations: ['RMSE 较低，可继续做 GCP 不确定性分析。']
     }
@@ -38,6 +38,8 @@ assert.equal(view.metricsDataset, 'soil_demo_xgb_metrics');
 assert.equal(view.bestModel?.name, 'XGBoost');
 assert.equal(view.bestModel?.modelResultId, 'model_result_xgb_001');
 assert.equal(view.downloads[0]?.label, '指标表');
+assert.equal(view.downloads[0]?.artifactId, 'artifact_soil_demo_xgb_metrics');
+assert.equal(view.downloads[0]?.url, '');
 assert.match(view.recommendations.join('\n'), /GCP/);
 
 console.log('analysisModelResults.test.mjs passed');

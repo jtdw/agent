@@ -55,6 +55,28 @@ def read_gscloud_scene_job(workdir: str | Path, scene_job_id: str) -> dict[str, 
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def delete_gscloud_scene_jobs_for_job_ids(workdir: str | Path, job_ids: set[str]) -> list[str]:
+    deleted: list[str] = []
+    wanted = {str(item or "") for item in job_ids if str(item or "")}
+    if not wanted:
+        return deleted
+    for path in list(gscloud_scene_jobs_dir(workdir).glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if str(data.get("job_id") or "") not in wanted:
+            continue
+        for target in (path, path.with_suffix(".log")):
+            try:
+                if target.exists():
+                    target.unlink()
+                    deleted.append(str(target))
+            except Exception:
+                continue
+    return deleted
+
+
 def start_gscloud_scene_process(
     *,
     workdir: str | Path,

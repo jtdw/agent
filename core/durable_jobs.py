@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from core.tool_contracts import normalize_tool_result
+from core.realtime_events import TaskEventStore
 
 
 DURABLE_JOB_SCHEMA_VERSION = "durable-job-store/v1"
@@ -76,6 +77,46 @@ class DurableJobStore:
         self.db_path = Path(db_path) if db_path is not None else _default_db_path()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+        self.events = TaskEventStore(self.db_path)
+
+    def _publish_job_event(self, job: dict[str, Any]) -> None:
+        payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        raw_status = str(job.get("status") or "")
+        status = {
+            "expired": "failed",
+        }.get(raw_status, raw_status)
+        if status not in {"queued", "running", "awaiting_confirmation", "waiting_login", "succeeded", "failed", "cancelled"}:
+            return
+        kind = "task_progress" if status == "running" and int(job.get("progress") or 0) not in {0, 100} else "task_status"
+        if status == "succeeded":
+            kind = "task_result"
+        elif status == "failed":
+            kind = "error"
+        elif status == "cancelled":
+            kind = "warning"
+        message = str(job.get("error_message") or "")
+        if not message:
+            message = {
+                "queued": "任务已排队，等待后台执行。",
+                "running": "任务正在执行。",
+                "awaiting_confirmation": "任务正在等待确认。",
+                "waiting_login": "任务正在等待完成登录。",
+                "succeeded": "任务已完成，正在整理结果。",
+                "failed": "任务执行失败。",
+                "cancelled": "任务已取消。",
+            }.get(status, "任务状态已更新。")
+        self.events.append(
+            user_id=str(job.get("user_id") or ""),
+            session_id=str(job.get("session_id") or ""),
+            task_id=str(context.get("chat_task_id") or job.get("job_id") or ""),
+            job_id=str(job.get("job_id") or ""),
+            kind=kind,
+            status=status,
+            progress=int(job.get("progress") or 0),
+            current_step=str(job.get("job_type") or ""),
+            message=message,
+        )
 
     @contextmanager
     def _connect(self):
@@ -144,7 +185,7 @@ class DurableJobStore:
         clean_key = str(idempotency_key or "").strip()
         if clean_key:
             existing = self._fetch_one("SELECT * FROM durable_jobs WHERE idempotency_key=?", [clean_key])
-            if existing and existing.get("status") not in TERMINAL_STATUSES:
+            if existing:
                 return self._row_to_job(existing)
         ts = _now()
         job_id = f"durable_{uuid4().hex[:12]}"
@@ -178,7 +219,9 @@ class DurableJobStore:
                 f"INSERT INTO durable_jobs ({', '.join(keys)}) VALUES ({', '.join(['?'] * len(keys))})",
                 [data[key] for key in keys],
             )
-        return self.get_job(job_id)
+        job = self.get_job(job_id)
+        self._publish_job_event(job)
+        return job
 
     def _fetch_one(self, sql: str, params: list[Any]) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -195,6 +238,64 @@ class DurableJobStore:
         if not row:
             raise FileNotFoundError(f"durable job not found: {job_id}")
         return self._row_to_job(row)
+
+    def list_jobs(
+        self,
+        *,
+        user_id: str = "",
+        session_id: str = "",
+        statuses: list[str] | None = None,
+        job_type: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if user_id:
+            clauses.append("user_id=?")
+            params.append(str(user_id))
+        if session_id:
+            clauses.append("session_id=?")
+            params.append(str(session_id))
+        if job_type:
+            clauses.append("job_type=?")
+            params.append(str(job_type))
+        clean_statuses = [str(item).strip() for item in (statuses or []) if str(item).strip()]
+        if clean_statuses:
+            clauses.append(f"status IN ({', '.join(['?'] * len(clean_statuses))})")
+            params.extend(clean_statuses)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._fetch_all(
+            f"SELECT * FROM durable_jobs {where} ORDER BY created_at ASC LIMIT ?",
+            [*params, max(1, int(limit or 1))],
+        )
+        return [self._row_to_job(row) for row in rows]
+
+    def next_queued_job(self, *, job_type: str = "") -> dict[str, Any] | None:
+        clauses = ["status='queued'"]
+        params: list[Any] = []
+        if job_type:
+            clauses.append("job_type=?")
+            params.append(str(job_type))
+        row = self._fetch_one(
+            f"SELECT * FROM durable_jobs WHERE {' AND '.join(clauses)} ORDER BY created_at ASC LIMIT 1",
+            params,
+        )
+        return self._row_to_job(row) if row else None
+
+    def count_active_jobs(self, *, user_id: str = "", session_id: str = "", job_type: str = "") -> int:
+        clauses = ["status IN ('queued','running')"]
+        params: list[Any] = []
+        if user_id:
+            clauses.append("user_id=?")
+            params.append(str(user_id))
+        if session_id:
+            clauses.append("session_id=?")
+            params.append(str(session_id))
+        if job_type:
+            clauses.append("job_type=?")
+            params.append(str(job_type))
+        row = self._fetch_one(f"SELECT COUNT(*) AS count FROM durable_jobs WHERE {' AND '.join(clauses)}", params)
+        return int((row or {}).get("count") or 0)
 
     def update_status(
         self,
@@ -223,7 +324,9 @@ class DurableJobStore:
         if result is not None:
             update["result_json"] = _json(result)
         self._update(job_id, update)
-        return self.get_job(job_id)
+        job = self.get_job(job_id)
+        self._publish_job_event(job)
+        return job
 
     def _update(self, job_id: str, fields: dict[str, Any]) -> None:
         keys = list(fields.keys())
@@ -251,7 +354,9 @@ class DurableJobStore:
                 "updated_at": _now(),
             },
         )
-        return self.get_job(job_id)
+        updated = self.get_job(job_id)
+        self._publish_job_event(updated)
+        return updated
 
     def schedule_retry(self, job_id: str, *, error_code: str, error_message: str = "", base_delay_seconds: int = 30) -> dict[str, Any]:
         job = self.get_job(job_id)
@@ -270,7 +375,9 @@ class DurableJobStore:
                 "updated_at": _now(),
             },
         )
-        return self.get_job(job_id)
+        updated = self.get_job(job_id)
+        self._publish_job_event(updated)
+        return updated
 
     def recover_interrupted_jobs(self) -> dict[str, Any]:
         rows = self._fetch_all("SELECT * FROM durable_jobs WHERE status IN ('queued','running')", [])
@@ -286,6 +393,7 @@ class DurableJobStore:
                 },
             )
             recovered.append(row["job_id"])
+            self._publish_job_event(self.get_job(row["job_id"]))
         return {"count": len(recovered), "job_ids": recovered}
 
     def cancel_session_jobs(self, user_id: str, session_id: str, *, reason: str = "Session deleted.") -> list[str]:
@@ -298,6 +406,49 @@ class DurableJobStore:
             self.cancel_job(row["job_id"], user_id=user_id, reason=reason)
             cancelled.append(row["job_id"])
         return cancelled
+
+    def hard_delete_session_jobs(self, user_id: str, session_id: str) -> list[str]:
+        clean_user = str(user_id or "").strip()
+        clean_session = str(session_id or "").strip()
+        if not clean_session:
+            return []
+        params: list[Any] = [clean_session]
+        where = "session_id=?"
+        if clean_user:
+            where += " AND user_id=?"
+            params.append(clean_user)
+        rows = self._fetch_all(f"SELECT job_id FROM durable_jobs WHERE {where}", params)
+        deleted = [str(row.get("job_id") or "") for row in rows if row.get("job_id")]
+        with self._connect() as conn:
+            conn.execute(f"DELETE FROM durable_jobs WHERE {where}", params)
+        self.events.delete_session_events(user_id=clean_user, session_id=clean_session)
+        self._remove_checkpoint_files(clean_session)
+        return deleted
+
+    def _remove_checkpoint_files(self, session_id: str) -> list[str]:
+        clean = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in str(session_id or "")).strip("._")
+        if not clean:
+            return []
+        removed: list[str] = []
+        for folder_name in ("durable_checkpoints", "task_checkpoints", "job_logs"):
+            root = self.db_path.parent / folder_name
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob(f"*{clean}*"), reverse=True):
+                try:
+                    if path.is_file():
+                        path.unlink()
+                    elif path.is_dir():
+                        for child in sorted(path.rglob("*"), reverse=True):
+                            if child.is_file():
+                                child.unlink()
+                            elif child.is_dir():
+                                child.rmdir()
+                        path.rmdir()
+                    removed.append(str(path))
+                except Exception:
+                    continue
+        return removed
 
     def to_tool_result(self, job: dict[str, Any]) -> dict[str, Any]:
         status = str(job.get("status") or "")

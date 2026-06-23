@@ -76,6 +76,25 @@ export type ChatActionRequired = {
   [key: string]: unknown;
 };
 
+export type RealtimeChatEvent = {
+  schema_version?: string;
+  event_id: string;
+  version: number;
+  kind: 'task_status' | 'task_progress' | 'task_result' | 'model_token' | 'model_complete' | 'warning' | 'error';
+  task_id?: string;
+  job_id?: string;
+  message_id?: string;
+  status?: string;
+  progress?: number | null;
+  current_step?: string;
+  message?: string;
+  delta?: string;
+  management_view?: DownloadManagementView;
+  presentation_result?: PresentationResult;
+  task_update?: Record<string, unknown>;
+  created_at?: string;
+};
+
 export type ChatArtifact = {
   artifact_id: string;
   name?: string;
@@ -201,6 +220,111 @@ export type CapabilitySearchResponse = {
   }>;
 };
 
+export type DatasetAvailabilityProfile = {
+  product_id: string;
+  display_name_zh?: string;
+  source_product_key?: string;
+  source_url?: string;
+  temporal_requirement?: string;
+  temporal_coverage?: Record<string, unknown>;
+  supported_formats?: string[];
+  supported_resolutions?: string[];
+  verification_method?: string;
+  scan_summary?: string;
+  warnings?: string[];
+  version?: string;
+  status?: string;
+  updated_at?: string;
+  [key: string]: unknown;
+};
+
+export type DatasetAvailabilityListResponse = {
+  schema_version: string;
+  items: DatasetAvailabilityProfile[];
+};
+
+export type AdminSystemResetMode = 'keep_accounts' | 'full_reset';
+
+export type AdminSystemResetResponse = {
+  ok: boolean;
+  mode: AdminSystemResetMode;
+  deleted?: { files?: number; directories?: number; bytes?: number; errors?: string[] };
+  preserved?: { workspace_entries?: string[]; accounts?: number; capability_config?: boolean };
+  capability_cleanup?: { private_knowledge_items?: string[]; index_dirs?: string[] };
+};
+
+export type StorageCleanupCandidate = {
+  candidate_id: string;
+  category: string;
+  path: string;
+  kind?: string;
+  file_count?: number;
+  size_bytes?: number;
+  safe_to_delete?: boolean;
+  reason?: string;
+};
+
+export type StorageCleanupScanResponse = {
+  schema_version: string;
+  root: string;
+  candidates: StorageCleanupCandidate[];
+  total_candidates: number;
+  total_size_bytes: number;
+  referenced_path_count?: number;
+};
+
+export type StorageCleanupDeleteResponse = {
+  ok: boolean;
+  schema_version: string;
+  deleted: Array<{ candidate_id: string; path: string; files?: number; bytes?: number }>;
+  errors: string[];
+  deleted_count: number;
+  freed_bytes: number;
+};
+
+export type PlatformAccountLoginHealth = {
+  ok?: boolean;
+  reason?: string;
+  action?: string;
+  cookie_count?: number;
+  gscloud_cookie_count?: number;
+  valid_gscloud_cookie_count?: number;
+  authenticated_gscloud_cookie_count?: number;
+  [key: string]: unknown;
+};
+
+export type PlatformAccount = {
+  account_id: string;
+  source_key: string;
+  label?: string;
+  username_preview?: string;
+  has_password?: boolean;
+  has_storage_state?: boolean;
+  daily_limit?: number;
+  used_today?: number;
+  monthly_limit?: number;
+  used_month?: number;
+  status?: 'active' | 'disabled' | string;
+  last_used_at?: string;
+  created_at?: string;
+  updated_at?: string;
+  login_health?: PlatformAccountLoginHealth;
+};
+
+export type PlatformAccountListResponse = {
+  schema_version: string;
+  accounts: PlatformAccount[];
+};
+
+export type PlatformLoginJob = {
+  login_job_id?: string;
+  state?: string;
+  message?: string;
+  timeout_seconds?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type UploadSummary = {
   filename: string;
   type?: string;
@@ -256,6 +380,8 @@ export type ChatMessage = {
 export type ChatSession = {
   session_id: string;
   title: string;
+  interaction_mode?: 'chat_only' | 'tool_enabled';
+  message_count?: number;
   created_at?: string;
   updated_at?: string;
 };
@@ -720,11 +846,76 @@ export const api = {
       body: JSON.stringify({ user_id: user_id || '', session_id, title })
     });
   },
+  async setChatInteractionMode(session_id: string, interaction_mode: 'chat_only' | 'tool_enabled', user_id?: string) {
+    return request<{ interaction_mode: 'chat_only' | 'tool_enabled'; sessions: ChatSession[]; current_session_id: string; messages: ChatMessage[] }>('/api/chat/sessions/mode', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: user_id || '', session_id, interaction_mode })
+    });
+  },
   async ask(prompt: string, user_id?: string, session_id?: string, frontend_context?: ChatContextPayload, signal?: AbortSignal, task_id?: string) {
     return request<{ reply: string; model?: string; reason?: string; images?: string[]; artifacts?: ChatArtifact[]; files?: ChatArtifact[]; presentation_result?: PresentationResult; execution_summary?: ExecutionSummary; user_facing_result?: UserFacingResult; messages?: ChatMessage[]; sessions?: ChatSession[]; current_session_id?: string; task_outcome?: Record<string, unknown>; result_panel?: ResultPanel }>('/api/chat/ask', {
       method: 'POST',
       signal,
       body: JSON.stringify({ prompt, user_id: user_id || '', session_id: session_id || '', task_id: task_id || '', frontend_context: frontend_context || {} })
+    });
+  },
+  async streamChat(
+    prompt: string,
+    user_id: string | undefined,
+    session_id: string | undefined,
+    frontend_context: ChatContextPayload | undefined,
+    handlers: { onEvent: (event: RealtimeChatEvent) => void },
+    signal?: AbortSignal,
+    task_id?: string,
+  ) {
+    const response = await fetch(`${API_BASE}/api/chat/stream`, {
+      method: 'POST',
+      credentials: 'include',
+      signal,
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ prompt, user_id: user_id || '', session_id: session_id || '', task_id: task_id || '', frontend_context: frontend_context || {} })
+    });
+    if (!response.ok || !response.body) {
+      let detail = `${response.status} ${response.statusText}`;
+      try {
+        const payload = await response.json();
+        detail = payload.detail || payload.error || detail;
+      } catch {}
+      throw formatApiError(response.status, response.statusText, detail);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const consumeFrame = (frame: string) => {
+      const dataLine = frame.split(/\r?\n/).find((line) => line.startsWith('data:'));
+      if (!dataLine) return;
+      try {
+        handlers.onEvent(JSON.parse(dataLine.slice(5).trim()) as RealtimeChatEvent);
+      } catch {}
+    };
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      buffer += decoder.decode(next.value, { stream: true });
+      const frames = buffer.split(/\r?\n\r?\n/);
+      buffer = frames.pop() || '';
+      frames.forEach(consumeFrame);
+    }
+    if (buffer.trim()) consumeFrame(buffer);
+  },
+  openChatEventStream(user_id: string, session_id: string, after_version = 0) {
+    const params = new URLSearchParams({ user_id, session_id, after_version: String(Math.max(0, after_version)) });
+    return new EventSource(`${API_BASE}/api/chat/events?${params.toString()}`, { withCredentials: true });
+  },
+  async replayChatEvents(user_id: string, session_id: string, after_version = 0) {
+    const params = new URLSearchParams({ user_id, session_id, after_version: String(Math.max(0, after_version)) });
+    return request<{ schema_version: string; events: RealtimeChatEvent[] }>(`/api/chat/events/replay?${params.toString()}`);
+  },
+  async confirmChatAction(confirmation_id: string, confirmation_prompt: string, user_id?: string, session_id?: string, frontend_context?: ChatContextPayload, signal?: AbortSignal, task_id?: string) {
+    return request<{ reply: string; model?: string; reason?: string; images?: string[]; artifacts?: ChatArtifact[]; files?: ChatArtifact[]; presentation_result?: PresentationResult; execution_summary?: ExecutionSummary; user_facing_result?: UserFacingResult; messages?: ChatMessage[]; sessions?: ChatSession[]; current_session_id?: string; task_outcome?: Record<string, unknown>; result_panel?: ResultPanel }>('/api/chat/confirm', {
+      method: 'POST',
+      signal,
+      body: JSON.stringify({ confirmation_id, confirmation_prompt: confirmation_prompt || '', user_id: user_id || '', session_id: session_id || '', task_id: task_id || '', frontend_context: frontend_context || {} })
     });
   },
   async cancelChatTask(task_id: string, user_id?: string, reason?: string) {
@@ -749,6 +940,13 @@ export const api = {
     if (session_id) q.set('session_id', session_id);
     const query = q.toString();
     return request<ChatArtifact>(`/api/artifacts/${encodeURIComponent(artifact_id)}${query ? `?${query}` : ''}`);
+  },
+  async downloadArtifactById(artifact_id: string, fallbackName = 'download', user_id?: string, session_id?: string) {
+    const q = new URLSearchParams();
+    if (user_id) q.set('user_id', user_id);
+    if (session_id) q.set('session_id', session_id);
+    const query = q.toString();
+    return downloadWithAuth(`/api/artifacts/${encodeURIComponent(artifact_id)}/download${query ? `?${query}` : ''}`, fallbackName);
   },
   async retryMessage(message_id: number, content: string, user_id?: string, session_id?: string) {
     return request<{ reply: string; model?: string; reason?: string; messages: ChatMessage[]; sessions: ChatSession[]; current_session_id: string }>('/api/chat/retry', {
@@ -893,11 +1091,17 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  async updateCapabilityStatus(resource_type: CapabilityResourceType, item_id: string, status: 'enabled' | 'disabled' | string, admin_token?: string) {
+  async updateCapabilityStatus(
+    resource_type: CapabilityResourceType,
+    item_id: string,
+    status: 'draft' | 'pending_review' | 'active' | 'deprecated' | 'disabled' | 'enabled' | string,
+    admin_token?: string,
+    options?: { actor?: string; summary?: string }
+  ) {
     return request<{ ok: boolean; item: CapabilityResource; registry_version: string }>(`/api/admin/capabilities/${encodeURIComponent(resource_type)}/${encodeURIComponent(item_id)}/status`, {
       method: 'POST',
       headers: capabilityAdminHeaders(admin_token),
-      body: JSON.stringify({ status })
+      body: JSON.stringify({ status, actor: options?.actor || 'admin', summary: options?.summary || '' })
     });
   },
   async rollbackCapabilityResource(resource_type: CapabilityResourceType, item_id: string, version: string, admin_token?: string) {
@@ -914,6 +1118,101 @@ export const api = {
     if (params.scope) sp.set('scope', params.scope);
     return request<CapabilitySearchResponse>(`/api/admin/capabilities/knowledge/search/test?${sp.toString()}`, {
       headers: capabilityAdminHeaders(params.admin_token)
+    });
+  },
+  async datasetAvailabilityProfiles(params: { include_inactive?: boolean; admin_token?: string } = {}) {
+    const sp = new URLSearchParams();
+    if (params.include_inactive !== undefined) sp.set('include_inactive', String(Boolean(params.include_inactive)));
+    const q = sp.toString() ? `?${sp.toString()}` : '';
+    return request<DatasetAvailabilityListResponse>(`/api/admin/dataset-availability${q}`, {
+      headers: capabilityAdminHeaders(params.admin_token)
+    });
+  },
+  async scanDatasetAvailability(product_id: string, input: { scan_method?: string; actor?: string; summary?: string; admin_token?: string } = {}) {
+    return request<{ ok: boolean; schema_version: string; item: DatasetAvailabilityProfile }>(`/api/admin/dataset-availability/${encodeURIComponent(product_id)}/scan`, {
+      method: 'POST',
+      headers: capabilityAdminHeaders(input.admin_token),
+      body: JSON.stringify({
+        scan_method: input.scan_method || 'catalog_metadata',
+        actor: input.actor || 'admin',
+        summary: input.summary || ''
+      })
+    });
+  },
+  async updateDatasetAvailabilityStatus(product_id: string, status: string, admin_token?: string, options?: { actor?: string; summary?: string }) {
+    return request<{ ok: boolean; schema_version: string; item: DatasetAvailabilityProfile }>(`/api/admin/dataset-availability/${encodeURIComponent(product_id)}/status`, {
+      method: 'POST',
+      headers: capabilityAdminHeaders(admin_token),
+      body: JSON.stringify({ status, actor: options?.actor || 'admin', summary: options?.summary || '' })
+    });
+  },
+  async systemReset(input: { mode: AdminSystemResetMode; confirm_text: string; admin_token?: string }) {
+    return request<AdminSystemResetResponse>('/api/admin/system-reset', {
+      method: 'POST',
+      headers: capabilityAdminHeaders(input.admin_token),
+      body: JSON.stringify({ mode: input.mode, confirm_text: input.confirm_text })
+    });
+  },
+  async storageCleanupScan(admin_token?: string) {
+    return request<StorageCleanupScanResponse>('/api/admin/storage-cleanup/scan', {
+      headers: capabilityAdminHeaders(admin_token)
+    });
+  },
+  async storageCleanupDelete(input: { candidate_ids: string[]; confirm_text: string; admin_token?: string }) {
+    return request<StorageCleanupDeleteResponse>('/api/admin/storage-cleanup/delete', {
+      method: 'POST',
+      headers: capabilityAdminHeaders(input.admin_token),
+      body: JSON.stringify({ candidate_ids: input.candidate_ids, confirm_text: input.confirm_text })
+    });
+  },
+  async adminPlatformAccounts(params: { source_key?: string; include_inactive?: boolean; admin_token?: string } = {}) {
+    const sp = new URLSearchParams();
+    if (params.source_key) sp.set('source_key', params.source_key);
+    if (params.include_inactive !== undefined) sp.set('include_inactive', String(Boolean(params.include_inactive)));
+    const q = sp.toString() ? `?${sp.toString()}` : '';
+    return request<PlatformAccountListResponse>(`/api/admin/platform-accounts${q}`, {
+      headers: capabilityAdminHeaders(params.admin_token)
+    });
+  },
+  async upsertAdminPlatformAccount(input: {
+    source_key?: string;
+    username?: string;
+    password?: string;
+    label?: string;
+    daily_limit?: number;
+    monthly_limit?: number;
+    admin_token?: string;
+  }) {
+    return request<{ ok: boolean; account: PlatformAccount }>('/api/admin/platform-accounts', {
+      method: 'POST',
+      headers: capabilityAdminHeaders(input.admin_token),
+      body: JSON.stringify({
+        source_key: input.source_key || 'gscloud',
+        username: input.username || '',
+        password: input.password || '',
+        label: input.label || '',
+        daily_limit: input.daily_limit ?? 50,
+        monthly_limit: input.monthly_limit ?? 1000
+      })
+    });
+  },
+  async startAdminPlatformAccountLogin(account_id: string, input: { timeout_seconds?: number; headless?: boolean; admin_token?: string } = {}) {
+    return request<{ ok: boolean; login_job: PlatformLoginJob; account: PlatformAccount }>(`/api/admin/platform-accounts/${encodeURIComponent(account_id)}/login`, {
+      method: 'POST',
+      headers: capabilityAdminHeaders(input.admin_token),
+      body: JSON.stringify({ timeout_seconds: input.timeout_seconds ?? 300, headless: Boolean(input.headless) })
+    });
+  },
+  async adminPlatformAccountHealth(account_id: string, admin_token?: string) {
+    return request<{ ok: boolean; account_id: string; login_health: PlatformAccountLoginHealth }>(`/api/admin/platform-accounts/${encodeURIComponent(account_id)}/health`, {
+      headers: capabilityAdminHeaders(admin_token)
+    });
+  },
+  async updateAdminPlatformAccountStatus(account_id: string, status: 'active' | 'disabled', admin_token?: string) {
+    return request<{ ok: boolean; account: PlatformAccount }>(`/api/admin/platform-accounts/${encodeURIComponent(account_id)}/status`, {
+      method: 'POST',
+      headers: capabilityAdminHeaders(admin_token),
+      body: JSON.stringify({ status })
     });
   },
   async pay(user_id: string, plan: PaidPlan) {
@@ -1000,7 +1299,7 @@ export const api = {
     });
   },
   async resumeDownloadJob(job_id: string) {
-    return request<{ job: DownloadJob; auto_supported?: boolean; auto_started?: boolean; reason?: string; action_required?: ChatActionRequired }>(`/api/download-jobs/${encodeURIComponent(job_id)}/resume`, {
+    return request<{ job: DownloadJob; management_view?: DownloadManagementView; auto_supported?: boolean; auto_started?: boolean; reason?: string; action_required?: ChatActionRequired }>(`/api/download-jobs/${encodeURIComponent(job_id)}/resume`, {
       method: 'POST',
       body: JSON.stringify({})
     });

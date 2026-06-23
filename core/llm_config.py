@@ -1,14 +1,32 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Mapping
 from urllib.parse import urlparse
 
 
 SUPPORTED_PROVIDERS = {"zai", "openai", "fake"}
-DEFAULT_ZAI_BASE_URL = "https://api.z.ai/api/paas/v4/"
+DEFAULT_ZAI_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_ROLE_MODELS = {
+    "chat": "glm-4.5-air",
+    "answer_only": "glm-4.5-air",
+    "planner": "glm-4.7",
+    "tool": "glm-4.7",
+    "coordinator": "glm-4.7",
+    "result_interpreter": "glm-4.7",
+    "vision": "glm-4.6v",
+}
+ROLE_MODEL_ENV = {
+    "chat": ("LLM_CHAT_MODEL", "ZAI_CHAT_MODEL"),
+    "answer_only": ("LLM_CHAT_MODEL", "ZAI_CHAT_MODEL"),
+    "planner": ("LLM_TOOL_MODEL", "ZAI_TOOL_MODEL", "LLM_PLANNER_MODEL", "ZAI_PLANNER_MODEL"),
+    "tool": ("LLM_TOOL_MODEL", "ZAI_TOOL_MODEL"),
+    "coordinator": ("LLM_TOOL_MODEL", "ZAI_TOOL_MODEL", "LLM_COORDINATOR_MODEL", "ZAI_COORDINATOR_MODEL"),
+    "result_interpreter": ("LLM_TOOL_MODEL", "ZAI_TOOL_MODEL", "LLM_RESULT_MODEL", "ZAI_RESULT_MODEL"),
+    "vision": ("LLM_VISION_MODEL", "ZAI_VISION_MODEL"),
+}
 
 
 def _env(env: Mapping[str, str] | None = None) -> Mapping[str, str]:
@@ -56,6 +74,8 @@ class LLMProviderConfig:
     timeout: float
     temperature: float
     max_retries: int
+    max_output_tokens: int
+    fallback_models: tuple[str, ...]
     enable_llm_intent_classifier: bool
     fallback_to_rule_classifier: bool
 
@@ -104,7 +124,10 @@ def load_llm_provider_config(env: Mapping[str, str] | None = None) -> LLMProvide
     fallback = _truthy(source.get("FALLBACK_TO_RULE_CLASSIFIER", "1"))
     timeout = _float_env("LLM_TIMEOUT", 60.0, source)
     max_retries = _int_env("LLM_MAX_RETRIES", 2, source)
+    max_output_tokens = _int_env("LLM_MAX_TOKENS", _int_env("ZAI_MAX_OUTPUT_TOKENS", 1200, source), source)
     temperature = _float_env("LLM_TEMPERATURE", _float_env("GIS_AGENT_TEMPERATURE", 0.1, source), source)
+    fallback_raw = _first_present(source, ["LLM_FALLBACK_MODELS", "ZAI_FALLBACK_MODELS"], default="")
+    fallback_models = tuple(item.strip() for item in fallback_raw.split(",") if item.strip() and item.strip() != model)
     api_key = str(source.get(api_key_env) or "").strip() if api_key_env else ""
     return LLMProviderConfig(
         provider=provider,
@@ -115,9 +138,46 @@ def load_llm_provider_config(env: Mapping[str, str] | None = None) -> LLMProvide
         timeout=timeout,
         temperature=temperature,
         max_retries=max_retries,
+        max_output_tokens=max_output_tokens,
+        fallback_models=fallback_models,
         enable_llm_intent_classifier=enable_intent,
         fallback_to_rule_classifier=fallback,
     )
+
+
+def _role_key(role: str) -> str:
+    clean = str(role or "").strip().lower()
+    aliases = {
+        "answer": "answer_only",
+        "answer-only": "answer_only",
+        "chat_only": "answer_only",
+        "workflow_coordinator": "coordinator",
+        "presentation": "result_interpreter",
+        "result": "result_interpreter",
+        "image": "vision",
+        "visual": "vision",
+    }
+    return aliases.get(clean, clean or "planner")
+
+
+def model_for_role(role: str, env: Mapping[str, str] | None = None, *, fallback_model: str = "") -> str:
+    source = _env(env)
+    key = _role_key(role)
+    for name in ROLE_MODEL_ENV.get(key, ()):
+        value = str(source.get(name) or "").strip()
+        if value:
+            return value
+    if source.get("LLM_PROVIDER", "zai").strip().lower() == "zai":
+        default = DEFAULT_ROLE_MODELS.get(key)
+        if default:
+            return default
+    return fallback_model or str(source.get("LLM_MODEL") or source.get("ZAI_MODEL") or "").strip()
+
+
+def load_llm_provider_config_for_role(role: str, env: Mapping[str, str] | None = None) -> LLMProviderConfig:
+    config = load_llm_provider_config(env)
+    model = model_for_role(role, env, fallback_model=config.model)
+    return replace(config, model=model)
 
 
 def _error(code: str, message: str, **detail: Any) -> dict[str, Any]:
@@ -146,6 +206,8 @@ def validate_llm_config(config: LLMProviderConfig | None = None) -> dict[str, An
         errors.append(_error("TIMEOUT_INVALID", "LLM_TIMEOUT must be between 0 and 600 seconds."))
     if cfg.max_retries < 0 or cfg.max_retries > 10:
         errors.append(_error("MAX_RETRIES_INVALID", "LLM_MAX_RETRIES must be between 0 and 10."))
+    if cfg.max_output_tokens <= 0 or cfg.max_output_tokens > 8192:
+        errors.append(_error("MAX_TOKENS_INVALID", "LLM_MAX_TOKENS must be between 1 and 8192."))
 
     if cfg.provider != "fake" and not cfg.api_key_present:
         message = f"Missing API key. Set {cfg.api_key_env or 'LLM_API_KEY_ENV'}."
@@ -166,8 +228,14 @@ def validate_llm_config(config: LLMProviderConfig | None = None) -> dict[str, An
         "timeout": cfg.timeout,
         "temperature": cfg.temperature,
         "max_retries": cfg.max_retries,
+        "max_output_tokens": cfg.max_output_tokens,
+        "fallback_models": list(cfg.fallback_models),
         "enable_llm_intent_classifier": cfg.enable_llm_intent_classifier,
         "fallback_to_rule_classifier": cfg.fallback_to_rule_classifier,
+        "role_models": {
+            role: model_for_role(role)
+            for role in ("chat", "planner", "coordinator", "result_interpreter", "vision")
+        },
         "errors": errors,
         "warnings": warnings,
     }

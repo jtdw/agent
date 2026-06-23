@@ -18,30 +18,26 @@ def cleanup_session_private_state(
 
     clean_user = str(user_id or "").strip()
     clean_session = str(session_id or "").strip()
-    disabled_private_knowledge: list[str] = []
+    hard_deleted_private_knowledge: list[str] = []
     if clean_session:
         store = CapabilityConfigStore(capability_root)
-        for item in store.list_resources("knowledge", include_disabled=True):
-            if str(item.get("session_id") or "") != clean_session:
-                continue
-            if clean_user and str(item.get("owner_user_id") or "") not in {"", clean_user}:
-                continue
-            if str(item.get("scope") or "").lower() not in {"private", "session", "user"}:
-                continue
-            knowledge_id = str(item.get("knowledge_id") or "")
-            if knowledge_id and item.get("status") != "disabled":
-                store.set_status("knowledge", knowledge_id, "disabled")
-                disabled_private_knowledge.append(knowledge_id)
+        hard_deleted_private_knowledge = store.hard_delete_session_private(clean_user, clean_session)
 
-    cancelled_jobs: list[str] = []
+    hard_deleted_durable_jobs: list[str] = []
     if clean_session:
         jobs = DurableJobStore(durable_job_db)
-        cancelled_jobs = jobs.cancel_session_jobs(clean_user, clean_session, reason="Session deleted.")
+        hard_deleted_durable_jobs = jobs.hard_delete_session_jobs(clean_user, clean_session)
 
     return {
         "ok": True,
         "user_id": clean_user,
         "session_id": clean_session,
-        "disabled_private_knowledge": disabled_private_knowledge,
-        "cancelled_jobs": cancelled_jobs,
+        "hard_deleted_private_knowledge": hard_deleted_private_knowledge,
+        "hard_deleted_durable_jobs": hard_deleted_durable_jobs,
+        "disabled_private_knowledge": hard_deleted_private_knowledge,
+        "cancelled_jobs": hard_deleted_durable_jobs,
+        "anonymous_statistics": {
+            "private_knowledge_deleted_count": len(hard_deleted_private_knowledge),
+            "durable_jobs_deleted_count": len(hard_deleted_durable_jobs),
+        },
     }

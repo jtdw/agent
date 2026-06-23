@@ -299,6 +299,24 @@ class LLMTaskPlannerTests(unittest.TestCase):
         self.assertEqual(captured["base_url"], "https://example.test/v1")
         self.assertEqual(captured["temperature"], 0)
 
+    def test_default_zai_clients_use_role_specific_models(self) -> None:
+        env = {
+            "LLM_PROVIDER": "zai",
+            "ZAI_API_KEY": "test-key",
+            "LLM_MODEL": "legacy-default",
+            "GIS_AGENT_E2E_LLM_FIXTURES": "0",
+        }
+
+        planner = build_default_llm_task_planner_client(env=env, operation="planner")
+        coordinator = build_default_llm_task_planner_client(env=env, operation="coordinator")
+        result_interpreter = build_default_llm_task_planner_client(env=env, operation="result_interpreter")
+        answer = build_default_llm_task_planner_client(env=env, operation="answer_only")
+
+        self.assertEqual(planner.config.model, "glm-4.7")
+        self.assertEqual(coordinator.config.model, "glm-4.7")
+        self.assertEqual(result_interpreter.config.model, "glm-4.7")
+        self.assertEqual(answer.config.model, "glm-4.5-air")
+
     def test_shadow_llm_task_planner_uses_default_client_when_no_client_is_injected(self) -> None:
         class FakeChatModel:
             def invoke(self, messages):

@@ -111,6 +111,39 @@ class CheckpointMapLayerServiceTests(unittest.TestCase):
             self.assertEqual(layer["type"], "raster")
             self.assertTrue(layer["map_ready"])
             self.assertTrue(layer["preview_url"].startswith("/api/map/raster-preview?"))
+            dataset = service.manager.get(layer["dataset_name"])
+            self.assertEqual(dataset.path.resolve(), path.resolve())
+            self.assertEqual(list(service.manager.upload_dir.glob("*.tif")), [])
+
+    def test_refresh_raster_artifact_references_existing_file_without_upload_copy(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            path = service.manager.derived_dir / "downloads" / "job_demo" / "downloaded_dem.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                height=2,
+                width=2,
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(104.0, 31.0, 0.1, 0.1),
+            ) as dst:
+                dst.write(np.array([[1, 2], [3, 4]], dtype="float32"), 1)
+            artifact = service.manager.register_artifact(
+                artifact_id="artifact_job_demo_tif",
+                path=str(path),
+                type="raster",
+                title="downloaded_dem.tif",
+            )
+
+            refreshed = MapLayerService(service).refresh_artifact(artifact["artifact_id"], user_id="u_test")
+
+            dataset = service.manager.get(refreshed["dataset_name"])
+            self.assertEqual(dataset.path.resolve(), path.resolve())
+            self.assertEqual(list(service.manager.upload_dir.glob("*.tif")), [])
 
     def test_large_county_admin_vector_layer_is_not_truncated(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

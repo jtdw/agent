@@ -17,6 +17,17 @@ with warnings.catch_warnings():
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
+def enable_tool_mode(client: TestClient) -> str:
+    sessions = client.get("/api/chat/sessions")
+    assert sessions.status_code == 200, sessions.text
+    body = sessions.json()
+    session_id = body.get("current_session_id") or body["sessions"][0]["session_id"]
+    mode = client.post("/api/chat/sessions/mode", json={"session_id": session_id, "interaction_mode": "tool_enabled"})
+    assert mode.status_code == 200, mode.text
+    assert mode.json()["interaction_mode"] == "tool_enabled"
+    return session_id
+
+
 class RealBackendChatE2ETests(unittest.TestCase):
     def test_upload_check_map_and_followup_use_real_backend_chat_chain(self) -> None:
         import api_server
@@ -48,21 +59,22 @@ class RealBackendChatE2ETests(unittest.TestCase):
             api_server.base_settings.workdir = root
             api_server.base_settings.ensure_dirs()
             client = TestClient(api_server.app)
+            session_id = enable_tool_mode(client)
 
             upload = client.post(
                 "/api/files/upload",
+                data={"session_id": session_id},
                 files={"files": ("counties.geojson", json.dumps(geojson).encode("utf-8"), "application/geo+json")},
             )
             self.assertEqual(upload.status_code, 200, upload.text)
             self.assertTrue(upload.json()["dashboard"]["datasets"])
 
-            check = client.post("/api/chat/ask", json={"prompt": "check this dataset"})
+            check = client.post("/api/chat/ask", json={"prompt": "check this dataset", "session_id": session_id})
             self.assertEqual(check.status_code, 200, check.text)
             check_body = check.json()
             self.assertEqual(check_body["mode"], "coordinated_workflow")
             self.assertEqual(check_body["presentation_result"]["status"], "succeeded")
             self.assertEqual(check_body["execution_summary"]["status"], "succeeded")
-            session_id = check_body["current_session_id"]
 
             map_response = client.post(
                 "/api/chat/ask",
@@ -92,7 +104,7 @@ class RealBackendChatE2ETests(unittest.TestCase):
             )
             self.assertEqual(followup.status_code, 200, followup.text)
             followup_body = followup.json()
-            self.assertIn(followup_body["mode"], {"coordinated_workflow", "clarification", "builtin", "deterministic_context"})
+            self.assertIn(followup_body["mode"], {"answer_only", "coordinated_workflow", "clarification", "builtin", "deterministic_context"})
 
     def test_csv_upload_converts_table_to_points_then_maps_and_explains(self) -> None:
         import api_server
@@ -110,20 +122,21 @@ class RealBackendChatE2ETests(unittest.TestCase):
             api_server.base_settings.workdir = root
             api_server.base_settings.ensure_dirs()
             client = TestClient(api_server.app)
+            session_id = enable_tool_mode(client)
 
             upload = client.post(
                 "/api/files/upload",
+                data={"session_id": session_id},
                 files={"files": ("e2e_points.csv", csv_bytes, "text/csv")},
             )
             self.assertEqual(upload.status_code, 200, upload.text)
             self.assertEqual(upload.json()["dashboard"]["datasets"][0]["type"], "table")
 
-            map_response = client.post("/api/chat/ask", json={"prompt": "plot population density map"})
+            map_response = client.post("/api/chat/ask", json={"prompt": "plot population density map", "session_id": session_id})
             self.assertEqual(map_response.status_code, 200, map_response.text)
             map_body = map_response.json()
             self.assertEqual(map_body["mode"], "coordinated_workflow")
             self.assertEqual(map_body["presentation_result"]["status"], "succeeded")
-            session_id = map_body["current_session_id"]
             refs = map_body["presentation_result"]["artifact_refs"]
             self.assertTrue(refs)
             self.assertTrue(any(str(step.get("tool_name")) == "table_to_points" for step in map_body["presentation_result"]["executed_steps"]))
@@ -145,7 +158,7 @@ class RealBackendChatE2ETests(unittest.TestCase):
             )
             self.assertEqual(followup.status_code, 200, followup.text)
             followup_body = followup.json()
-            self.assertIn(followup_body["mode"], {"coordinated_workflow", "clarification", "builtin", "deterministic_context"})
+            self.assertIn(followup_body["mode"], {"answer_only", "coordinated_workflow", "clarification", "builtin", "deterministic_context"})
 
     def test_llm_unavailable_returns_clarification_and_zero_tool_execution(self) -> None:
         import api_server
@@ -162,10 +175,11 @@ class RealBackendChatE2ETests(unittest.TestCase):
             api_server.base_settings.workdir = root
             api_server.base_settings.ensure_dirs()
             client = TestClient(api_server.app)
+            session_id = enable_tool_mode(client)
 
             with mock.patch("core.service.execute_workflow_plan", wraps=execute_workflow_plan) as workflow_mock:
                 with mock.patch("core.service.execute_validated_tool_plan", wraps=execute_validated_tool_plan) as tool_mock:
-                    response = client.post("/api/chat/ask", json={"prompt": "plot population density map"})
+                    response = client.post("/api/chat/ask", json={"prompt": "plot population density map", "session_id": session_id})
 
             self.assertEqual(response.status_code, 200, response.text)
             body = response.json()

@@ -2,25 +2,31 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from collections import defaultdict
 from datetime import datetime
 import csv
 import json
+import os
 import re
 import shutil
 import zipfile
 
 from .config import AUTO_ROUTE_LABEL, Settings, is_vision_model, load_settings, pick_preferred_model
+from .compat_usage import CompatibilityUsageStore
 from .context_builder import build_conversation_context, format_context_for_agent
+from .background_worker import UnifiedBackgroundWorker, WorkerResourceLimits
 from .conversation_intent import classify_user_intent
 from .conversation_state import ConversationState, load_conversation_state, recover_conversation_state, save_conversation_state
 from .followup_resolver import resolve_followup
 from .frontend_context import apply_frontend_context_to_state, sanitize_frontend_context
 from .llm_task_planner import build_llm_task_plan, build_shadow_llm_task_plan
 from .llm_planner_observability import summarize_shadow_plan
+from .llm_config import load_llm_provider_config_for_role, model_for_role, validate_llm_config
+from .lifecycle_cleanup import cleanup_session_private_state
+from .durable_jobs import DurableJobStore
 from .model_results import generate_model_result_id
 from .coordinated_executor import run_coordinated_execution
 from .download_request_executor import execute_download_requests
@@ -30,11 +36,23 @@ from .result_interpreter import interpret_result
 from .response_language import enforce_user_text_language, localized_text, normalize_response_language
 from .task_planner import build_task_plan
 from .plan_validator import validate_task_plan_before_execution
+from .pending_confirmation import (
+    cancel_awaiting_confirmations,
+    confirmation_plan,
+    create_pending_confirmation,
+    extract_confirmation_id,
+    get_confirmation,
+    is_confirmation_message,
+    is_plan_modification_message,
+    latest_awaiting_confirmation,
+    update_confirmation_status,
+)
 from .task_outcome_advisor import build_task_outcome
 from .tool_executor import execute_validated_tool_plan
 from .tool_context import ToolRuntimeContext
 from .workflow_executor import execute_workflow_plan
 from .workflows.data_package import format_ingest_message, ingest_data_package
+from .zhipu_json_client import LLMProviderError, ZhipuJSONClient
 
 try:
     from .data_manager import DataManager
@@ -58,6 +76,16 @@ FAST_KEYWORDS = ("快速", "简要", "概括", "一句话", "简洁", "速览")
 LOCAL_LIBRARY_CONTEXT_MARKER = "【本地文件库上下文】"
 
 
+def build_default_answer_client() -> Any | None:
+    config = load_llm_provider_config_for_role("chat")
+    validation = validate_llm_config(config)
+    if validation.get("status") == "invalid" or config.provider == "fake" or not config.api_key_present:
+        return None
+    if config.provider == "zai":
+        return ZhipuJSONClient(config, api_key=str(os.getenv(config.api_key_env) or ""), operation="answer_only")
+    return None
+
+
 def _artifact_is_image(artifact: dict[str, Any]) -> bool:
     artifact_type = str(artifact.get("type") or artifact.get("kind") or "").lower()
     mime_type = str(artifact.get("mime_type") or "").lower()
@@ -67,6 +95,64 @@ def _artifact_is_image(artifact: dict[str, Any]) -> bool:
         or mime_type.startswith("image/")
         or Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".svg"}
     )
+
+
+def _plan_requests_background_execution(plan: dict[str, Any]) -> bool:
+    mode = str(plan.get("execution_mode") or plan.get("executor_mode") or "").strip().lower()
+    if mode in {"background", "worker", "durable"}:
+        return True
+    if bool(plan.get("run_in_background")):
+        return True
+    llm_plan = plan.get("llm_task_plan") if isinstance(plan.get("llm_task_plan"), dict) else {}
+    return str(llm_plan.get("execution_mode") or "").strip().lower() in {"background", "worker", "durable"} or bool(llm_plan.get("run_in_background"))
+
+
+def _plan_requests_tool_execution(plan: dict[str, Any]) -> bool:
+    if bool(plan.get("execution_required", True)) is False or str(plan.get("response_mode") or "") == "answer_only":
+        return False
+    if str(plan.get("task_type") or plan.get("intent") or "") == "confirm_pending_plan":
+        return True
+    for key in ("workflow_plan", "tool_plan", "download_requests", "requested_downloads"):
+        value = plan.get(key)
+        if isinstance(value, list) and value:
+            return True
+    if isinstance(plan.get("validated_tool_args"), dict) and plan.get("validated_tool_args"):
+        return True
+    if bool(plan.get("requires_confirmation")):
+        return True
+    llm_plan = plan.get("llm_task_plan") if isinstance(plan.get("llm_task_plan"), dict) else {}
+    for key in ("workflow_steps", "selected_tools", "download_requests", "requested_downloads"):
+        value = llm_plan.get(key)
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _intent_requests_tool_execution(intent: dict[str, Any]) -> bool:
+    intent_name = str(intent.get("intent") or "").strip().lower()
+    if intent_name in {
+        "data_download",
+        "data_processing",
+        "map_generation",
+        "mapping",
+        "modeling",
+        "spatial_analysis",
+        "raster_analysis",
+        "vector_analysis",
+        "table_to_points",
+        "gcp_uncertainty",
+    }:
+        return True
+    secondary = intent.get("secondary_intents") if isinstance(intent.get("secondary_intents"), list) else []
+    return any(str(item or "").strip().lower() in {"data_download", "data_processing", "map_generation", "mapping", "modeling"} for item in secondary)
+
+
+def _chat_only_understood_goal(plan: dict[str, Any], user_message: str) -> str:
+    goal = str(plan.get("primary_goal") or plan.get("task_type") or "").strip()
+    if goal and goal not in {"unclear_request", "data_download", "data_processing"}:
+        return goal
+    compact = " ".join(str(user_message or "").strip().split())
+    return compact[:80] or "这项数据操作"
 
 
 def _visible_chat_content(content: str) -> str:
@@ -171,16 +257,34 @@ class GISWorkspaceService:
             "progress": 0,
         }
         self._agents: dict[str, Any] = {}
-        self.current_session_id = self._ensure_session()
+        self.current_session_id = self._current_or_first_session()
         self.current_user_id = ""
         self.manager.set_runtime_scope("", self.current_session_id)
 
-    def set_request_context(self, user_id: str = "", session_id: str = "") -> None:
+    def _record_compat_usage_flags(self, payload: dict[str, Any], *, source: str) -> None:
+        try:
+            store = CompatibilityUsageStore(self.settings.workdir / "compat_usage.db")
+            for field in (
+                "user_facing_result_fallback_used",
+                "deprecated_raw_job_api_used",
+                "legacy_download_url_used",
+                "prevalidated_executor_used",
+                "direct_command_legacy_api_used",
+                "legacy_api_used",
+            ):
+                if bool(payload.get(field)):
+                    store.record(field, source=source, caller="service.ask", request_id=self.current_session_id)
+        except Exception:
+            pass
+
+    def set_request_context(self, user_id: str = "", session_id: str = "", *, create_if_missing: bool = False) -> None:
         self.current_user_id = str(user_id or "").strip()
         if session_id:
             self.use_session_or_current(session_id)
-        else:
+        elif create_if_missing:
             self.current_session_id = self._ensure_session()
+        else:
+            self.current_session_id = self._current_or_first_session()
         self.manager.set_runtime_scope(self.current_user_id, self.current_session_id)
 
     def _get_agent(self, model_name: str) -> Any:
@@ -214,6 +318,19 @@ class GISWorkspaceService:
         self.manager.database.create_conversation(session_id, "新对话")
         self.manager.database.set_current_conversation_id(session_id)
         return session_id
+
+    def _current_or_first_session(self) -> str:
+        sessions = self.manager.database.list_conversations()
+        existing = {str(item.get("session_id") or "") for item in sessions}
+        current = self.manager.database.get_current_conversation_id()
+        if current and current in existing:
+            return current
+        if sessions:
+            session_id = str(sessions[0].get("session_id") or "")
+            if session_id:
+                self.manager.database.set_current_conversation_id(session_id)
+                return session_id
+        return ""
 
     def _default_title(self, text: str) -> str:
         clean = " ".join((text or "").strip().split())
@@ -253,8 +370,22 @@ class GISWorkspaceService:
         return clean[:32] or "新对话"
 
     def create_new_session(self, title: str | None = None) -> str:
+        requested_title = str(title or "").strip()
+        if not requested_title:
+            for item in self.manager.database.list_conversations():
+                session_id = str(item.get("session_id") or "")
+                if str(item.get("title") or "").strip() != "新对话":
+                    continue
+                if str(item.get("interaction_mode") or "chat_only") != "chat_only":
+                    continue
+                if self.manager.database.list_messages(session_id):
+                    continue
+                self.current_session_id = session_id
+                self.manager.database.set_current_conversation_id(session_id)
+                self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), session_id)
+                return session_id
         session_id = f"session_{uuid4().hex[:10]}"
-        self.manager.database.create_conversation(session_id, title or "新对话")
+        self.manager.database.create_conversation(session_id, requested_title or "新对话")
         self.current_session_id = session_id
         self.manager.database.set_current_conversation_id(session_id)
         self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), session_id)
@@ -273,7 +404,7 @@ class GISWorkspaceService:
     def use_session_or_current(self, session_id: str) -> bool:
         clean = str(session_id or "").strip()
         if not clean:
-            self.current_session_id = self._ensure_session()
+            self.current_session_id = self._current_or_first_session()
             self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), self.current_session_id)
             return False
 
@@ -290,10 +421,20 @@ class GISWorkspaceService:
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = self.manager.database.list_conversations()
         changed = False
+        current = str(self.manager.database.get_current_conversation_id() or "")
+        empty_seen = False
+        visible_sessions: list[dict[str, Any]] = []
         for item in sessions:
+            messages = self.manager.database.list_messages(item["session_id"])
+            item["message_count"] = len(messages)
+            is_empty_new = len(messages) == 0 and (item.get("title") or "").strip() == "新对话"
+            if is_empty_new:
+                if empty_seen and str(item.get("session_id") or "") != current:
+                    continue
+                empty_seen = True
+            visible_sessions.append(item)
             if (item.get("title") or "").strip() != "新对话":
                 continue
-            messages = self.manager.database.list_messages(item["session_id"])
             first_user = next((m for m in messages if m.get("role") == "user" and str(m.get("content") or "").strip()), None)
             if not first_user:
                 continue
@@ -302,7 +443,30 @@ class GISWorkspaceService:
                 self.manager.database.rename_conversation(item["session_id"], title)
                 item["title"] = title
                 changed = True
-        return self.manager.database.list_conversations() if changed else sessions
+        if changed:
+            return self.list_sessions()
+        return visible_sessions
+
+    def current_interaction_mode(self) -> str:
+        if not self.current_session_id:
+            self.current_session_id = self._current_or_first_session()
+        if not self.current_session_id:
+            return "chat_only"
+        return self.manager.database.get_conversation_interaction_mode(self.current_session_id)
+
+    def set_interaction_mode(self, interaction_mode: str, session_id: str | None = None) -> str:
+        target = str(session_id or self.current_session_id or "").strip()
+        if not target:
+            target = self._ensure_session()
+            self.current_session_id = target
+        existing = {str(item.get("session_id") or "") for item in self.manager.database.list_conversations()}
+        if target not in existing:
+            raise ValueError(f"session not found: {target}")
+        mode = self.manager.database.set_conversation_interaction_mode(target, interaction_mode)
+        if target == self.current_session_id:
+            self.manager.set_runtime_scope(getattr(self, "current_user_id", ""), target)
+        self.manager.log_operation("interaction_mode_changed", f"{target}:{mode}", "chat")
+        return mode
 
     def delete_session(self, session_id: str) -> str:
         sessions = self.manager.database.list_conversations()
@@ -313,6 +477,11 @@ class GISWorkspaceService:
         was_current = session_id == self.current_session_id
         deleted_title = target.get("title", "新对话")
         cleanup = self.manager.cleanup_session_data(session_id)
+        cleanup["private_state"] = cleanup_session_private_state(
+            getattr(self, "current_user_id", ""),
+            session_id,
+            durable_job_db=self.manager.workdir / "durable_jobs.db",
+        )
         self.manager.database.delete_conversation(session_id)
 
         remaining = [item for item in self.manager.database.list_conversations() if item["session_id"] != session_id]
@@ -328,6 +497,8 @@ class GISWorkspaceService:
         return self.current_session_id
 
     def current_messages(self) -> list[dict[str, Any]]:
+        if not self.current_session_id:
+            return []
         messages = self.manager.database.list_messages(self.current_session_id)
         for item in messages:
             if item.get("role") == "user":
@@ -393,12 +564,15 @@ class GISWorkspaceService:
 
     def _pick_best_text_model(self, prompt: str) -> str:
         text_models = self.settings.text_models() or tuple(model for model in self.settings.supported_models if not is_vision_model(model))
-        preferred = ("glm-4.7", "glm-4.5-air") if any(word in prompt for word in TEXT_DEEP_KEYWORDS) else ("glm-4.5-air", "glm-4.7")
+        tool_model = model_for_role("tool", fallback_model="glm-4.7")
+        chat_model = model_for_role("chat", fallback_model="glm-4.5-air")
+        preferred = (tool_model, chat_model) if any(word in prompt for word in TEXT_DEEP_KEYWORDS) else (chat_model, tool_model)
         return pick_preferred_model(text_models, preferred) or self.settings.model
 
     def _pick_best_vision_model(self, prompt: str) -> str:
         vision_models = self.settings.vision_models()
-        preferred = ("glm-4.1v-thinking-flashx", "glm-4.6v") if any(word in prompt for word in FAST_KEYWORDS) else ("glm-4.6v", "glm-4.1v-thinking-flashx")
+        vision_model = model_for_role("vision", fallback_model="glm-4.6v")
+        preferred = ("glm-4.1v-thinking-flashx", vision_model) if any(word in prompt for word in FAST_KEYWORDS) else (vision_model, "glm-4.1v-thinking-flashx")
         return pick_preferred_model(vision_models, preferred) or self._pick_best_text_model(prompt)
 
     def _prompt_needs_visual(self, prompt: str) -> bool:
@@ -1095,6 +1269,395 @@ class GISWorkspaceService:
             return self._format_capability_reply()
         return None
 
+    def _answer_only_reply(self, prompt: str, plan: dict[str, Any], context: dict[str, Any]) -> str:
+        response_language = normalize_response_language(plan.get("response_language") or context.get("response_language"), prompt)
+        text = str(prompt or "").strip().lower()
+        if not response_language.startswith("zh"):
+            if "ndvi" in text:
+                return (
+                    "NDVI is the Normalized Difference Vegetation Index. It is commonly calculated as "
+                    "(NIR - Red) / (NIR + Red) to describe vegetation greenness. In this system, NDVI calculation "
+                    "requires real raster metadata and explicit red/NIR band mapping before any tool runs."
+                )
+            if "gis" in text:
+                return (
+                    "GIS means Geographic Information System. It is used to organize, display, analyze, and model "
+                    "spatial data such as maps, boundaries, rasters, remote-sensing imagery, and station records."
+                )
+            return "I can answer GIS concepts and usage questions here, but no tool was executed for this request."
+
+        if "ndvi" in text or "归一化植被指数" in text:
+            return (
+                "NDVI 是归一化植被指数，常用公式是 (近红外 - 红光) / (近红外 + 红光)，用于反映植被覆盖和长势。"
+                "在本系统中，计算 NDVI 必须基于真实栅格元数据，并明确红光和近红外波段映射；如果波段含义不清楚，系统会先追问，不会凭文件名猜测。"
+            )
+        if "空间自相关" in text:
+            return (
+                "空间自相关指相近位置上的事物往往更相似，或者呈现相互影响的空间分布关系。"
+                "在生活里，它可以帮助判断房价、空气污染、疾病风险、交通拥堵、降雨或土壤水分是否在空间上成片聚集，而不是随机分布。"
+                "例如某片区域的空气质量异常偏差如果周边也类似，就可能提示同一污染源或相似地形条件；在农业中，土壤水分或作物长势的空间自相关能帮助安排采样点和灌溉分区。"
+                "如果要在本系统里实际计算空间自相关，需要切换到工具模式，并提供带坐标或几何的真实数据。"
+            )
+        if "gis" in text or "地理信息系统" in text:
+            return (
+                "GIS 是地理信息系统，用来管理、展示、分析和建模带有空间位置的数据，例如行政区边界、河流流域、遥感栅格、站点表格和地图成果。"
+                "在本系统中，GIS 可用于数据管理、地图展示、空间分析，以及遥感数据与站点数据结合的建模分析。"
+            )
+        if (
+            ("支持" in text and ("下载" in text or "数据" in text))
+            or "你可以做什么" in text
+            or "你可以做些什么" in text
+            or "你能做什么" in text
+            or "你能做些什么" in text
+            or "可以做什么" in text
+            or "可以做些什么" in text
+        ):
+            from .product_catalog import list_product_catalog
+
+            products = list_product_catalog()
+            lines = ["我可以帮助你完成 GIS 数据管理、地图展示、空间分析、遥感数据下载与站点/栅格建模。当前可规划的数据下载能力以 Product Catalog 为准，主要包括："]
+            for item in products[:8]:
+                name = str(item.get("display_name_zh") or item.get("product_id") or "")
+                resolutions = "、".join(str(value) for value in item.get("supported_resolutions", []) if str(value).strip()) or "以目录配置为准"
+                temporal = str(item.get("temporal_requirement") or "none")
+                time_note = "不需要时间范围" if temporal == "none" else "需要明确时间范围"
+                lines.append(f"- {name}：分辨率 {resolutions}，{time_note}。")
+            lines.append("真正提交下载前仍会经过区域、分辨率、时间、权限和登录状态校验；不会只凭文字说明创建下载任务。")
+            return "\n".join(lines)
+        if text in {"你好", "您好", "嗨", "hello", "hi", "hey"}:
+            return (
+                "你好，我是 GIS Agent。你可以让我解释 GIS 概念、上传和检查空间数据、规划遥感数据下载、执行栅格/矢量处理、"
+                "生成地图成果，或基于真实站点和栅格数据运行建模分析。当前这句话只是问候，本轮没有执行任何工具。"
+            )
+        if "上传" in text and ("shp" in text or "矢量" in text or "文件" in text):
+            return (
+                "上传 SHP 时，建议把同一图层的 .shp、.shx、.dbf、.prj 等文件一起压缩成 ZIP 后上传。"
+                "系统会先读取真实文件元数据，包括几何类型、字段、要素数、CRS 和范围；只有通过校验后，后续裁剪、空间连接或地图加载工具才会使用该数据。"
+            )
+
+        snippets = [item for item in context.get("knowledge_snippets", []) if isinstance(item, dict)]
+        if snippets:
+            parts = ["根据当前检索到的 GIS 知识片段，可以这样理解："]
+            for item in snippets[:2]:
+                title = str(item.get("title") or "").strip()
+                content = str(item.get("content") or item.get("text") or "").strip()
+                if title:
+                    parts.append(f"- {title}")
+                if content:
+                    parts.append(content[:240])
+            parts.append("本轮只是知识回答，没有执行工具或生成成果文件。")
+            return "\n".join(parts)
+        return "这是一个知识或使用帮助问题，本轮没有执行 GIS 工具。请换一种更具体的问法，或说明你想了解的 GIS 概念、数据类型或操作步骤。"
+
+    def _answer_only_reply_with_source(
+        self,
+        prompt: str,
+        plan: dict[str, Any],
+        context: dict[str, Any],
+        on_delta: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        fallback = self._answer_only_reply(prompt, plan, context)
+        response_language = normalize_response_language(plan.get("response_language") or context.get("response_language"), prompt)
+        if not str(getattr(self.settings, "api_key", "") or "").strip():
+            return {"reply": fallback, "source": "deterministic_fallback", "error": "api_key_missing"}
+        client = build_default_answer_client()
+        if client is None:
+            return {"reply": fallback, "source": "deterministic_fallback", "error": "answer_client_unavailable"}
+
+        snippets = []
+        for item in context.get("knowledge_snippets", []) if isinstance(context.get("knowledge_snippets"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            snippets.append(
+                {
+                    "title": str(item.get("title") or "")[:120],
+                    "content": str(item.get("content") or item.get("text") or "")[:700],
+                    "source": str(item.get("source") or "")[:120],
+                    "version": str(item.get("knowledge_version") or item.get("version") or "")[:60],
+                }
+            )
+        payload = {
+            "task": "answer_only_chat",
+            "response_language": response_language,
+            "user_question": str(prompt or "")[:1200],
+            "knowledge_snippets": snippets[:5],
+            "constraints": [
+                "回答用户问题，不生成工具计划，不声称已执行任何下载、GIS处理、建模或文件操作。",
+                "可以基于知识片段回答；知识片段不足时给出通用解释并说明如需实际分析要切换工具模式。",
+                "不要输出内部路径、chunk id、token、cookie、user_id、session_id 或调试日志。",
+                "必须返回 JSON object: {\"answer\": string, \"confidence\": number}。",
+            ],
+        }
+        try:
+            if on_delta is not None and hasattr(client, "stream_text"):
+                stream_payload = dict(payload)
+                stream_payload["constraints"] = [
+                    "使用自然语言直接回答用户问题，不生成工具计划，不声称已执行任何下载、GIS处理、建模或文件操作。",
+                    "可以基于知识片段回答；知识片段不足时给出通用解释并说明如需实际分析要切换工具模式。",
+                    "不要输出内部路径、chunk id、token、cookie、user_id、session_id 或调试日志。",
+                    "使用用户的语言回答，不要输出 JSON、Markdown 代码块或内部状态。",
+                ]
+                chunks: list[str] = []
+                for delta in client.stream_text(
+                    [
+                        (
+                            "system",
+                            "你是 GIS 智能体的聊天回答器。你只回答知识、能力和使用帮助问题，绝不执行工具，也不伪造结果。",
+                        ),
+                        ("user", json.dumps(stream_payload, ensure_ascii=False, sort_keys=True, default=str)),
+                    ]
+                ):
+                    if not delta:
+                        continue
+                    chunks.append(delta)
+                    on_delta(delta)
+                answer = "".join(chunks).strip()
+                if answer:
+                    return {
+                        "reply": enforce_user_text_language(answer, response_language, "answer_only"),
+                        "source": "llm_answer_stream",
+                        "llm_usage": {
+                            "usage": getattr(client, "last_usage", {}),
+                            "cached_tokens": int(getattr(client, "last_cached_tokens", 0) or 0),
+                            "latency_ms": int(getattr(client, "last_latency_ms", 0) or 0),
+                            "retry_count": int(getattr(client, "last_retry_count", 0) or 0),
+                            "model": str(getattr(client, "last_model", "") or ""),
+                            "status": str(getattr(client, "last_status", "") or ""),
+                        },
+                    }
+            raw = client.invoke(
+                [
+                    (
+                        "system",
+                        "你是 GIS 智能体的聊天回答器。你只回答知识、能力和使用帮助问题，绝不执行工具，也不伪造结果。",
+                    ),
+                    ("user", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
+                ]
+            )
+            data = json.loads(raw)
+            answer = str(data.get("answer") or "").strip() if isinstance(data, dict) else ""
+            confidence = float(data.get("confidence") or 0.0) if isinstance(data, dict) else 0.0
+            if answer and confidence >= 0.2:
+                return {
+                    "reply": enforce_user_text_language(answer, response_language, "answer_only"),
+                    "source": "llm_answer",
+                    "llm_usage": {
+                        "usage": getattr(client, "last_usage", {}),
+                        "cached_tokens": int(getattr(client, "last_cached_tokens", 0) or 0),
+                        "latency_ms": int(getattr(client, "last_latency_ms", 0) or 0),
+                        "retry_count": int(getattr(client, "last_retry_count", 0) or 0),
+                        "model": str(getattr(client, "last_model", "") or ""),
+                        "status": str(getattr(client, "last_status", "") or ""),
+                    },
+                }
+        except (LLMProviderError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            return {"reply": fallback, "source": "deterministic_fallback", "error": type(exc).__name__}
+        return {"reply": fallback, "source": "deterministic_fallback", "error": "invalid_answer"}
+
+    def _confirmation_scope(self) -> tuple[str, str, str]:
+        user_id = str(getattr(self, "current_user_id", "") or "anonymous")
+        session_id = str(self.current_session_id or "")
+        return user_id, session_id, session_id
+
+    def _area_confirmation_label(self, area_asset_id: str, context: dict[str, Any], plan: dict[str, Any]) -> str:
+        for item in context.get("area_candidates", []) if isinstance(context.get("area_candidates"), list) else []:
+            if isinstance(item, dict) and str(item.get("asset_id") or item.get("geometry_asset_id") or "") == str(area_asset_id):
+                name = str(item.get("name") or area_asset_id)
+                source = str(item.get("area_source") or item.get("source") or "")
+                if source == "local_admin_boundary":
+                    return f"{name}行政区边界"
+                if "basin" in source or "流域" in name:
+                    return f"{name}流域边界"
+                return name
+        goal = str(plan.get("primary_goal") or "")
+        if "成都市" in goal or "成都" in goal:
+            return "成都市行政区边界"
+        if str(area_asset_id).startswith("library:basin:shandianhe"):
+            return "闪电河流域边界"
+        return str(area_asset_id or "已解析区域边界")
+
+    def _download_confirmation_reply(self, plan: dict[str, Any], context: dict[str, Any], record: dict[str, Any]) -> str:
+        from .product_catalog import product_by_id
+
+        requests = plan.get("download_requests") if isinstance(plan.get("download_requests"), list) else []
+        lines = ["已识别下载计划，需要你确认后才会提交下载任务："]
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            product = product_by_id(str(request.get("product_id") or request.get("product_key") or "")) or {}
+            product_name = str(product.get("display_name_zh") or request.get("product_id") or "下载产品")
+            resolution = str(request.get("resolved_resolution") or request.get("requested_resolution") or "以产品目录为准")
+            area_label = self._area_confirmation_label(str(request.get("area_asset_id") or ""), context, plan)
+            source = str(product.get("source") or "数据源")
+            login_note = str(product.get("login_or_license_requirement") or "可能需要登录、授权或配额。")
+            lines.append(f"- 区域：{area_label}")
+            lines.append(f"- 产品：{product_name}")
+            lines.append(f"- 分辨率：{resolution}")
+            lines.append(f"- 数据源：{source}")
+            lines.append(f"- 说明：{login_note}")
+        lines.append("确认后系统会继续校验登录态、许可、配额和资产状态；如果需要登录，会进入等待登录状态，不会伪造成下载完成。")
+        lines.append(f"确认编号：{record.get('confirmation_id')}")
+        return "\n".join(lines)
+
+    def _confirmation_action_required(self, record: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": "confirmation_required",
+            "status": str(record.get("status") or "awaiting_confirmation"),
+            "confirmation_id": str(record.get("confirmation_id") or ""),
+            "confirmed_action_id": str(record.get("confirmation_id") or ""),
+            "confirmation_prompt": str(plan.get("primary_goal") or "确认下载任务"),
+            "message": "请确认产品、区域、账号/登录态、配额和覆盖风险后再继续。",
+            "available_actions": ["confirm", "cancel"],
+        }
+
+    def _confirmation_clarification_response(
+        self,
+        *,
+        state: ConversationState,
+        user_message: str,
+        intent: dict[str, Any],
+        context: dict[str, Any],
+        dashboard_data: dict[str, Any],
+        reply: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        reply = self._clean_assistant_reply(reply)
+        plan = {
+            "task_type": "confirmation",
+            "execution_required": False,
+            "response_mode": "clarification",
+            "should_ask_clarification": True,
+            "clarification_question": reply,
+            "response_language": normalize_response_language(context.get("response_language"), user_message),
+        }
+        task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+        assistant_meta = {
+            "model": "conversation-coordinator",
+            "mode": "clarification",
+            "reason": reason,
+            "intent": intent,
+            "plan": plan,
+        }
+        self._update_conversation_state_after_turn(
+            state,
+            user_message=user_message,
+            intent=intent,
+            plan=plan,
+            context=context,
+            reply=reply,
+            dashboard_data=dashboard_data,
+        )
+        self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+        self.last_route = {"mode": "clarification", "model": "conversation-coordinator", "reason": reason, "images": []}
+        self._set_runtime_status("等待确认", reply, busy=False, phase="clarification", progress=100)
+        return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": reason, "images": [], "task_outcome": task_outcome}
+
+    def _execute_confirmed_download_plan(
+        self,
+        *,
+        state: ConversationState,
+        user_message: str,
+        intent: dict[str, Any],
+        context: dict[str, Any],
+        dashboard_data: dict[str, Any],
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan = confirmation_plan(record)
+        validation_context = {**context, "confirmed_action_id": str(record.get("confirmation_id") or "")}
+        plan_validation = validate_task_plan_before_execution(plan, validation_context)
+        if not plan_validation.get("ok"):
+            reply = "待确认下载计划已失效或无法通过执行前校验，请重新发起下载请求。"
+            update_confirmation_status(self.manager.database, str(record.get("confirmation_id") or ""), "cancelled")
+            return self._confirmation_clarification_response(
+                state=state,
+                user_message=user_message,
+                intent=intent,
+                context=context,
+                dashboard_data=dashboard_data,
+                reply=reply,
+                reason="pending_confirmation_invalid",
+            )
+        plan = plan_validation.get("execution_plan") if isinstance(plan_validation.get("execution_plan"), dict) else plan
+        update_confirmation_status(self.manager.database, str(record.get("confirmation_id") or ""), "confirmed")
+        download_execution = execute_download_requests(
+            self.manager,
+            plan,
+            context=validation_context,
+            runtime_context=self._tool_runtime_context(),
+        )
+        update_confirmation_status(self.manager.database, str(record.get("confirmation_id") or ""), "consumed")
+        tool_results = download_execution.get("tool_results") if isinstance(download_execution.get("tool_results"), list) else []
+        presentation_bundle = build_presentation_bundle(
+            task_goal=str(plan.get("primary_goal") or "确认下载任务"),
+            task_plan_summary={
+                "primary_goal": plan.get("primary_goal") or "",
+                "intent": plan.get("intent") or intent.get("intent") or "",
+                "operation": plan.get("operation") or "",
+                "response_language": plan.get("response_language") or context.get("response_language") or "",
+            },
+            coordinator_status=str(download_execution.get("status") or ""),
+            normalized_results=tool_results,
+            response_language=str(plan.get("response_language") or context.get("response_language") or ""),
+        )
+        reply = self._clean_assistant_reply(str(presentation_bundle["reply"]))
+        current_artifacts: list[dict[str, Any]] = []
+        download_management_views: list[dict[str, Any]] = []
+        for tool_result in tool_results:
+            if not isinstance(tool_result, dict):
+                continue
+            artifacts = tool_result.get("artifacts") if isinstance(tool_result.get("artifacts"), list) else []
+            current_artifacts.extend([artifact for artifact in artifacts if isinstance(artifact, dict)])
+            diagnostics = tool_result.get("diagnostics") if isinstance(tool_result.get("diagnostics"), dict) else {}
+            management_view = diagnostics.get("management_view")
+            if isinstance(management_view, dict):
+                download_management_views.append(management_view)
+        task_outcome = build_task_outcome("download", {"reply": reply, "presentation_result": presentation_bundle["presentation_result"]}, dashboard=dashboard_data)
+        assistant_meta = {
+            "model": "conversation-coordinator",
+            "mode": "validated_download_executor",
+            "reason": "confirmed_pending_download",
+            "intent": intent,
+            "plan": plan,
+            "plan_validation": plan_validation,
+            "confirmed_pending_confirmation_id": str(record.get("confirmation_id") or ""),
+            "pending_plan_id": str(record.get("plan_id") or ""),
+            "normalized_results": presentation_bundle["normalized_results"],
+            "presentation_result": presentation_bundle["presentation_result"],
+            "execution_summary": presentation_bundle["execution_summary"],
+            "download_management_views": download_management_views,
+            "execution_trace": download_execution.get("execution_trace"),
+            "action_required": None,
+            "artifacts": current_artifacts,
+            "files": current_artifacts,
+            "newly_executed": True,
+            "source": "pending_confirmation",
+        }
+        self._update_conversation_state_after_turn(
+            state,
+            user_message=user_message,
+            intent=intent,
+            plan=plan,
+            context=context,
+            reply=reply,
+            dashboard_data=dashboard_data,
+        )
+        self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+        self.last_route = {"mode": "validated_download_executor", "model": "conversation-coordinator", "reason": "confirmed_pending_download", "images": []}
+        self._set_runtime_status("下载任务已提交", reply, busy=False, phase="complete" if download_execution.get("status") == "succeeded" else "clarification", progress=100)
+        return {
+            "reply": reply,
+            "model": "conversation-coordinator",
+            "mode": "validated_download_executor",
+            "reason": "confirmed_pending_download",
+            "images": [],
+            "artifacts": current_artifacts,
+            "files": current_artifacts,
+            "presentation_result": presentation_bundle["presentation_result"],
+            "execution_summary": presentation_bundle["execution_summary"],
+            "download_management_views": download_management_views,
+            "task_outcome": task_outcome,
+        }
+
     def _update_conversation_state_after_turn(
         self,
         state: ConversationState,
@@ -1178,6 +1741,7 @@ class GISWorkspaceService:
         frontend_context: dict[str, Any] | None = None,
         record_user_message: bool = True,
         extra_assistant_meta: dict[str, Any] | None = None,
+        stream_callback: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         if not self.current_session_id:
             self.current_session_id = self._ensure_session()
@@ -1203,6 +1767,74 @@ class GISWorkspaceService:
             if followup.get("referenced_object"):
                 state.referenced_object = followup["referenced_object"]
             context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
+            interaction_mode = self.current_interaction_mode()
+            context["interaction_mode"] = interaction_mode
+            user_id, session_id, conversation_id = self._confirmation_scope()
+            confirmation_id = extract_confirmation_id(user_message)
+            if not confirmation_id and is_plan_modification_message(user_message):
+                cancel_awaiting_confirmations(
+                    self.manager.database,
+                    user_id=user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    reason="user_modified_request",
+                )
+            pending_record = None
+            if confirmation_id:
+                pending_record = get_confirmation(
+                    self.manager.database,
+                    confirmation_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                )
+                if pending_record and str(pending_record.get("status") or "") not in {"awaiting_confirmation", "confirmed", "consumed"}:
+                    return self._confirmation_clarification_response(
+                        state=state,
+                        user_message=user_message,
+                        intent=intent,
+                        context=context,
+                        dashboard_data=dashboard_data,
+                        reply="这个确认请求已过期、取消或失效，请重新发起下载请求。",
+                        reason="pending_confirmation_unavailable",
+                    )
+            elif is_confirmation_message(user_message) or ("该区域" in user_message and "下载" in user_message):
+                pending_record = latest_awaiting_confirmation(
+                    self.manager.database,
+                    user_id=user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                )
+                if pending_record is None and is_confirmation_message(user_message):
+                    return self._confirmation_clarification_response(
+                        state=state,
+                        user_message=user_message,
+                        intent=intent,
+                        context=context,
+                        dashboard_data=dashboard_data,
+                        reply="当前没有待确认的下载或处理计划。请先说明要下载的区域、产品和分辨率。",
+                        reason="no_pending_confirmation",
+                    )
+                if pending_record is not None:
+                    pending_plan_snapshot = pending_record.get("validated_task_plan_snapshot") if isinstance(pending_record.get("validated_task_plan_snapshot"), dict) else {}
+                    context["awaiting_confirmation"] = {
+                        "confirmation_id": pending_record.get("confirmation_id"),
+                        "plan_id": pending_record.get("plan_id"),
+                        "primary_goal": pending_plan_snapshot.get("primary_goal"),
+                        "area_asset_ids": pending_record.get("area_asset_ids"),
+                        "product_ids": pending_record.get("product_ids"),
+                        "expires_at": pending_record.get("expires_at"),
+                    }
+                    pending_record = None
+            if confirmation_id and pending_record is not None:
+                return self._execute_confirmed_download_plan(
+                    state=state,
+                    user_message=user_message,
+                    intent=intent,
+                    context=context,
+                    dashboard_data=dashboard_data,
+                    record=pending_record,
+                )
             candidate_plan = build_task_plan(user_message, intent, context, manager=self.manager)
             llm_active_plan = build_llm_task_plan(user_message, context)
             plan = llm_active_plan.get("plan") if isinstance(llm_active_plan.get("plan"), dict) else candidate_plan
@@ -1213,6 +1845,7 @@ class GISWorkspaceService:
             llm_shadow_plan = build_shadow_llm_task_plan(user_message, context, candidate_plan)
 
             def _assistant_meta(payload: dict[str, Any]) -> dict[str, Any]:
+                payload["interaction_mode"] = interaction_mode
                 payload["llm_planner"] = {
                     key: value
                     for key, value in llm_active_plan.items()
@@ -1226,11 +1859,172 @@ class GISWorkspaceService:
                     payload.update(summarize_shadow_plan(llm_shadow_plan))
                 if extra_assistant_meta:
                     payload.update(extra_assistant_meta)
+                mode_value = str(payload.get("mode") or "")
+                reason_value = str(payload.get("reason") or "")
+                action_required = payload.get("action_required") if isinstance(payload.get("action_required"), dict) else {}
+                presentation = payload.get("presentation_result") if isinstance(payload.get("presentation_result"), dict) else {}
+                execution_summary = payload.get("execution_summary") if isinstance(payload.get("execution_summary"), dict) else {}
+                executable_modes = {
+                    "background_worker",
+                    "validated_download_executor",
+                    "coordinated_workflow",
+                    "validated_workflow_executor",
+                    "validated_tool_executor",
+                }
+                if mode_value in {"answer_only", "builtin", "deterministic_context"}:
+                    payload.setdefault("interaction_type", "chat_answer")
+                elif reason_value == "tool_mode_required":
+                    payload.setdefault("interaction_type", "tool_blocked")
+                elif mode_value in executable_modes or action_required or presentation:
+                    payload.setdefault("interaction_type", "tool_task")
+                else:
+                    payload.setdefault("interaction_type", "chat_answer")
+                if payload.get("interaction_type") == "tool_task":
+                    status = str(
+                        action_required.get("status")
+                        or presentation.get("status")
+                        or execution_summary.get("status")
+                        or ("awaiting_confirmation" if action_required.get("type") == "confirmation_required" else "")
+                        or ("waiting_login" if action_required.get("type") == "login_required" else "")
+                        or ("queued" if mode_value == "background_worker" else "")
+                        or "planning"
+                    )
+                    title = str(
+                        (payload.get("plan") if isinstance(payload.get("plan"), dict) else {}).get("primary_goal")
+                        or execution_summary.get("summary")
+                        or presentation.get("concise_summary")
+                        or "GIS 工具任务"
+                    )
+                    summary = str(
+                        presentation.get("error_summary")
+                        or presentation.get("clarification_question")
+                        or presentation.get("concise_summary")
+                        or execution_summary.get("summary")
+                        or "任务状态已更新。"
+                    )
+                    available_actions: list[str] = []
+                    if action_required.get("type") == "confirmation_required":
+                        available_actions.append("confirm")
+                    if action_required.get("type") == "login_required":
+                        available_actions.extend(["login_required", "cancel"])
+                    if status in {"failed", "blocked"}:
+                        available_actions.append("retry")
+                    payload.setdefault(
+                        "task_card",
+                        {
+                            "task_id": str(payload.get("task_id") or payload.get("plan_id") or ""),
+                            "title": title,
+                            "status": status,
+                            "summary": summary,
+                            "available_actions": available_actions,
+                        },
+                    )
                 return payload
+
+            def _return_chat_only_blocked() -> dict[str, Any]:
+                response_language = normalize_response_language(context.get("response_language"), user_message)
+                understood = _chat_only_understood_goal(plan, user_message)
+                if response_language.startswith("zh"):
+                    reply = f"我已理解你希望执行“{understood}”。当前处于聊天模式，不会进行数据操作。打开工具模式后，我可以为你生成并执行计划。"
+                else:
+                    reply = f"I understand that you want to run “{understood}”. This conversation is in chat mode, so I will not perform data operations. Enable tool mode and I can generate and execute a validated plan."
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": "chat_only_blocked",
+                    "reason": "tool_mode_required",
+                    "intent": intent,
+                    "plan": plan,
+                    "execution_required": True,
+                    "response_mode": "chat_only_notice",
+                    "normalized_results": [],
+                    "newly_executed": False,
+                    "source": "interaction_mode_gate",
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "chat_only_blocked", "model": "conversation-coordinator", "reason": "tool_mode_required", "images": []}
+                self._set_runtime_status("Chat mode", reply, busy=False, phase="chat_only", progress=100)
+                return {"reply": reply, "model": "conversation-coordinator", "mode": "chat_only_blocked", "reason": "tool_mode_required", "images": [], "task_outcome": task_outcome}
+
+            def _return_chat_only_answer(reason: str) -> dict[str, Any]:
+                response_language = normalize_response_language(context.get("response_language"), user_message)
+                answer_plan = {
+                    "primary_goal": "回答用户的知识或使用问题",
+                    "intent": "knowledge_qa",
+                    "operation": "answer_question",
+                    "execution_required": False,
+                    "response_mode": "answer_only",
+                    "input_assets": [],
+                    "asset_roles": {},
+                    "requested_downloads": [],
+                    "download_requests": [],
+                    "study_area": "",
+                    "time_range": {},
+                    "spatial_resolution": "",
+                    "candidate_tools": [],
+                    "selected_tools": [],
+                    "workflow_steps": [],
+                    "expected_outputs": ["chat_answer"],
+                    "requires_confirmation": False,
+                    "clarification_question": "",
+                    "confidence": 0.7,
+                    "source_attribution": {},
+                    "explicit_history_references": [],
+                    "response_language": response_language,
+                }
+                answer_payload = self._answer_only_reply_with_source(user_message, answer_plan, context, on_delta=stream_callback)
+                reply = enforce_user_text_language(answer_payload.get("reply") or "", response_language, "answer_only")
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": "answer_only",
+                    "reason": reason,
+                    "intent": intent,
+                    "plan": answer_plan,
+                    "execution_required": False,
+                    "response_mode": "answer_only",
+                    "normalized_results": [],
+                    "result_rendering_path": "presentation_result",
+                    "newly_executed": False,
+                    "source": "chat_only_answer_fallback",
+                    "answer_source": answer_payload.get("source"),
+                    "llm_answer_usage": answer_payload.get("llm_usage") or {},
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=answer_plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "answer_only", "model": "conversation-coordinator", "reason": reason, "images": []}
+                self._set_runtime_status("聊天模式", "已回答知识或使用问题，未执行工具", busy=False, phase="complete", progress=100)
+                return {"reply": reply, "model": "conversation-coordinator", "mode": "answer_only", "reason": reason, "images": [], "task_outcome": task_outcome}
 
             builtin_reply = self._builtin_workspace_reply(user_message)
 
             if llm_active_plan.get("status") != "ready":
+                plan_wants_tools = _plan_requests_tool_execution(plan) or _plan_requests_tool_execution(candidate_plan)
+                if not plan_wants_tools:
+                    plan_wants_tools = _intent_requests_tool_execution(intent)
+                if not plan_wants_tools:
+                    return _return_chat_only_answer(str(llm_active_plan.get("status") or "planner_unavailable_answer_only"))
+                if interaction_mode == "chat_only":
+                    return _return_chat_only_blocked()
                 response_language = normalize_response_language(context.get("response_language"), user_message)
                 reply = enforce_user_text_language(
                     plan.get("clarification_question") or localized_text("generic_no_plan", response_language),
@@ -1260,8 +2054,72 @@ class GISWorkspaceService:
                 self._set_runtime_status("Waiting for clarification", reply, busy=False, phase="clarification", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": assistant_meta["reason"], "images": [], "task_outcome": task_outcome}
 
+            if interaction_mode == "chat_only" and _plan_requests_tool_execution(plan):
+                return _return_chat_only_blocked()
+
             if plan_validation is not None and not plan_validation.get("ok"):
                 errors = plan_validation.get("errors") if isinstance(plan_validation.get("errors"), list) else []
+                error_codes = {str(error.get("code") or "") for error in errors if isinstance(error, dict)}
+                if (
+                    "CONFIRMATION_REQUIRED" in error_codes
+                    and (plan.get("download_requests") or plan.get("requested_downloads"))
+                    and not (error_codes - {"CONFIRMATION_REQUIRED"})
+                ):
+                    user_id, session_id, conversation_id = self._confirmation_scope()
+                    record = create_pending_confirmation(
+                        self.manager.database,
+                        user_id=user_id,
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                        plan=plan,
+                        reason=str(plan.get("clarification_question") or "download_requires_confirmation"),
+                    )
+                    reply = self._download_confirmation_reply(plan, context, record)
+                    reply = self._clean_assistant_reply(reply)
+                    task_outcome = build_task_outcome("download", {"reply": reply}, dashboard=dashboard_data)
+                    action_required = self._confirmation_action_required(record, plan)
+                    assistant_meta = _assistant_meta({
+                        "model": "conversation-coordinator",
+                        "mode": "awaiting_confirmation",
+                        "reason": "download_requires_confirmation",
+                        "intent": intent,
+                        "plan": plan,
+                        "pending_confirmation": {
+                            "confirmation_id": record.get("confirmation_id"),
+                            "status": record.get("status"),
+                            "plan_id": record.get("plan_id"),
+                            "area_asset_ids": record.get("area_asset_ids"),
+                            "product_ids": record.get("product_ids"),
+                            "expires_at": record.get("expires_at"),
+                        },
+                        "confirmation_id": record.get("confirmation_id"),
+                        "action_required": action_required,
+                        "available_actions": ["confirm", "cancel"],
+                        "newly_executed": False,
+                        "source": "pending_confirmation",
+                    })
+                    self._update_conversation_state_after_turn(
+                        state,
+                        user_message=user_message,
+                        intent=intent,
+                        plan=plan,
+                        context=context,
+                        reply=reply,
+                        dashboard_data=dashboard_data,
+                    )
+                    self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                    self.last_route = {"mode": "awaiting_confirmation", "model": "conversation-coordinator", "reason": "download_requires_confirmation", "images": []}
+                    self._set_runtime_status("等待确认", reply, busy=False, phase="confirmation", progress=100)
+                    return {
+                        "reply": reply,
+                        "model": "conversation-coordinator",
+                        "mode": "awaiting_confirmation",
+                        "reason": "download_requires_confirmation",
+                        "images": [],
+                        "confirmation_id": record.get("confirmation_id"),
+                        "action_required": action_required,
+                        "task_outcome": task_outcome,
+                    }
                 reason_text = "; ".join(str(error.get("code") or error.get("message") or "") for error in errors if isinstance(error, dict))
                 response_language = normalize_response_language(context.get("response_language"), user_message)
                 fallback = "已验证的 LLM 计划在执行前被门控阻断。" if response_language.startswith("zh") else "The validated LLM plan was blocked before execution."
@@ -1289,6 +2147,76 @@ class GISWorkspaceService:
                 self._set_runtime_status("Execution blocked", reply, busy=False, phase="clarification", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "plan_validation_blocked", "images": [], "task_outcome": task_outcome}
 
+            if str(plan.get("task_type") or plan.get("intent") or "") == "confirm_pending_plan":
+                user_id, session_id, conversation_id = self._confirmation_scope()
+                planned_confirmation_id = str(plan.get("confirmation_id") or (plan.get("llm_task_plan") or {}).get("confirmation_id") or "").strip()
+                record = get_confirmation(
+                    self.manager.database,
+                    planned_confirmation_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                ) if planned_confirmation_id else latest_awaiting_confirmation(
+                    self.manager.database,
+                    user_id=user_id,
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                )
+                if record is None:
+                    return self._confirmation_clarification_response(
+                        state=state,
+                        user_message=user_message,
+                        intent=intent,
+                        context=context,
+                        dashboard_data=dashboard_data,
+                        reply="当前没有可继续执行的待确认计划。请重新说明要下载的区域、产品和分辨率。",
+                        reason="pending_confirmation_not_found",
+                    )
+                return self._execute_confirmed_download_plan(
+                    state=state,
+                    user_message=user_message,
+                    intent=intent,
+                    context=context,
+                    dashboard_data=dashboard_data,
+                    record=record,
+                )
+
+            if plan_validation is not None and plan_validation.get("status") == "valid_answer_only":
+                response_language = normalize_response_language(plan.get("response_language") or context.get("response_language"), user_message)
+                answer_payload = self._answer_only_reply_with_source(user_message, plan, context, on_delta=stream_callback)
+                reply = enforce_user_text_language(answer_payload.get("reply") or "", response_language, "answer_only")
+                reply = self._clean_assistant_reply(reply)
+                task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": "answer_only",
+                    "reason": "valid_answer_only",
+                    "intent": intent,
+                    "plan": plan,
+                    "execution_required": False,
+                    "response_mode": "answer_only",
+                    "normalized_results": [],
+                    "result_rendering_path": "presentation_result",
+                    "newly_executed": False,
+                    "source": "answer_only",
+                    "answer_source": answer_payload.get("source"),
+                    "llm_answer_usage": answer_payload.get("llm_usage") or {},
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "answer_only", "model": "conversation-coordinator", "reason": "valid_answer_only", "images": []}
+                self.manager.log_operation("answer_only_reply", user_message[:180], "chat")
+                self._set_runtime_status("运行完成", "已回答知识或使用问题，未执行工具", busy=False, phase="complete", progress=100)
+                return {"reply": reply, "model": "conversation-coordinator", "mode": "answer_only", "reason": "valid_answer_only", "images": [], "task_outcome": task_outcome}
+
             if plan.get("should_ask_clarification") and builtin_reply is None:
                 response_language = normalize_response_language(context.get("response_language"), user_message)
                 plan["clarification_question"] = enforce_user_text_language(plan.get("clarification_question") or "", response_language, "low_confidence")
@@ -1310,6 +2238,96 @@ class GISWorkspaceService:
                 self.manager.log_operation("对话澄清", user_message[:180], "chat")
                 self._set_runtime_status("等待补充信息", str(plan.get("clarification_question") or ""), busy=False, phase="clarification", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "clarification", "reason": "task_plan_missing_inputs", "images": [], "task_outcome": task_outcome}
+
+            if _plan_requests_background_execution(plan):
+                active_task_id = str((extra_assistant_meta or {}).get("active_task_id") or "").strip()
+                context_for_worker = {**context, "chat_task_id": active_task_id}
+                worker = UnifiedBackgroundWorker(
+                    DurableJobStore(self.manager.workdir / "durable_jobs.db"),
+                    self.manager,
+                    limits=WorkerResourceLimits.from_env(),
+                    runtime_context=self._tool_runtime_context(),
+                )
+                job = worker.enqueue_validated_plan(
+                    plan,
+                    context=context_for_worker,
+                    user_id=str(getattr(self, "current_user_id", "") or "anonymous"),
+                    session_id=self.current_session_id,
+                )
+                if str(job.get("status") or "") == "queued" and os.getenv("GIS_WORKER_AUTOSTART", "1").strip().lower() not in {"0", "false", "no", "off"}:
+                    worker.start()
+                tool_result = job.get("tool_result") if isinstance(job.get("tool_result"), dict) else {}
+                presentation_bundle = build_presentation_bundle(
+                    task_goal=str(plan.get("primary_goal") or plan.get("task_type") or intent.get("intent") or user_message),
+                    task_plan_summary={
+                        "primary_goal": plan.get("primary_goal") or plan.get("task_type") or "",
+                        "intent": plan.get("intent") or intent.get("intent") or "",
+                        "operation": plan.get("operation") or "",
+                        "response_language": plan.get("response_language") or context.get("response_language") or "",
+                    },
+                    coordinator_status=str(tool_result.get("status") or ("blocked" if job.get("status") == "blocked" else "running")),
+                    normalized_results=[tool_result] if tool_result else [],
+                    response_language=str(plan.get("response_language") or context.get("response_language") or ""),
+                )
+                presentation_result = presentation_bundle["presentation_result"]
+                execution_summary = presentation_bundle["execution_summary"]
+                reply = self._clean_assistant_reply(str(presentation_bundle["reply"]))
+                management_view = job.get("management_view") if isinstance(job.get("management_view"), dict) else {
+                    "task_id": job.get("job_id"),
+                    "status": "running" if job.get("status") in {"queued", "running"} else str(job.get("status") or "blocked"),
+                    "progress": int(job.get("progress") or 0),
+                    "display_title": str(plan.get("primary_goal") or "后台 GIS 任务"),
+                    "source_name": "Unified Worker",
+                    "artifact_refs": [],
+                    "map_layer_refs": [],
+                    "warnings": [],
+                    "error_code": str(tool_result.get("error_code") or job.get("error_code") or ""),
+                    "error_title": str(tool_result.get("error_title") or ""),
+                    "user_message": str(tool_result.get("user_message") or "任务已进入后台队列。"),
+                    "available_actions": ["cancel"],
+                    "action_state": {"durable_status": job.get("status")},
+                    "updated_at": str(job.get("updated_at") or ""),
+                }
+                task_outcome = build_task_outcome("analysis", {"reply": reply, "presentation_result": presentation_result}, dashboard=dashboard_data)
+                assistant_meta = _assistant_meta({
+                    "model": "conversation-coordinator",
+                    "mode": "background_worker",
+                    "reason": "validated_plan_queued",
+                    "intent": intent,
+                    "plan": plan,
+                    "normalized_results": presentation_bundle["normalized_results"],
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
+                    "management_view": management_view,
+                    "durable_job_id": job.get("job_id"),
+                    "result_rendering_path": "presentation_result",
+                    "presentation_source": presentation_bundle.get("presentation_source"),
+                    "newly_executed": False,
+                    "source": "background_queue",
+                })
+                self._update_conversation_state_after_turn(
+                    state,
+                    user_message=user_message,
+                    intent=intent,
+                    plan=plan,
+                    context=context,
+                    reply=reply,
+                    dashboard_data=dashboard_data,
+                )
+                self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+                self.last_route = {"mode": "background_worker", "model": "conversation-coordinator", "reason": "validated_plan_queued", "images": []}
+                self._set_runtime_status("任务已进入后台队列", reply, busy=False, phase="queued", progress=int(job.get("progress") or 0))
+                return {
+                    "reply": reply,
+                    "model": "conversation-coordinator",
+                    "mode": "background_worker",
+                    "reason": "validated_plan_queued",
+                    "images": [],
+                    "presentation_result": presentation_result,
+                    "execution_summary": execution_summary,
+                    "management_view": management_view,
+                    "task_outcome": task_outcome,
+                }
 
             download_requests = plan.get("download_requests") if isinstance(plan.get("download_requests"), list) else []
             if download_requests:
@@ -1376,9 +2394,10 @@ class GISWorkspaceService:
                         "artifacts": current_artifacts,
                         "files": current_artifacts,
                         "user_facing_result": {},
-                        "newly_executed": True,
-                        "source": "current_execution",
-                    })
+                    "newly_executed": True,
+                    "source": "current_execution",
+                })
+                    self._record_compat_usage_flags(assistant_meta, source="service.ask:validated_download_executor")
                     self._update_conversation_state_after_turn(
                         state,
                         user_message=user_message,
@@ -1570,6 +2589,7 @@ class GISWorkspaceService:
                     "newly_executed": True,
                     "source": "current_execution",
                 })
+                self._record_compat_usage_flags(assistant_meta, source="service.ask:validated_workflow_executor")
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1670,6 +2690,7 @@ class GISWorkspaceService:
                     "newly_executed": True,
                     "source": "current_execution",
                 })
+                self._record_compat_usage_flags(assistant_meta, source="service.ask:validated_tool_executor")
                 self._update_conversation_state_after_turn(
                     state,
                     user_message=user_message,
@@ -1812,7 +2833,11 @@ class GISWorkspaceService:
     def _load_chat_model_route(self, session_id: str | None = None) -> ConversationState:
         target = str(session_id or self.current_session_id or "").strip()
         if not target:
-            target = self._ensure_session()
+            target = self._current_or_first_session()
+        if not target:
+            self.route_mode = "auto"
+            self.selected_model = self.settings.model
+            return ConversationState()
         state = load_conversation_state(self.manager, target)
         selected = str(state.selected_chat_model or "").strip()
         if state.model_route_mode == "manual" and selected in self.settings.supported_models:
@@ -1830,7 +2855,20 @@ class GISWorkspaceService:
     def chat_model_state(self, session_id: str | None = None) -> dict[str, Any]:
         target = str(session_id or self.current_session_id or "").strip()
         if not target:
-            target = self._ensure_session()
+            target = self._current_or_first_session()
+        if not target:
+            self.route_mode = "auto"
+            self.selected_model = self.settings.model
+            return {
+                "session_id": "",
+                "route_mode": "auto",
+                "selected_model": "auto",
+                "active_model": self.active_model(),
+                "models": [
+                    {"id": model, "capability": "vision" if is_vision_model(model) else "text"}
+                    for model in self.available_models()
+                ],
+            }
         existing = {str(item.get("session_id") or "") for item in self.manager.database.list_conversations()}
         if target not in existing:
             raise ValueError(f"未找到会话：{target}")
@@ -1850,6 +2888,7 @@ class GISWorkspaceService:
         target = str(session_id or self.current_session_id or "").strip()
         if not target:
             target = self._ensure_session()
+            self.current_session_id = target
         existing = {str(item.get("session_id") or "") for item in self.manager.database.list_conversations()}
         if target not in existing:
             raise ValueError(f"未找到会话：{target}")

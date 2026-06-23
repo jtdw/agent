@@ -29,7 +29,7 @@ class ChatSidebarMigrationTests(unittest.TestCase):
     def test_chat_model_selection_is_scoped_to_conversation_state(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
-            first = service.current_session_id
+            first = service.create_new_session("default")
             second = service.create_new_session("analysis")
 
             service.select_chat_model("glm-4.7", second)

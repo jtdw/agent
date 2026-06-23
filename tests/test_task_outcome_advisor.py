@@ -29,18 +29,22 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
 
     def test_download_outcome_recommends_map_ready_checks(self) -> None:
         result = {
-            "job": {
-                "job_id": "job_1",
-                "status": "completed",
-                "zip_path": "workspace/domestic_downloads/dem.zip",
-                "download_url": "/api/downloads/artifact?job_id=job_1",
-            }
+            "management_view": {
+                "task_id": "job_1",
+                "status": "succeeded",
+                "artifact_refs": [{"artifact_id": "artifact_dem_zip", "title": "dem.zip"}],
+                "user_message": "下载任务已完成。",
+            },
+            "tool_result": {
+                "status": "succeeded",
+                "artifacts": [{"artifact_id": "artifact_dem_zip", "title": "dem.zip"}],
+            },
         }
 
         outcome = build_task_outcome("download", result, dashboard={})
 
         self.assertTrue(outcome["has_results"])
-        self.assertIn("workspace/domestic_downloads/dem.zip", "\n".join(outcome["result_paths"]))
+        self.assertIn("dem.zip", "\n".join(outcome["result_paths"]))
         self.assertTrue(any("地图" in item or "裁剪" in item for item in outcome["recommendations"]))
 
     def test_upload_outcome_is_brief_without_recommendations(self) -> None:
@@ -80,6 +84,7 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
                     "model": "XGBoost",
                     "artifacts": [
                         {
+                            "artifact_id": "artifact_xgb_metrics",
                             "label": "metrics",
                             "path": "workspace/anonymous/derived/xgb_metrics.csv",
                             "download_url": "/api/files/artifact?path=derived/xgb_metrics.csv",
@@ -95,7 +100,30 @@ class TaskOutcomeAdvisorTests(unittest.TestCase):
         self.assertTrue(panel["has_results"])
         self.assertEqual(panel["title"], "XGBoost model finished")
         self.assertEqual(panel["files"][0]["label"], "metrics")
-        self.assertEqual(panel["files"][0]["download_url"], "/api/files/artifact?path=derived/xgb_metrics.csv")
+        self.assertEqual(panel["files"][0]["download_url"], "/api/artifacts/artifact_xgb_metrics/download")
+
+    def test_result_panel_filters_legacy_path_download_without_artifact_id(self) -> None:
+        from core.api_helpers import _build_result_panel
+
+        panel = _build_result_panel(
+            {"task_outcome": {"summary": "legacy result", "has_results": True}},
+            {
+                "model_results": [
+                    {
+                        "artifacts": [
+                            {
+                                "label": "legacy metrics",
+                                "path": "derived/xgb_metrics.csv",
+                                "download_url": "/api/files/artifact?path=derived/xgb_metrics.csv",
+                            }
+                        ]
+                    }
+                ],
+                "artifacts": [],
+            },
+        )
+
+        self.assertEqual(panel["files"], [])
 
     def test_result_panel_prefers_current_response_artifacts(self) -> None:
         from core.api_helpers import _build_result_panel

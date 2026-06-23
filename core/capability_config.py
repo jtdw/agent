@@ -15,8 +15,11 @@ RESOURCE_TYPES = {"knowledge", "tool_cards", "products", "assets"}
 DOWNLOAD_ADAPTER_ALLOWLIST = {
     "gscloud_dem_tile",
     "gscloud_scene_table",
+    "fixture",
     "fixture_download",
 }
+RUNTIME_ACTIVE_STATUSES = {"active", "enabled"}
+CAPABILITY_STATUSES = {"draft", "pending_review", "active", "deprecated", "disabled", "archived", "enabled"}
 
 
 def _now() -> str:
@@ -95,7 +98,7 @@ class KnowledgeDocument(BaseModel):
     applicable_scope: str = "general"
     reliability: str = "untrusted"
     version: str = "v1"
-    status: Literal["enabled", "disabled", "archived"] = "enabled"
+    status: Literal["draft", "pending_review", "active", "deprecated", "disabled", "archived", "enabled"] = "draft"
     content: str = ""
     created_at: str = ""
     updated_at: str = ""
@@ -121,7 +124,7 @@ class ConfiguredProduct(BaseModel):
     unsupported_scenarios: list[str] = Field(default_factory=list)
     alternatives: list[str] = Field(default_factory=list)
     aliases: list[str] = Field(default_factory=list)
-    status: Literal["enabled", "disabled", "archived"] = "enabled"
+    status: Literal["draft", "pending_review", "active", "deprecated", "disabled", "archived", "enabled"] = "draft"
     version: str = "v1"
     created_at: str = ""
     updated_at: str = ""
@@ -140,7 +143,7 @@ class ConfiguredAsset(BaseModel):
     geometry_type: str = ""
     permission: str = "public"
     version: str = "v1"
-    status: Literal["enabled", "disabled", "archived"] = "enabled"
+    status: Literal["draft", "pending_review", "active", "deprecated", "disabled", "archived", "enabled"] = "draft"
     asset_profile: dict[str, Any] = Field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
@@ -190,9 +193,51 @@ class CapabilityConfigStore:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         tmp.replace(path)
 
+    def _audit_path(self) -> Path:
+        return self.root / "audit_events.json"
+
+    def _read_audit(self) -> list[dict[str, Any]]:
+        path = self._audit_path()
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return [dict(item) for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+
+    def _write_audit(self, events: list[dict[str, Any]]) -> None:
+        path = self._audit_path()
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps(events[-1000:], ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        tmp.replace(path)
+
+    def _record_audit(self, action: str, resource_type: str, item_id: str, *, actor: str = "", summary: str = "", status: str = "") -> None:
+        events = self._read_audit()
+        events.append(
+            {
+                "event_id": f"capability_audit_{len(events) + 1}",
+                "timestamp": _now(),
+                "action": action,
+                "resource_type": resource_type,
+                "item_id": item_id,
+                "actor": str(actor or ""),
+                "summary": str(summary or "")[:500],
+                "status": str(status or ""),
+            }
+        )
+        self._write_audit(events)
+
     def _upsert(self, resource_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         now = _now()
         item = dict(payload)
+        data = self._read(resource_type)
+        pre_id = _resource_id(resource_type, item)
+        current = _as_dict(data["items"].get(pre_id))
+        if not item.get("status"):
+            item["status"] = "draft"
+        elif current and str(item.get("status")) in RUNTIME_ACTIVE_STATUSES:
+            item["status"] = "draft"
         if resource_type == "knowledge":
             item["content"] = _sanitize_content(str(item.get("content") or ""))
             item = KnowledgeDocument.model_validate(item).model_dump(mode="json")
@@ -209,19 +254,20 @@ class CapabilityConfigStore:
             if errors:
                 raise ValueError(f"invalid tool card: {', '.join(errors)}")
         item_id = _resource_id(resource_type, item)
-        data = self._read(resource_type)
-        current = _as_dict(data["items"].get(item_id))
         item.setdefault("created_at", current.get("created_at") or now)
         item["created_at"] = item.get("created_at") or current.get("created_at") or now
         item["updated_at"] = now
-        item.setdefault("status", "enabled")
+        item.setdefault("status", "draft")
         item.setdefault("version", "v1")
+        item.setdefault("created_by", current.get("created_by") or str(payload.get("created_by") or ""))
+        item.setdefault("change_summary", str(payload.get("change_summary") or current.get("change_summary") or ""))
         history = _as_list(data["history"].get(item_id))
         if current:
             history.append(current)
         data["history"][item_id] = history
         data["items"][item_id] = item
         self._write(resource_type, data)
+        self._record_audit("upsert", resource_type, item_id, actor=str(payload.get("created_by") or payload.get("updated_by") or ""), summary=str(payload.get("change_summary") or ""), status=str(item.get("status") or ""))
         return item
 
     def upsert_knowledge(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -239,10 +285,12 @@ class CapabilityConfigStore:
     def list_resources(self, resource_type: str, *, include_disabled: bool = False) -> list[dict[str, Any]]:
         items = list(_as_dict(self._read(resource_type).get("items")).values())
         if not include_disabled:
-            items = [item for item in items if _as_dict(item).get("status") == "enabled"]
+            items = [item for item in items if _as_dict(item).get("status") in RUNTIME_ACTIVE_STATUSES]
         return [dict(item) for item in items if isinstance(item, dict)]
 
-    def set_status(self, resource_type: str, item_id: str, status: str) -> dict[str, Any]:
+    def set_status(self, resource_type: str, item_id: str, status: str, *, actor: str = "", summary: str = "") -> dict[str, Any]:
+        if status not in CAPABILITY_STATUSES:
+            raise ValueError(f"unsupported capability status: {status}")
         data = self._read(resource_type)
         item = _as_dict(data["items"].get(item_id))
         if not item:
@@ -251,12 +299,31 @@ class CapabilityConfigStore:
         history.append(dict(item))
         item["status"] = status
         item["updated_at"] = _now()
+        if status == "pending_review":
+            item["submitted_by"] = actor
+            item["submitted_at"] = item["updated_at"]
+            item["review_summary"] = summary
+        elif status == "active":
+            item["reviewed_by"] = actor
+            item["reviewed_at"] = item["updated_at"]
+            item["review_summary"] = summary
         data["history"][item_id] = history
         data["items"][item_id] = item
         self._write(resource_type, data)
+        self._record_audit("set_status", resource_type, item_id, actor=actor, summary=summary, status=status)
         return item
 
-    def rollback(self, resource_type: str, item_id: str, version: str) -> dict[str, Any]:
+    def submit_for_review(self, resource_type: str, item_id: str, *, actor: str = "", summary: str = "") -> dict[str, Any]:
+        item = self.set_status(resource_type, item_id, "pending_review", actor=actor, summary=summary)
+        self._record_audit("submit_for_review", resource_type, item_id, actor=actor, summary=summary, status="pending_review")
+        return item
+
+    def approve(self, resource_type: str, item_id: str, *, actor: str = "", summary: str = "") -> dict[str, Any]:
+        item = self.set_status(resource_type, item_id, "active", actor=actor, summary=summary)
+        self._record_audit("approve", resource_type, item_id, actor=actor, summary=summary, status="active")
+        return item
+
+    def rollback(self, resource_type: str, item_id: str, version: str, *, actor: str = "", summary: str = "") -> dict[str, Any]:
         data = self._read(resource_type)
         current = _as_dict(data["items"].get(item_id))
         history = _as_list(data["history"].get(item_id))
@@ -266,12 +333,70 @@ class CapabilityConfigStore:
         if current:
             history.append(current)
         restored = dict(match)
-        restored["status"] = "enabled"
+        restored["status"] = "draft"
         restored["updated_at"] = _now()
+        restored["rollback_source_version"] = version
+        restored["rollback_by"] = actor
+        restored["change_summary"] = summary
         data["history"][item_id] = history
         data["items"][item_id] = restored
         self._write(resource_type, data)
+        self._record_audit("rollback", resource_type, item_id, actor=actor, summary=summary, status="draft")
         return restored
+
+    def list_audit_events(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self._read_audit()[-max(1, int(limit or 1)) :]
+
+    def hard_delete_session_private(self, user_id: str, session_id: str) -> list[str]:
+        clean_user = str(user_id or "").strip()
+        clean_session = str(session_id or "").strip()
+        if not clean_session:
+            return []
+        data = self._read("knowledge")
+        items = _as_dict(data.get("items"))
+        history = _as_dict(data.get("history"))
+        deleted: list[str] = []
+        for item_id, item in list(items.items()):
+            item_dict = _as_dict(item)
+            if str(item_dict.get("session_id") or "") != clean_session:
+                continue
+            if clean_user and str(item_dict.get("owner_user_id") or "") not in {"", clean_user}:
+                continue
+            if str(item_dict.get("scope") or "").lower() not in {"private", "session", "user"}:
+                continue
+            deleted.append(str(item_id))
+            items.pop(item_id, None)
+            history.pop(item_id, None)
+        data["items"] = items
+        data["history"] = history
+        self._write("knowledge", data)
+        self._remove_session_index_files(clean_session)
+        return deleted
+
+    def _remove_session_index_files(self, session_id: str) -> list[str]:
+        clean = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_id or "")).strip("._")
+        if not clean:
+            return []
+        removed: list[str] = []
+        for folder_name in ("knowledge_index", "knowledge_chunks", "retrieval_cache", "vector_index"):
+            root = self.root / folder_name
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob(f"*{clean}*"), reverse=True):
+                try:
+                    if path.is_dir():
+                        for child in sorted(path.rglob("*"), reverse=True):
+                            if child.is_file():
+                                child.unlink()
+                            elif child.is_dir():
+                                child.rmdir()
+                        path.rmdir()
+                    else:
+                        path.unlink()
+                    removed.append(str(path))
+                except Exception:
+                    continue
+        return removed
 
     def retrieve_knowledge(self, query: str, *, limit: int = 5, language: str = "", scope: str = "") -> list[dict[str, Any]]:
         query_tokens = _tokens(query)

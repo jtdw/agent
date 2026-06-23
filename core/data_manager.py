@@ -20,6 +20,7 @@ import pandas as pd
 import rasterio
 
 from .archive_utils import safe_extract_zip
+from .data_quality import validate_output_artifact, validate_zip_upload
 from .model_results import generate_model_result_id
 from .workspace_db import WorkspaceDatabase
 
@@ -456,6 +457,9 @@ class DataManager:
     def _extract_zip_if_needed(self, path: Path, zip_member: str = "") -> Path:
         if path.suffix.lower() != ".zip":
             return path
+        zip_quality = validate_zip_upload(path)
+        if not zip_quality.get("ok"):
+            raise ValueError(str(zip_quality.get("user_message") or zip_quality.get("error_code") or "Invalid ZIP archive"))
         target_dir = self.upload_dir / path.stem
         target_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(path, "r") as zf:
@@ -650,8 +654,26 @@ class DataManager:
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return files
 
+    def _path_is_download_result_copy(self, path: Path) -> bool:
+        try:
+            relative = path.resolve().relative_to(self.derived_dir.resolve())
+        except Exception:
+            return False
+        parts = [part.lower() for part in relative.parts]
+        return len(parts) >= 3 and parts[0] == "downloads"
+
+    def _filter_visible_artifact_duplicates(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        filtered: list[dict[str, Any]] = []
+        for item in items:
+            path = Path(str(item.get("path") or ""))
+            artifact_id = str(item.get("artifact_id") or "")
+            if self._path_is_download_result_copy(path) and not artifact_id.startswith("artifact_job_"):
+                continue
+            filtered.append(item)
+        return filtered
+
     def list_artifacts(self) -> list[dict[str, Any]]:
-        registered = self.list_registered_artifacts(limit=200)
+        registered = self._filter_visible_artifact_duplicates(self.list_registered_artifacts(limit=200))
         seen_paths = {str(Path(item.get("path", "")).resolve()) for item in registered if item.get("path")}
         artifacts: list[dict[str, Any]] = []
         root_to_category = {
@@ -664,6 +686,8 @@ class DataManager:
             except Exception:
                 resolved_path = str(path)
             if resolved_path in seen_paths:
+                continue
+            if self._path_is_download_result_copy(path):
                 continue
             try:
                 relative = path.relative_to(path.parents[1])
@@ -816,6 +840,99 @@ class DataManager:
         self._sync_dataset_to_database(dataset_name, auto_synced=True)
         return dataset_name
 
+    def find_dataset_by_path(self, path: Path) -> str:
+        target = Path(path).resolve(strict=False)
+        for item in self.list_datasets():
+            try:
+                if Path(str(item.get("path") or "")).resolve(strict=False) == target:
+                    return str(item.get("name") or "")
+            except Exception:
+                continue
+        return ""
+
+    def register_raster_reference(self, path: Path, name: str | None = None, meta: dict[str, Any] | None = None) -> str:
+        source = Path(path)
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"raster artifact not found: {source}")
+        self._require_allowed_import_source(source)
+        existing = self.find_dataset_by_path(source)
+        if existing:
+            return existing
+        with rasterio.open(source) as src:
+            raster_meta = {
+                "width": src.width,
+                "height": src.height,
+                "count": src.count,
+                "crs": str(src.crs) if src.crs else None,
+                "bounds": tuple(src.bounds),
+                "dtype": str(src.dtypes[0]) if src.dtypes else None,
+                "nodata": src.nodata,
+                "storage_mode": "reference",
+            }
+        dataset_name = self._unique_name(name or source.stem)
+        self.datasets[dataset_name] = DatasetRecord(
+            name=dataset_name,
+            path=source,
+            data_type="raster",
+            object_ref=str(source),
+            meta=self._scoped_meta({**raster_meta, **(meta or {})}),
+        )
+        self._sync_dataset_to_database(dataset_name, auto_synced=True)
+        return dataset_name
+
+    def register_vector_reference(self, path: Path, name: str | None = None, meta: dict[str, Any] | None = None) -> str:
+        source = Path(path)
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"vector artifact not found: {source}")
+        self._require_allowed_import_source(source)
+        existing = self.find_dataset_by_path(source)
+        if existing:
+            return existing
+        actual = self._prepare_vector_source(source)
+        gdf = gpd.read_file(actual)
+        dataset_name = self._unique_name(name or actual.stem)
+        self.datasets[dataset_name] = DatasetRecord(
+            name=dataset_name,
+            path=actual,
+            data_type="vector",
+            object_ref=gdf,
+            meta=self._scoped_meta({**self._build_vector_meta(gdf), "storage_mode": "reference", **(meta or {})}),
+        )
+        self._sync_dataset_to_database(dataset_name, auto_synced=True)
+        return dataset_name
+
+    def register_table_reference(self, path: Path, name: str | None = None, meta: dict[str, Any] | None = None) -> str:
+        source = Path(path)
+        if not source.exists() or not source.is_file():
+            raise FileNotFoundError(f"table artifact not found: {source}")
+        self._require_allowed_import_source(source)
+        existing = self.find_dataset_by_path(source)
+        if existing:
+            return existing
+        ext = source.suffix.lower()
+        df = _read_csv_table(source) if ext == ".csv" else pd.read_excel(source)
+        dataset_name = self._unique_name(name or source.stem)
+        self.datasets[dataset_name] = DatasetRecord(
+            name=dataset_name,
+            path=source,
+            data_type="table",
+            object_ref=df,
+            meta=self._scoped_meta({"rows": len(df), "columns": list(df.columns), "storage_mode": "reference", **(meta or {})}),
+        )
+        self._sync_dataset_to_database(dataset_name, auto_synced=True)
+        return dataset_name
+
+    def register_dataset_reference(self, path: Path, name: str | None = None, meta: dict[str, Any] | None = None) -> str:
+        source = Path(path)
+        ext = source.suffix.lower()
+        if ext in RASTER_EXTS:
+            return self.register_raster_reference(source, name=name, meta=meta)
+        if ext in VECTOR_EXTS:
+            return self.register_vector_reference(source, name=name, meta=meta)
+        if ext in TABLE_EXTS:
+            return self.register_table_reference(source, name=name, meta=meta)
+        return self.load_path(str(source), name=name)
+
     def _sync_dataset_to_database(self, name: str, auto_synced: bool = True) -> dict[str, Any]:
         record = self.get(name)
         if record.data_type == "table":
@@ -948,7 +1065,12 @@ class DataManager:
         **extra: Any,
     ) -> dict[str, Any]:
         artifact_path = self._resolve_workspace_path(path)
+        quality = validate_output_artifact(artifact_path)
+        resolved_quality_status = quality_status
+        if quality_status == "unchecked":
+            resolved_quality_status = "ok" if quality.get("ok") else "failed"
         scoped_meta = self._scoped_meta(meta or {k: v for k, v in extra.items() if k not in {"name", "display_path", "category", "size_kb", "modified"}})
+        scoped_meta.setdefault("quality_check", quality)
         payload = {
             "artifact_id": artifact_id or f"artifact_{uuid4().hex[:10]}",
             "path": str(artifact_path),
@@ -957,7 +1079,7 @@ class DataManager:
             "type": type,
             "title": title,
             "description": description,
-            "quality_status": quality_status,
+            "quality_status": resolved_quality_status,
             "preview_available": preview_available,
             "task_id": task_id,
             "model_result_id": model_result_id,
@@ -1097,7 +1219,7 @@ class DataManager:
 
         for artifact in self.database.list_artifacts(session_id=clean_session, include_deleted=True, limit=10000):
             artifact_id = str(artifact.get("artifact_id") or "")
-            if artifact_id and self.database.delete_artifact(artifact_id):
+            if artifact_id and self.database.delete_artifact(artifact_id, hard=True):
                 deleted_artifacts.append(artifact_id)
 
         for item in self.database.list_catalog(session_id=clean_session):
@@ -1129,6 +1251,7 @@ class DataManager:
 
         if self.current_session_id == clean_session:
             self.set_runtime_scope(self.current_user_id, "")
+        hard_deleted_records = self.database.hard_delete_session_records(clean_session)
 
         return {
             "ok": not errors,
@@ -1136,6 +1259,7 @@ class DataManager:
             "deleted_files": deleted_files,
             "deleted_artifacts": sorted(set(deleted_artifacts)),
             "deleted_datasets": sorted(set(deleted_datasets)),
+            "hard_deleted_records": hard_deleted_records,
             "errors": errors,
         }
 

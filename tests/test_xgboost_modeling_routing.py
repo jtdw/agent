@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest import mock
 
 import pandas as pd
+import pytest
 
 from core.config import Settings
 from core.conversation_intent import classify_user_intent
@@ -11,6 +12,9 @@ from core.object_resolver import resolve_object_reference
 from core.service import GISWorkspaceService
 from core.task_planner import build_task_plan
 from core.workflow_executor import execute_workflow_plan, parse_workflow_result
+
+
+pytestmark = pytest.mark.slow
 
 
 DEMO_DATASET = "aefcc18e8625419890b38194ecd810a8_demo_xgboost_soil_moisture"
@@ -55,7 +59,9 @@ class XGBoostModelingRoutingTests(unittest.TestCase):
     def make_service(self, root: Path) -> GISWorkspaceService:
         settings = Settings(api_key="", workdir=root / "workspace")
         settings.ensure_dirs()
-        return GISWorkspaceService(settings)
+        service = GISWorkspaceService(settings)
+        service.set_interaction_mode("tool_enabled")
+        return service
 
     def seed_demo(self, service: GISWorkspaceService, *, name: str = DEMO_DATASET, include_coords: bool = True) -> None:
         df = _demo_frame()

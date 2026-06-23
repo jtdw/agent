@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import shutil
+import zipfile
 from pathlib import Path
 
 import geopandas as gpd
@@ -12,6 +13,9 @@ from rasterio.transform import from_origin
 from shapely.geometry import box
 
 from core.data_manager import DataManager
+from core.domestic_sources.base import DomesticSource
+from core.domestic_sources.downloader import postprocess_download
+from core.domestic_sources.gscloud_adapter import _postprocess_gscloud_files
 from core.domestic_sources.raster_postprocess import standardize_raster_download_result
 
 
@@ -34,6 +38,96 @@ def _write_tile(path: Path, west: float, north: float, value: int) -> None:
 
 
 class RasterPostprocessTests(unittest.TestCase):
+    def test_download_postprocess_references_raster_without_upload_copy_or_timestamp_extracts(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+            source_dir = manager.temp_dir / "source"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            tif = source_dir / "dem.tif"
+            _write_tile(tif, west=0, north=2, value=7)
+            archive = source_dir / "dem.zip"
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.write(tif, tif.name)
+
+            first = postprocess_download(manager, archive, source_key="fixture", output_name="chengdu_dem", auto_load=True)
+            second = postprocess_download(manager, archive, source_key="fixture", output_name="chengdu_dem", auto_load=True)
+
+            extract_dirs = [path for path in manager.derived_dir.glob("chengdu_dem_extracted*") if path.is_dir()]
+            self.assertEqual([path.name for path in extract_dirs], ["chengdu_dem_extracted"])
+            self.assertEqual(list(manager.upload_dir.glob("*.tif")), [])
+            self.assertEqual(first.dataset_name, second.dataset_name)
+            dataset = manager.get(str(second.dataset_name))
+            self.assertEqual(dataset.path.resolve(), (manager.derived_dir / "chengdu_dem_extracted" / "dem.tif").resolve())
+
+    def test_download_postprocess_selectively_extracts_loadable_raster_only(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+            source_dir = manager.temp_dir / "source"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            tif = source_dir / "dem.tif"
+            _write_tile(tif, west=0, north=2, value=7)
+            archive = source_dir / "dem_with_noise.zip"
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.write(tif, "data/dem.tif")
+                zf.writestr("docs/readme.txt", "metadata")
+                zf.writestr("unneeded/blob.bin", b"x" * 1024)
+
+            result = postprocess_download(manager, archive, source_key="fixture", output_name="chengdu_dem", auto_load=True)
+
+            extracted_files = sorted(path.relative_to(result.extracted_dir).as_posix() for path in Path(result.extracted_dir).rglob("*") if path.is_file())
+            self.assertEqual(extracted_files, ["data/dem.tif"])
+            self.assertEqual(list(manager.upload_dir.glob("*")), [])
+
+    def test_download_postprocess_references_table_without_upload_copy(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+            source_dir = manager.temp_dir / "source"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            archive = source_dir / "table_download.zip"
+            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("tables/points.csv", "lon,lat,value\n104.1,30.2,1\n")
+                zf.writestr("unneeded/blob.bin", b"x" * 1024)
+
+            result = postprocess_download(manager, archive, source_key="fixture", output_name="points", auto_load=True)
+
+            extracted_files = sorted(path.relative_to(result.extracted_dir).as_posix() for path in Path(result.extracted_dir).rglob("*") if path.is_file())
+            self.assertEqual(extracted_files, ["tables/points.csv"])
+            self.assertEqual(list(manager.upload_dir.glob("*")), [])
+            dataset = manager.get(str(result.dataset_name))
+            self.assertEqual(dataset.data_type, "table")
+            self.assertEqual(dataset.path.resolve(), (Path(result.extracted_dir) / "tables" / "points.csv").resolve())
+
+    def test_gscloud_batch_postprocess_references_selected_rasters_without_raw_zip_copies(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp))
+            source_dir = manager.temp_dir / "source"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            archives: list[Path] = []
+            for idx, value in enumerate((7, 8), start=1):
+                tif = source_dir / f"tile_{idx}.tif"
+                _write_tile(tif, west=idx, north=2, value=value)
+                archive = source_dir / f"tile_{idx}.zip"
+                with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(tif, f"data/tile_{idx}.tif")
+                    zf.writestr(f"unneeded/blob_{idx}.bin", b"x" * 1024)
+                archives.append(archive)
+
+            result = _postprocess_gscloud_files(
+                manager,
+                archives,
+                DomesticSource(key="gscloud", name="GSCloud", home_url=""),
+                output_name="chengdu_dem",
+                auto_load=True,
+            )
+
+            batch_dir = Path(result["extracted_dir"])
+            batch_files = sorted(path.relative_to(batch_dir).as_posix() for path in batch_dir.rglob("*") if path.is_file())
+            self.assertEqual(batch_files, ["tile_1/data/tile_1.tif", "tile_2/data/tile_2.tif"])
+            self.assertEqual(list(manager.upload_dir.glob("*")), [])
+            for item in result["meta"]["items"]:
+                dataset = manager.get(item["dataset_name"])
+                self.assertTrue(str(dataset.path).startswith(str(batch_dir)))
+
     def test_duplicate_raster_dataset_entries_are_deduplicated_before_clipping(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             manager = DataManager(Path(tmp))

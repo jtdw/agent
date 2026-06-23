@@ -17,10 +17,12 @@ from .download_request_executor import execute_single_download_request
 SUPPORTED_WORKFLOW_TOOLS = {
     "describe_dataset",
     "vector_clip_by_vector",
+    "vector_buffer",
     "vector_overlay",
     "vector_spatial_join",
     "table_to_points",
     "extract_raster_values_to_points",
+    "batch_register_points_to_rasters",
     "raster_basic_stats",
     "raster_zonal_stats",
     "clip_raster_by_vector",

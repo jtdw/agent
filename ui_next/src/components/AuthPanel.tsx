@@ -2,12 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Check, Crown, LockKeyhole, LogIn, Mail, Rocket, ShieldCheck, Sparkles, UserPlus, X } from 'lucide-react';
 import { api, CommercialUser, PaidPlan } from '@/lib/api';
+import { clearLegacyAuthSession, clearStoredAuth, readStoredUser, writeStoredUser } from '@/lib/authStorage';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
 import { ModalPortal } from './ModalPortal';
-
-const USER_KEY = 'gis-agent-auth-user';
-const LEGACY_SESSION_KEY = 'gis-agent-auth-session';
 
 type PlanMeta = {
   key: 'basic' | 'pro' | 'team';
@@ -46,19 +44,6 @@ const PLAN_META: Record<'basic' | 'pro' | 'team', PlanMeta> = {
     features: ['更高数据下载额度', '适合小组项目与批量区域任务', '后续可扩展团队成员管理']
   }
 };
-
-export function readStoredUser(): CommercialUser | null {
-  try {
-    const raw = localStorage.getItem(USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredUser(user: CommercialUser) {
-  localStorage.setItem(USER_KEY, JSON.stringify(user));
-}
 
 function normalizePlan(plan?: string): 'basic' | 'pro' | 'team' {
   if (plan === 'pro' || plan === 'team') return plan;
@@ -217,7 +202,7 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
   const [error, setError] = useState('');
 
   useEffect(() => {
-    localStorage.removeItem(LEGACY_SESSION_KEY);
+    clearLegacyAuthSession();
     const saved = readStoredUser();
     if (saved) setUser(saved);
     api.me()
@@ -227,12 +212,12 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
           writeStoredUser(r.user);
           return;
         }
-        localStorage.removeItem(USER_KEY);
+        clearStoredAuth();
         setUser(null);
       })
       .catch(() => {
-        localStorage.removeItem(USER_KEY);
-        setUser(null);
+        // Do not clear a locally restored user on transient backend/network failure.
+        // A real unauthenticated response is handled in the success path above.
       });
   }, [setUser]);
 
@@ -275,7 +260,7 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
               </div>
               <div className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">{planHint}</div>
             </div>
-            <button className="glass-button px-2 py-1 text-xs" onClick={() => { api.logout().catch(() => undefined); localStorage.removeItem(USER_KEY); localStorage.removeItem(LEGACY_SESSION_KEY); setUser(null); }}>退出</button>
+            <button className="glass-button px-2 py-1 text-xs" onClick={() => { api.logout().catch(() => undefined); clearStoredAuth(); setUser(null); }}>退出</button>
           </div>
         </GlassCard>
         <UpgradeModal user={user} open={upgradeOpen} onClose={() => setUpgradeOpen(false)} onUpgraded={setUser} />

@@ -9,6 +9,7 @@ from unittest import mock
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Point, box
@@ -23,6 +24,9 @@ from core.task_planner import build_task_plan
 from core.tool_contracts import parse_tool_result
 from core.tool_executor import execute_validated_tool_plan
 from core.workflow_executor import execute_workflow_plan, parse_workflow_result
+
+
+pytestmark = pytest.mark.slow
 
 
 def continue_current_step(plan, current_step, remaining_steps, execution_trace, user_request, **kwargs):
@@ -47,7 +51,9 @@ class WorkflowExecutorTests(unittest.TestCase):
     def make_service(self, root: Path) -> GISWorkspaceService:
         settings = Settings(api_key="", workdir=root / "workspace")
         settings.ensure_dirs()
-        return GISWorkspaceService(settings)
+        service = GISWorkspaceService(settings)
+        service.set_interaction_mode("tool_enabled")
+        return service
 
     def active_plan_from_deterministic(self, service: GISWorkspaceService):
         def build(prompt: str, context: dict, **kwargs):

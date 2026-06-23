@@ -4,7 +4,8 @@ import { Database, MessageCircle, PanelRightOpen, Sparkles } from 'lucide-react'
 import { MapControls } from './components/MapControls';
 import { SplashScreen } from './components/SplashScreen';
 import { useTheme } from './hooks/useTheme';
-import type { CommercialUser, ResultPanel } from './lib/api';
+import { api, type CommercialUser, type ResultPanel } from './lib/api';
+import { clearStoredAuth, readStoredUser, writeStoredUser } from './lib/authStorage';
 import { mergeChatContext, type ChatContextPayload } from './lib/chatContext';
 import type { MapCommand, MapCommandType } from './components/mapCommands';
 import type { ParsedMapTextCommand } from './components/mapTextCommands';
@@ -97,6 +98,31 @@ export default function App() {
   useEffect(() => {
     const t = window.setTimeout(() => setSplash(false), 2000);
     return () => window.clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    const saved = readStoredUser();
+    if (saved) setUser(saved);
+    let cancelled = false;
+    api.me()
+      .then((result) => {
+        if (cancelled) return;
+        if (result.authenticated && result.user) {
+          setUser(result.user);
+          writeStoredUser(result.user);
+          return;
+        }
+        clearStoredAuth();
+        setUser(null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // Keep the locally restored user when the backend is temporarily unavailable.
+        // The next authenticated API call will still be checked by the server.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {

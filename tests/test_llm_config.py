@@ -34,6 +34,18 @@ class LLMConfigTests(unittest.TestCase):
             "ZAI_MODEL",
             "ZAI_BASE_URL",
             "ZAI_INTENT_MODEL",
+            "LLM_CHAT_MODEL",
+            "ZAI_CHAT_MODEL",
+            "LLM_TOOL_MODEL",
+            "ZAI_TOOL_MODEL",
+            "LLM_PLANNER_MODEL",
+            "ZAI_PLANNER_MODEL",
+            "LLM_COORDINATOR_MODEL",
+            "ZAI_COORDINATOR_MODEL",
+            "LLM_RESULT_MODEL",
+            "ZAI_RESULT_MODEL",
+            "LLM_VISION_MODEL",
+            "ZAI_VISION_MODEL",
             "GIS_AGENT_ENABLE_LLM_INTENT",
         ]
         patch_values = {key: "" for key in keys}
@@ -231,6 +243,43 @@ class LLMConfigTests(unittest.TestCase):
         self.assertNotIn(secret, status.text)
         self.assertEqual(health.json()["status"], "ok")
         self.assertEqual(status.json()["llm_status"]["provider"], "openai")
+
+    def test_zai_role_models_default_to_chat_tool_and_vision_models(self) -> None:
+        from core.llm_config import load_llm_provider_config_for_role, model_for_role, validate_llm_config
+
+        with self.clean_env(
+            {
+                "LLM_PROVIDER": "zai",
+                "ZAI_API_KEY": "test-key",
+                "LLM_MODEL": "legacy-default",
+            }
+        ):
+            self.assertEqual(model_for_role("chat"), "glm-4.5-air")
+            self.assertEqual(model_for_role("planner"), "glm-4.7")
+            self.assertEqual(model_for_role("coordinator"), "glm-4.7")
+            self.assertEqual(model_for_role("result_interpreter"), "glm-4.7")
+            self.assertEqual(model_for_role("vision"), "glm-4.6v")
+            self.assertEqual(load_llm_provider_config_for_role("chat").model, "glm-4.5-air")
+            self.assertEqual(load_llm_provider_config_for_role("planner").model, "glm-4.7")
+            self.assertEqual(validate_llm_config()["role_models"]["vision"], "glm-4.6v")
+
+    def test_role_models_can_be_overridden_independently(self) -> None:
+        from core.llm_config import model_for_role
+
+        with self.clean_env(
+            {
+                "LLM_PROVIDER": "zai",
+                "ZAI_API_KEY": "test-key",
+                "LLM_CHAT_MODEL": "chat-model",
+                "LLM_TOOL_MODEL": "tool-model",
+                "LLM_VISION_MODEL": "vision-model",
+            }
+        ):
+            self.assertEqual(model_for_role("answer_only"), "chat-model")
+            self.assertEqual(model_for_role("planner"), "tool-model")
+            self.assertEqual(model_for_role("coordinator"), "tool-model")
+            self.assertEqual(model_for_role("result_interpreter"), "tool-model")
+            self.assertEqual(model_for_role("vision"), "vision-model")
 
 
 if __name__ == "__main__":

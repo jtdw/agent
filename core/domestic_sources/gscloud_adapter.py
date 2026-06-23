@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from ..admin_boundary import clean_admin_region_query, extract_local_admin_boundary
 from ..data_manager import DataManager
+from .archive_manifest import extract_loadable_members
 from .base import DomesticDownloadResult, DomesticSource
 from .downloader import find_loadable_file, postprocess_download, safe_extract_zip, safe_name, zip_result_folder
 from .gscloud_download_recovery import recover_gscloud_download_from_error_page
@@ -488,27 +489,25 @@ def _postprocess_gscloud_files(
         result["download_count"] = 1
         return result
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = safe_name(output_name or f"gscloud_dem_batch_{stamp}")
-    bundle_dir = manager.derived_dir / f"{base}_gscloud_batch_{stamp}"
+    base = safe_name(output_name or "gscloud_batch")
+    bundle_dir = manager.derived_dir / f"{base}_gscloud_batch"
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
     bundle_dir.mkdir(parents=True, exist_ok=True)
     imported: list[dict[str, Any]] = []
     for i, path in enumerate(downloaded, start=1):
-        copied = bundle_dir / path.name
-        shutil.copy2(path, copied)
-        item_dir = bundle_dir / f"{path.stem}_extracted"
+        item_dir = bundle_dir / path.stem
+        extracted_members: list[str] = []
         if path.suffix.lower() == ".zip" and zipfile.is_zipfile(path):
-            item_dir.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(path, "r") as zf:
-                safe_extract_zip(zf, item_dir)
-        candidate = find_loadable_file(item_dir if item_dir.exists() else copied)
+            _, _, extracted_members = extract_loadable_members(path, item_dir, max_datasets=1, clean=True)
+        candidate = find_loadable_file(item_dir if item_dir.exists() else path)
         dataset_name = None
         if auto_load and candidate:
             try:
-                dataset_name = manager.load_path(str(candidate), name=f"{base}_{i:03d}")
+                dataset_name = manager.register_dataset_reference(candidate, name=f"{base}_{i:03d}", meta={"source": "gscloud_batch", "source_archive": str(path)})
             except Exception as exc:
                 manager.log_operation("地理空间数据云批量导入失败", f"{candidate}: {exc}", "download")
-        imported.append({"file": str(path), "candidate": str(candidate) if candidate else None, "dataset_name": dataset_name})
+        imported.append({"file": str(path), "candidate": str(candidate) if candidate else None, "dataset_name": dataset_name, "extracted_members": extracted_members})
 
     zip_path = manager.derived_dir / f"{base}_gscloud_batch.zip"
     zip_result_folder(bundle_dir, zip_path)

@@ -20,6 +20,7 @@ class ResponseLanguageTests(unittest.TestCase):
     def test_chinese_prompt_unavailable_planner_returns_chinese_clarification(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
+            service.set_interaction_mode("tool_enabled")
             with mock.patch("core.service.build_llm_task_plan", return_value={"status": "unavailable", "plan": {}}):
                 result = service.ask("下载成都市30m的DEM数据")
 
@@ -32,6 +33,7 @@ class ResponseLanguageTests(unittest.TestCase):
     def test_english_prompt_unavailable_planner_returns_english_clarification(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
+            service.set_interaction_mode("tool_enabled")
             with mock.patch("core.service.build_llm_task_plan", return_value={"status": "unavailable", "plan": {}}):
                 result = service.ask("Download a 30m DEM for Chengdu.")
 

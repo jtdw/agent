@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.response_language import localized_text, normalize_response_language
+from core.zhipu_json_client import LLMProviderError
 
 
 PresentationStatus = Literal["succeeded", "failed", "running", "awaiting_confirmation", "blocked"]
@@ -129,7 +130,7 @@ def _invoke_presentation_client(client: Any, payload: dict[str, Any]) -> Any:
                     "You are a GIS Result Interpreter. Return only a PresentationResult JSON object. "
                     "Use only the canonical execution facts provided. Do not invent files, metrics, layers, links, or IDs.",
                 ),
-                ("user", json.dumps(payload, ensure_ascii=False, default=str)),
+                ("user", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
             ]
         )
     if callable(client):
@@ -138,9 +139,6 @@ def _invoke_presentation_client(client: Any, payload: dict[str, Any]) -> Any:
 
 
 def _status(coordinator_status: str, results: list[dict[str, Any]]) -> PresentationStatus:
-    raw = str(coordinator_status or "").strip()
-    if raw in {"succeeded", "failed", "running", "awaiting_confirmation", "blocked"}:
-        return raw  # type: ignore[return-value]
     statuses = [str(item.get("status") or "") for item in results]
     if "awaiting_confirmation" in statuses:
         return "awaiting_confirmation"
@@ -150,6 +148,9 @@ def _status(coordinator_status: str, results: list[dict[str, Any]]) -> Presentat
         return "failed"
     if "running" in statuses:
         return "running"
+    raw = str(coordinator_status or "").strip()
+    if raw in {"succeeded", "failed", "running", "awaiting_confirmation", "blocked"}:
+        return raw  # type: ignore[return-value]
     return "succeeded" if results else "blocked"
 
 
@@ -235,8 +236,6 @@ def build_presentation_result(
             if not isinstance(artifact, dict):
                 continue
             artifact_type = _clean_text(artifact.get("type") or artifact.get("kind"), 60)
-            if artifact_type == "dataset" and not (artifact.get("path") or artifact.get("download_url")):
-                continue
             artifact_id = _clean_text(artifact.get("artifact_id") or artifact.get("id"), 120)
             if not artifact_id or artifact_id in seen_artifacts:
                 continue
@@ -410,7 +409,7 @@ def build_llm_presentation_result(
         try:
             from .llm_task_planner import build_default_llm_task_planner_client
 
-            client = build_default_llm_task_planner_client()
+            client = build_default_llm_task_planner_client(operation="result_interpreter")
         except Exception:
             client = None
     if client is None:
@@ -432,6 +431,8 @@ def build_llm_presentation_result(
     }
     try:
         raw = _invoke_presentation_client(client, payload)
+    except LLMProviderError:
+        return None
     except Exception:
         return None
     parsed = _parse_llm_payload(raw)

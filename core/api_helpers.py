@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from domain.artifacts.models import artifact_download_url
+
 
 SESSION_COOKIE_ID = "gis_agent_session_id"
 SESSION_COOKIE_TOKEN = "gis_agent_session_token"
@@ -52,20 +54,6 @@ def request_admin_token(request: Any) -> str:
     return ""
 
 
-def relative_artifact_url(workdir: str | Path, file_path: str | Path, user_id: str = "") -> str:
-    path = Path(file_path).resolve()
-    root = Path(workdir).resolve()
-    try:
-        rel = path.relative_to(root)
-    except Exception:
-        return ""
-    rel_url_path = str(rel).replace("\\", "/")
-    params = {"path": rel_url_path}
-    if str(user_id or "").strip():
-        params["user_id"] = safe_key(user_id)
-    return f"/api/files/artifact?{urlencode(params)}"
-
-
 def relative_shared_download_url(base_workdir: str | Path, file_path: str | Path, user_id: str = "", job_id: str = "", session_id: str = "") -> str:
     path = Path(file_path or "").resolve()
     if not path.exists() or not path.is_file():
@@ -90,7 +78,9 @@ def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> d
 
     def append_file(item: dict[str, Any]) -> None:
         artifact_id = str(item.get("artifact_id") or item.get("id") or "")
-        url = str(item.get("download_url") or "")
+        url = artifact_download_url(artifact_id) if artifact_id else str(item.get("download_url") or "")
+        if not artifact_id and url.startswith("/api/files/artifact?"):
+            return
         label = str(item.get("title") or item.get("label") or item.get("filename") or item.get("name") or "result file")
         key = artifact_id or url or label
         if not key or key in seen:

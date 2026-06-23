@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.capability_config import configured_products
+from core.dataset_availability import availability_for_product
 
 
 PRODUCT_CATALOG_VERSION = "download-product-catalog/v1"
@@ -46,6 +47,25 @@ _PRODUCTS: list[dict[str, Any]] = [
         "unsupported_scenarios": ["指定时间范围不会改变 DEM 产品。", "区域无覆盖时无法下载。"],
         "alternatives": ["gscloud_dem_30m"],
         "aliases": ["dem", "高程", "90m dem", "90米dem", "90米 dem"],
+    },
+    {
+        "product_id": "gscloud_ndvi_500m_10day",
+        "display_name_zh": "MODND1T 中国 500M NDVI 旬合成产品",
+        "source": "gscloud",
+        "source_product_key": "modnd1t_china_500m_ndvi_10day",
+        "resource_type": "modnd1t_ndvi_10day",
+        "supported_resolutions": ["500m"],
+        "temporal_requirement": "date_range",
+        "spatial_coverage": "中国区域，按地理空间数据云场景记录筛选",
+        "required_parameters": ["area_asset_id", "time_range"],
+        "optional_parameters": ["output_name", "account_mode", "max_scenes", "include_qc"],
+        "login_or_license_requirement": "需要地理空间数据云账号登录；开始下载前需要用户确认。",
+        "supported_output_format": ["zip"],
+        "tool_card": "submit_commercial_download_job",
+        "download_adapter": "gscloud_scene_table",
+        "unsupported_scenarios": ["缺少时间范围时不能提交下载。", "默认只下载 NDVI/MAX 主产品，QC 质量控制文件需要显式参数。"],
+        "alternatives": ["gscloud_evi_250m_10day"],
+        "aliases": ["ndvi", "归一化植被指数", "modnd1t", "modnd1d", "500m ndvi", "modis ndvi", "植被指数"],
     },
     {
         "product_id": "gscloud_lst_1km_10day",
@@ -123,7 +143,34 @@ _PRODUCTS: list[dict[str, Any]] = [
         "alternatives": ["landsat8_oli_tirs"],
         "aliases": ["sentinel", "sentinel-2", "sentinel2", "哨兵", "哨兵2号"],
     },
+    {
+        "product_id": "gscloud_landsat8_oli_tirs",
+        "display_name_zh": "Landsat 8 OLI_TIRS 卫星数字产品",
+        "source": "gscloud",
+        "source_product_key": "landsat8_oli_tirs",
+        "resource_type": "landsat8_oli_tirs",
+        "supported_resolutions": ["30m", "100m"],
+        "temporal_requirement": "date_range",
+        "spatial_coverage": "中国区域，按地理空间数据云场景记录筛选",
+        "required_parameters": ["area_asset_id", "time_range"],
+        "optional_parameters": ["output_name", "account_mode", "max_scenes", "cloud_max"],
+        "login_or_license_requirement": "需要地理空间数据云账号登录；开始下载前需要用户确认。",
+        "supported_output_format": ["zip"],
+        "tool_card": "submit_commercial_download_job",
+        "download_adapter": "gscloud_scene_table",
+        "unsupported_scenarios": ["缺少时间范围时不能提交下载。", "具体波段与热红外分辨率取决于 Landsat 8 原始产品。"],
+        "alternatives": ["gscloud_sentinel2_msi"],
+        "aliases": ["landsat", "landsat 8", "landsat8", "oli_tirs", "oli tirs", "l8", "陆地卫星8", "陆地卫星"],
+    },
 ]
+
+
+def _with_availability(item: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item)
+    profile = availability_for_product(str(payload.get("product_id") or ""))
+    if profile:
+        payload["availability_profile"] = profile
+    return payload
 
 
 def list_product_catalog() -> list[dict[str, Any]]:
@@ -132,7 +179,7 @@ def list_product_catalog() -> list[dict[str, Any]]:
         if str(item.get("status") or "enabled") != "enabled":
             continue
         products[str(item.get("product_id") or "")] = dict(item, schema_version=PRODUCT_CATALOG_VERSION)
-    return [item for item in products.values() if item.get("product_id")]
+    return [_with_availability(item) for item in products.values() if item.get("product_id")]
 
 
 def product_by_id(product_id: str) -> dict[str, Any] | None:

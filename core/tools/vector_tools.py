@@ -22,6 +22,7 @@ _LEGACY_DEPENDENCIES = (
     'Any',
     'ArtifactInfo',
     'CRS',
+    '_build_mask_from_query',
     '_align_crs',
     '_estimate_projected_gdf',
     '_prepare_join_frame',
@@ -52,17 +53,74 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
     @tool
     def vector_filter(dataset_name: str, expression: str, output_name: str) -> str:
         """按属性表达式筛选矢量数据，例如 expression='POP > 1000'。"""
-        gdf = manager.get_vector(dataset_name)
-        filtered = gdf.query(expression).copy()
-        saved_name = manager.put_vector(output_name, filtered)
-        manager.log_operation("矢量筛选", f"{dataset_name} -> {saved_name} | 条件: {expression}", "analysis")
-        return f"筛选完成，结果数据集名称: {saved_name}，要素数量: {len(filtered)}，保存路径: {manager.get(saved_name).path}"
+        inputs = {"dataset_name": dataset_name, "expression": expression, "output_name": output_name}
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, dataset_name))
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        if not str(expression or "").strip():
+            errors.append(
+                {
+                    "error_code": "VECTOR_FILTER_EXPRESSION_REQUIRED",
+                    "error_title": "缺少筛选表达式",
+                    "user_message": "请提供明确的属性筛选表达式，例如 POP > 1000。",
+                    "diagnostics": {},
+                    "next_actions": ["指定 expression，并确保字段名来自真实矢量属性表。"],
+                }
+            )
+        if not errors:
+            errors.extend(validate_vector_readable(manager, dataset_name))
+        if errors:
+            return _tool_error_from_validation("vector_filter", inputs, errors)
+        try:
+            gdf = manager.get_vector(dataset_name)
+            mask = _build_mask_from_query(gdf.drop(columns="geometry", errors="ignore"), str(expression), "vector_filter.expression")
+            filtered = gdf.loc[mask].copy()
+            saved_name = manager.put_vector(output_name, filtered)
+            record = manager.get(saved_name)
+            manager.log_operation("矢量筛选", f"{dataset_name} -> {saved_name} | 条件: {expression}", "analysis")
+            warnings_list = ["筛选结果为空，请检查表达式或字段取值。"] if filtered.empty else []
+            return tool_result_ok(
+                "vector_filter",
+                inputs=inputs,
+                outputs={"result_dataset": saved_name, "feature_count": int(len(filtered)), "path": str(record.path), "expression": expression},
+                artifacts=[
+                    ArtifactInfo(
+                        artifact_id=f"dataset_{uuid4().hex[:10]}",
+                        path=str(record.path),
+                        type="dataset",
+                        title=f"{saved_name} filtered vector",
+                        description=f"{dataset_name} 按属性表达式筛选后的矢量结果。",
+                        quality_status="empty" if filtered.empty else "created",
+                        preview_available=False,
+                    )
+                ],
+                map_layers=[{"layer_id": f"dataset_{saved_name.lower()}", "name": saved_name, "dataset_name": saved_name, "type": "vector"}],
+                summary=f"矢量筛选完成，结果数据集 {saved_name}，要素数 {len(filtered)}。",
+                diagnostics={
+                    "source_dataset": dataset_name,
+                    "source_count": int(len(gdf)),
+                    "result_count": int(len(filtered)),
+                    "available_fields": [str(col) for col in gdf.columns if str(col) != "geometry"],
+                },
+                warnings=warnings_list,
+                next_actions=["检查筛选结果数量和属性字段。", "可继续用于裁剪、空间连接、制图或导出。"],
+            ).to_json()
+        except Exception as exc:
+            return tool_result_error(
+                "vector_filter",
+                inputs=inputs,
+                error_code="VECTOR_FILTER_EXPRESSION_INVALID",
+                error_title="筛选表达式无效",
+                user_message="筛选表达式无法安全解析或字段不存在，请检查字段名、比较符和取值。",
+                diagnostics={"error_type": type(exc).__name__},
+                next_actions=["使用真实字段名和简单比较表达式，例如 POP > 1000 或 type == 'river'。"],
+            ).to_json()
 
 
     @tool
-    def vector_buffer(dataset_name: str, distance: float, output_name: str) -> str:
+    def vector_buffer(dataset_name: str, distance: float, output_name: str, unit: str = "meter") -> str:
         """对矢量数据进行缓冲区分析。distance 单位为图层投影坐标系单位，若原始数据为经纬度则会自动估计 UTM 投影。"""
-        inputs = {"dataset_name": dataset_name, "distance": distance, "output_name": output_name}
+        inputs = {"dataset_name": dataset_name, "distance": distance, "output_name": output_name, "unit": unit}
         errors: list[dict[str, Any]] = []
         errors.extend(validate_dataset_exists(manager, dataset_name))
         errors.extend(validate_output_path(manager.derived_dir, output_name))
@@ -79,6 +137,17 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 user_message="Buffer distance must be a positive number.",
                 diagnostics={"distance": distance},
                 next_actions=["Provide a positive buffer distance before running buffer analysis."],
+            ).to_json()
+        unit_value = str(unit or "meter").strip().lower()
+        if unit_value not in {"meter", "metre", "m"}:
+            return tool_result_error(
+                "vector_buffer",
+                inputs=inputs,
+                error_code="BUFFER_UNIT_UNSUPPORTED",
+                error_title="缓冲区单位不支持",
+                user_message="当前缓冲区工具只支持米制距离，请使用 unit=meter。",
+                diagnostics={"allowed": ["meter"], "received": unit},
+                next_actions=["请明确距离单位为 meter，或先将数据重投影到目标投影坐标系后再处理。"],
             ).to_json()
         if not errors:
             errors.extend(validate_vector_readable(manager, dataset_name))
@@ -103,6 +172,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "feature_count": int(len(buffered)),
                     "path": str(record.path),
                     "distance": distance_value,
+                    "unit": "meter",
                     "processing_crs": used_crs,
                 },
                 artifacts=[
@@ -116,6 +186,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                         preview_available=True,
                     )
                 ],
+                map_layers=[{"layer_id": f"dataset_{saved_name.lower()}", "name": saved_name, "dataset_name": saved_name, "type": "vector"}],
                 summary=f"Created buffer dataset {saved_name} with {len(buffered)} features.",
                 diagnostics={
                     "source_dataset": dataset_name,
@@ -123,6 +194,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "result_count": int(len(buffered)),
                     "source_crs": str(gdf.crs),
                     "processing_crs": used_crs,
+                    "distance_unit": "meter",
                 },
                 warnings=warnings_list,
                 next_actions=["Inspect the buffer result, then continue with clipping, overlay, mapping, or export."],
@@ -321,10 +393,10 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
 
 
     @tool
-    def vector_spatial_join(target_name: str, join_name: str, predicate: str, output_name: str, how: str = "left") -> str:
+    def vector_spatial_join(target_name: str, join_name: str, predicate: str, output_name: str, how: str = "left", field_conflict_strategy: str = "suffix") -> str:
         """对两个矢量图层执行空间连接。predicate 常用 intersects、within、contains、touches、overlaps。"""
         allowed = {"intersects", "within", "contains", "touches", "overlaps", "crosses"}
-        inputs = {"target_name": target_name, "join_name": join_name, "predicate": predicate, "output_name": output_name, "how": how}
+        inputs = {"target_name": target_name, "join_name": join_name, "predicate": predicate, "output_name": output_name, "how": how, "field_conflict_strategy": field_conflict_strategy}
         if predicate not in allowed:
             return tool_result_error(
                 "vector_spatial_join",
@@ -345,6 +417,17 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 diagnostics={"allowed": ["inner", "left", "right"], "received": how},
                 next_actions=["请选择 left、right 或 inner 后重试。"],
             ).to_json()
+        conflict_strategy = str(field_conflict_strategy or "suffix").strip().lower()
+        if conflict_strategy not in {"suffix"}:
+            return tool_result_error(
+                "vector_spatial_join",
+                inputs=inputs,
+                error_code="FIELD_CONFLICT_STRATEGY_UNSUPPORTED",
+                error_title="字段冲突策略不支持",
+                user_message="当前空间连接只支持 suffix 字段冲突策略。",
+                diagnostics={"allowed": ["suffix"], "received": field_conflict_strategy},
+                next_actions=["请使用 field_conflict_strategy=suffix 后重试。"],
+            ).to_json()
         errors: list[dict[str, Any]] = []
         errors.extend(validate_dataset_exists(manager, target_name))
         errors.extend(validate_dataset_exists(manager, join_name))
@@ -360,7 +443,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             target = manager.get_vector(target_name)
             join_gdf = manager.get_vector(join_name)
             target, join_gdf = _align_crs(target, join_gdf)
-            joined = gpd.sjoin(target, join_gdf, how=how, predicate=predicate)
+            joined = gpd.sjoin(target, join_gdf, how=how, predicate=predicate, lsuffix="target", rsuffix="join")
             if "index_right" in joined.columns:
                 joined = joined.drop(columns=["index_right"])
             saved_name = manager.put_vector(output_name, joined)
@@ -369,7 +452,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             return tool_result_ok(
                 "vector_spatial_join",
                 inputs=inputs,
-                outputs={"result_dataset": saved_name, "feature_count": int(len(joined)), "path": str(record.path)},
+                outputs={"result_dataset": saved_name, "feature_count": int(len(joined)), "path": str(record.path), "predicate": predicate, "how": how},
                 artifacts=[
                     ArtifactInfo(
                         artifact_id=f"dataset:{saved_name}",
@@ -381,6 +464,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                         preview_available=True,
                     )
                 ],
+                map_layers=[{"layer_id": f"dataset_{saved_name.lower()}", "name": saved_name, "dataset_name": saved_name, "type": "vector"}],
                 summary=f"已完成 {target_name} 与 {join_name} 的空间连接，输出 {saved_name}，要素数 {len(joined)}。",
                 diagnostics={
                     "target_count": int(len(target)),
@@ -389,6 +473,8 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "predicate": predicate,
                     "how": how,
                     "crs": str(target.crs),
+                    "field_conflict_strategy": conflict_strategy,
+                    "output_fields": [str(col) for col in joined.columns],
                 },
                 next_actions=["可继续统计连接结果、制图或导出。"],
             ).to_json()
@@ -779,7 +865,7 @@ def build_vector_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
 
             saved_name = manager.put_vector(output_name, result)
             output_path = manager.get(saved_name).path
-            manager.log_operation("鏍呮牸鎶芥牱鍒扮偣", f"{raster_name} -> {point_name} -> {saved_name}", "analysis")
+            manager.log_operation("栅格抽样到点", f"{raster_name} -> {point_name} -> {saved_name}", "analysis")
             return tool_result_ok(
                 "extract_raster_values_to_points",
                 inputs=inputs,

@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
+from rasterio.warp import transform as transform_coords
 
 from core.config import Settings
 from core.service import GISWorkspaceService
@@ -32,6 +33,7 @@ def _write_many_day_station_archive(path: Path, days: int = 16) -> None:
 
 def _write_covering_raster(path: Path) -> None:
     data = np.arange(100, dtype="float32").reshape(10, 10)
+    x, y = transform_coords("EPSG:4326", "EPSG:3857", [115.53885], [41.55076])
     with rasterio.open(
         path,
         "w",
@@ -40,8 +42,8 @@ def _write_covering_raster(path: Path) -> None:
         width=10,
         count=1,
         dtype="float32",
-        crs="EPSG:4326",
-        transform=from_origin(115.0, 42.0, 0.1, 0.1),
+        crs="EPSG:3857",
+        transform=from_origin(x[0] - 500.0, y[0] + 500.0, 100.0, 100.0),
         nodata=-9999.0,
     ) as dst:
         dst.write(data, 1)
@@ -83,7 +85,7 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
         _write_many_day_station_archive(archive_path)
         raster_path = service.manager.upload_dir / "dem.tif"
         _write_covering_raster(raster_path)
-        service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:4326"})
+        service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:3857"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
 
         result = parse_tool_result(
@@ -164,7 +166,7 @@ def test_stm_xgboost_workflow_can_disable_aspect_circular_features() -> None:
         _write_many_day_station_archive(archive_path)
         raster_path = service.manager.upload_dir / "dem.tif"
         _write_covering_raster(raster_path)
-        service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:4326"})
+        service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:3857"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
 
         result = parse_tool_result(

@@ -89,6 +89,7 @@ class WorkspaceDatabase:
                 CREATE TABLE IF NOT EXISTS conversations (
                     session_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
+                    interaction_mode TEXT NOT NULL DEFAULT 'chat_only',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -184,6 +185,9 @@ class WorkspaceDatabase:
                 "mime_type": "TEXT",
                 "source_tool": "TEXT",
                 "is_deleted": "INTEGER NOT NULL DEFAULT 0",
+            },
+            "conversations": {
+                "interaction_mode": "TEXT NOT NULL DEFAULT 'chat_only'",
             },
         }
         for table, columns in migrations.items():
@@ -385,6 +389,38 @@ class WorkspaceDatabase:
                     (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), str(artifact_id or "")),
                 )
             return int(cursor.rowcount or 0)
+
+    def hard_delete_session_records(self, session_id: str) -> dict[str, int]:
+        clean_session = str(session_id or "").strip()
+        if not clean_session:
+            return {"model_results": 0, "pipeline_runs": 0, "pipeline_steps": 0, "artifacts": 0, "dataset_catalog": 0, "document_store": 0}
+        with self._connect() as conn:
+            run_ids = [
+                str(row[0])
+                for row in conn.execute("SELECT run_id FROM pipeline_runs WHERE session_id = ?", (clean_session,)).fetchall()
+            ]
+            pipeline_steps = 0
+            if run_ids:
+                placeholders = ",".join(["?"] * len(run_ids))
+                pipeline_steps = int(conn.execute(f"DELETE FROM pipeline_steps WHERE run_id IN ({placeholders})", run_ids).rowcount or 0)
+            pipeline_runs = int(conn.execute("DELETE FROM pipeline_runs WHERE session_id = ?", (clean_session,)).rowcount or 0)
+            model_results = int(conn.execute("DELETE FROM model_results WHERE session_id = ?", (clean_session,)).rowcount or 0)
+            artifacts = int(conn.execute("DELETE FROM artifacts WHERE session_id = ?", (clean_session,)).rowcount or 0)
+            catalog_rows = conn.execute("SELECT dataset_name, data_type FROM dataset_catalog WHERE session_id = ?", (clean_session,)).fetchall()
+            document_names = [str(row[0]) for row in catalog_rows if str(row[1] or "") == "document"]
+            document_store = 0
+            if document_names:
+                placeholders = ",".join(["?"] * len(document_names))
+                document_store = int(conn.execute(f"DELETE FROM document_store WHERE dataset_name IN ({placeholders})", document_names).rowcount or 0)
+            dataset_catalog = int(conn.execute("DELETE FROM dataset_catalog WHERE session_id = ?", (clean_session,)).rowcount or 0)
+        return {
+            "model_results": model_results,
+            "pipeline_runs": pipeline_runs,
+            "pipeline_steps": pipeline_steps,
+            "artifacts": artifacts,
+            "dataset_catalog": dataset_catalog,
+            "document_store": document_store,
+        }
 
     def list_artifacts(self, *, model_result_id: str = "", session_id: str = "", include_deleted: bool = False, limit: int = 200) -> list[dict[str, Any]]:
         params: list[Any] = []
@@ -688,8 +724,8 @@ class WorkspaceDatabase:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO conversations (session_id, title, created_at, updated_at) VALUES (?, COALESCE((SELECT title FROM conversations WHERE session_id = ?), ?), COALESCE((SELECT created_at FROM conversations WHERE session_id = ?), ?), ?)",
-                (session_id, session_id, title, session_id, now, now),
+                "INSERT OR REPLACE INTO conversations (session_id, title, interaction_mode, created_at, updated_at) VALUES (?, COALESCE((SELECT title FROM conversations WHERE session_id = ?), ?), COALESCE((SELECT interaction_mode FROM conversations WHERE session_id = ?), 'chat_only'), COALESCE((SELECT created_at FROM conversations WHERE session_id = ?), ?), ?)",
+                (session_id, session_id, title, session_id, session_id, now, now),
             )
         self.set_current_conversation_id(session_id)
 
@@ -706,9 +742,32 @@ class WorkspaceDatabase:
     def list_conversations(self) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT session_id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC, created_at DESC"
+                "SELECT session_id, title, interaction_mode, created_at, updated_at FROM conversations ORDER BY updated_at DESC, created_at DESC"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_conversation_interaction_mode(self, session_id: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT interaction_mode FROM conversations WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        mode = str(row["interaction_mode"] if row else "" or "").strip()
+        return mode if mode in {"chat_only", "tool_enabled"} else "chat_only"
+
+    def set_conversation_interaction_mode(self, session_id: str, interaction_mode: str) -> str:
+        mode = str(interaction_mode or "").strip()
+        if mode not in {"chat_only", "tool_enabled"}:
+            raise ValueError("interaction_mode must be chat_only or tool_enabled")
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE conversations SET interaction_mode = ?, updated_at = ? WHERE session_id = ?",
+                (mode, now, session_id),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"session not found: {session_id}")
+        return mode
 
     def get_current_conversation_id(self) -> str | None:
         return self._get_state("current_conversation_id")

@@ -13,8 +13,8 @@ from rasterio.mask import mask
 from rasterio.merge import merge as raster_merge
 from rasterio.vrt import WarpedVRT
 
-from ..archive_utils import safe_extract_zip
 from ..data_manager import DataManager
+from .archive_manifest import RASTER_EXTS, extract_loadable_members
 
 
 def _result_dataset_names(result: dict[str, Any]) -> list[str]:
@@ -260,7 +260,7 @@ def _package_final_raster(manager: DataManager, raster_path: str, output_name: s
     return str(package_path)
 
 
-RASTER_FILE_EXTS = {".tif", ".tiff", ".img"}
+RASTER_FILE_EXTS = RASTER_EXTS
 
 
 def _extract_zip_rasters(manager: DataManager, path: Path, paths: list[Path], *, depth: int = 0) -> None:
@@ -268,10 +268,8 @@ def _extract_zip_rasters(manager: DataManager, path: Path, paths: list[Path], *,
         return
     stem = _safe_stem(path.stem)
     target = manager.derived_dir / "download_postprocess_extracts" / stem
-    target.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path, "r") as archive:
-        safe_extract_zip(archive, target)
-    for candidate in sorted(target.rglob("*")):
+    extracted, _, _ = extract_loadable_members(path, target, allowed_exts=RASTER_FILE_EXTS | {".zip"}, max_datasets=256, clean=True)
+    for candidate in sorted(extracted):
         if not candidate.is_file():
             continue
         suffix = candidate.suffix.lower()

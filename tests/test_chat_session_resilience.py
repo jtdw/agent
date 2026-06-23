@@ -17,7 +17,7 @@ class ChatSessionResilienceTests(unittest.TestCase):
     def test_missing_chat_session_is_rejected_without_switching_current_session(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
-            original = service.current_session_id
+            original = service.create_new_session()
 
             with self.assertRaises(FileNotFoundError):
                 service.use_session_or_current("session_missing")
@@ -28,7 +28,7 @@ class ChatSessionResilienceTests(unittest.TestCase):
     def test_existing_chat_session_is_selected(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
-            first = service.current_session_id
+            first = service.create_new_session("第一个会话")
             second = service.create_new_session("第二个会话")
 
             recovered = service.use_session_or_current(first)
@@ -41,7 +41,7 @@ class ChatSessionResilienceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             service = self.make_service(root)
-            session_id = service.current_session_id
+            session_id = service.create_new_session()
             service.manager.database.add_message(session_id, "user", "hello")
             service.manager.database.add_message(session_id, "assistant", "world")
 

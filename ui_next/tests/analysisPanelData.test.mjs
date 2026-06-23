@@ -42,7 +42,8 @@ const dashboard = {
   },
   artifacts: [
     { artifact_id: 'artifact_summary_001', name: 'soil_model_summary.md', path: 'derived/soil_model_summary.md', download_url: '/api/files/artifact?path=derived/soil_model_summary.md', type: 'document' },
-    { artifact_id: 'artifact_plot_001', name: 'soil_metrics_fig_metric_r.png', path: 'plots/soil_metrics_fig_metric_r.png', download_url: '/api/files/artifact?path=plots/soil_metrics_fig_metric_r.png', type: 'plot' }
+    { artifact_id: 'artifact_plot_001', name: 'soil_metrics_fig_metric_r.png', path: 'plots/soil_metrics_fig_metric_r.png', type: 'plot' },
+    { name: 'legacy_orphan.csv', path: 'derived/legacy_orphan.csv', download_url: '/api/files/artifact?path=derived/legacy_orphan.csv', type: 'document' }
   ]
 };
 
@@ -56,6 +57,8 @@ assert.equal(view.bestModel?.modelResultId, '');
 assert.equal(view.downloads.length, 2);
 assert.equal(view.downloads[0].artifactId, 'artifact_summary_001');
 assert.equal(view.downloads[1].artifactId, 'artifact_plot_001');
+assert.equal(view.downloads[0].url, '');
+assert.equal(view.downloads[1].url, '');
 
 const boundModelView = analysis.buildAnalysisPanelView({
   model_results: [
@@ -124,7 +127,8 @@ const resultPanelView = analysis.buildAnalysisPanelView(
     has_results: true,
     title: 'XGBoost model finished',
     files: [
-      { artifact_id: 'artifact_metrics_001', label: 'metrics', path: 'derived/xgb_metrics.csv', download_url: '/api/files/artifact?path=derived/xgb_metrics.csv', kind: 'report' }
+      { artifact_id: 'artifact_metrics_001', label: 'metrics', path: 'derived/xgb_metrics.csv', download_url: '/api/files/artifact?path=derived/xgb_metrics.csv', kind: 'report' },
+      { label: 'legacy orphan', path: 'derived/orphan.csv', download_url: '/api/files/artifact?path=derived/orphan.csv', kind: 'report' }
     ],
     recommendations: ['check metrics']
   }
@@ -134,6 +138,7 @@ assert.equal(resultPanelView.title, 'XGBoost model finished');
 assert.equal(resultPanelView.downloads.length, 1);
 assert.equal(resultPanelView.downloads[0].label, 'metrics');
 assert.equal(resultPanelView.downloads[0].artifactId, 'artifact_metrics_001');
+assert.equal(resultPanelView.downloads[0].url, '');
 assert.equal(resultPanelView.recommendations[0], 'check metrics');
 
 console.log('analysis panel data tests passed');

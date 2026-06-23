@@ -497,13 +497,13 @@ def _prompt_requests_gcp(prompt: str) -> bool:
         "coverage",
         "geoconformal prediction",
         "spatial conformal prediction",
-        "????",
-        "??????",
-        "????",
-        "????",
-        "?????",
-        "???",
-        "????",
+        "不确定性",
+        "不确定性分析",
+        "预测区间",
+        "区间宽度",
+        "覆盖率",
+        "共形预测",
+        "空间共形预测",
     )
     return any(token in text for token in tokens)
 

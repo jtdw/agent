@@ -102,8 +102,8 @@ export function summarizeJobs(jobs: Array<Pick<DownloadJob, 'status'>> = []): Jo
 export function groupArtifacts(artifacts: WorkspaceArtifact[] = []): ConsoleArtifact[] {
   return artifacts
     .map((artifact) => {
-      const url = String(artifact.download_url || '');
-      if (!url) return null;
+      const artifactId = String(artifact.artifact_id || '');
+      if (!artifactId) return null;
       const label = String(artifact.name || artifact.path?.split(/[\\/]/).pop() || '结果文件');
       const lower = label.toLowerCase();
       let kind: ConsoleArtifact['kind'] = 'artifact';
@@ -111,7 +111,7 @@ export function groupArtifacts(artifacts: WorkspaceArtifact[] = []): ConsoleArti
       else if (/\.(zip|7z|rar)$/i.test(lower)) kind = 'archive';
       else if (/\.(csv|xlsx|xls|md|txt|docx|pdf)$/i.test(lower)) kind = 'report';
       else if (/\.(geojson|json|tif|tiff|shp|gpkg)$/i.test(lower)) kind = 'data';
-      return { artifactId: String(artifact.artifact_id || ''), label, url, path: String(artifact.path || ''), kind };
+      return { artifactId, label, url: '', path: String(artifact.path || ''), kind };
     })
     .filter((item): item is ConsoleArtifact => Boolean(item));
 }
