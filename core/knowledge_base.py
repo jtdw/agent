@@ -79,4 +79,11 @@ def retrieve_knowledge_snippets(query: str, *, limit: int = 5) -> list[dict[str,
     scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("id") or "")))
     builtin = [dict(item, knowledge_chunk_id=f"{item.get('id')}:{item.get('version')}", knowledge_id=item.get("id"), knowledge_version=item.get("version"), source_trust="trusted_operator", schema_version=CAPABILITY_CONFIG_VERSION) for _, item in scored[:limit]]
     merged = configured + builtin
-    return merged[:limit]
+    normalized: list[dict[str, Any]] = []
+    for item in merged[:limit]:
+        snippet = dict(item)
+        snippet.setdefault("version", snippet.get("knowledge_version") or "")
+        snippet.setdefault("scope", snippet.get("applicable_scope") or "")
+        snippet.setdefault("trust_level", snippet.get("reliability") or snippet.get("source_trust") or "")
+        normalized.append(snippet)
+    return normalized

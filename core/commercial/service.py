@@ -517,6 +517,21 @@ class CommercialService:
         )
         return self._platform_public(self.db.fetch_one("SELECT * FROM platform_accounts WHERE account_id=?", [account_id]) or {})
 
+    def set_platform_account_status(self, account_id: str, status: str) -> dict[str, Any]:
+        status_value = str(status or "").strip().lower()
+        if status_value not in {"active", "disabled"}:
+            raise ValueError("平台账号状态必须是 active 或 disabled。")
+        row = self.db.fetch_one("SELECT * FROM platform_accounts WHERE account_id=?", [account_id])
+        if not row:
+            raise ValueError(f"平台账号不存在: {account_id}")
+        self.db.update_dict(
+            "platform_accounts",
+            {"status": status_value, "updated_at": now_str()},
+            "account_id=?",
+            [account_id],
+        )
+        return self._platform_public(self.db.fetch_one("SELECT * FROM platform_accounts WHERE account_id=?", [account_id]) or {})
+
     def get_platform_account_private(self, account_id: str) -> dict[str, Any]:
         row = self.db.fetch_one("SELECT * FROM platform_accounts WHERE account_id=?", [account_id])
         if not row:
@@ -598,6 +613,8 @@ class CommercialService:
 
     def _platform_public(self, row: dict[str, Any]) -> dict[str, Any]:
         pub = public_record(row)
+        storage_state_path = str(pub.pop("storage_state_path", "") or "")
+        pub["has_storage_state"] = bool(storage_state_path)
         username = self.secret.decrypt(row.get("encrypted_username")) if row.get("encrypted_username") else ""
         pub["username_preview"] = mask_secret(username)
         pub["has_password"] = bool(row.get("encrypted_password"))
@@ -1018,3 +1035,66 @@ class CommercialService:
         )
         self._update_job(retry["job_id"], retried_from_job_id=job_id)
         return self.get_job(retry["job_id"])
+
+    def cancel_session_jobs(self, user_id: str, session_id: str, reason: str = "Session deleted.") -> list[str]:
+        clean_session = str(session_id or "").strip()
+        if not clean_session:
+            return []
+        user = self.get_user(user_id) if str(user_id or "").strip() else None
+        params: list[Any] = [clean_session]
+        where = "session_id=?"
+        if user:
+            where += " AND user_id=?"
+            params.append(user["user_id"])
+        rows = self.db.fetch_all(
+            f"SELECT * FROM download_jobs WHERE {where} AND status IN ('queued','running','waiting_login','waiting_manual')",
+            params,
+        )
+        cancelled: list[str] = []
+        for row in rows:
+            job_id = str(row.get("job_id") or "")
+            if not job_id:
+                continue
+            self._release_platform_reservation(job_id, "release_session_deleted_platform_download")
+            self._update_job(
+                job_id,
+                status="canceled",
+                progress=100,
+                stage="session_deleted",
+                error_message=reason,
+                canceled_at=now_str(),
+                finished_at=now_str(),
+            )
+            cancelled.append(job_id)
+        return cancelled
+
+    def hard_delete_session_jobs(self, user_id: str, session_id: str) -> dict[str, Any]:
+        clean_session = str(session_id or "").strip()
+        if not clean_session:
+            return {"deleted_download_jobs": [], "deleted_worker_files": []}
+        user = self.get_user(user_id) if str(user_id or "").strip() else None
+        params: list[Any] = [clean_session]
+        where = "session_id=?"
+        if user:
+            where += " AND user_id=?"
+            params.append(user["user_id"])
+        rows = self.db.fetch_all(f"SELECT * FROM download_jobs WHERE {where}", params)
+        job_ids = {str(row.get("job_id") or "") for row in rows if row.get("job_id")}
+        for job_id in job_ids:
+            self._release_platform_reservation(job_id, "release_hard_deleted_session_download")
+        deleted_worker_files: list[str] = []
+        try:
+            from core.commercial.scene_jobs import delete_gscloud_scene_jobs_for_job_ids
+
+            deleted_worker_files.extend(delete_gscloud_scene_jobs_for_job_ids(self.workdir, job_ids))
+        except Exception:
+            pass
+        try:
+            from core.commercial.tile_jobs import delete_gscloud_tile_jobs_for_job_ids
+
+            deleted_worker_files.extend(delete_gscloud_tile_jobs_for_job_ids(self.workdir, job_ids))
+        except Exception:
+            pass
+        with self.db.connect() as conn:
+            conn.execute(f"DELETE FROM download_jobs WHERE {where}", params)
+        return {"deleted_download_jobs": sorted(job_ids), "deleted_worker_files": deleted_worker_files}

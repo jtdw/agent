@@ -46,7 +46,7 @@ assert.equal('html' in payload.selected_feature_properties, false);
 assert.match(apiSource, /frontend_context/, 'api.ask must send frontend_context');
 assert.match(apiSource, /ChatContextPayload/, 'api.ask should type frontend context payload');
 assert.match(chatPanelSource, /chatContext/, 'ChatPanel must accept chatContext');
-assert.match(chatPanelSource, /api\.ask\(text,\s*userId,\s*currentSessionId,\s*\{[\s\S]*session_id/, 'ChatPanel must pass session-scoped context to api.ask');
+assert.match(chatPanelSource, /api\.streamChat\([\s\S]*?text,\s*userId,\s*currentSessionId,\s*\{\s*\.\.\.chatContext,\s*session_id:\s*currentSessionId\s*\}/, 'ChatPanel must pass session-scoped context to streaming chat');
 assert.match(appSource, /chatContext/, 'App must own chat context state');
 assert.match(appSource, /setChatContext/, 'App must update chat context');
 assert.match(mapStageSource, /onChatContextChange/, 'MapStage must report selected map context');

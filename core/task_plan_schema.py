@@ -9,6 +9,7 @@ from core.product_catalog import product_by_id
 
 
 SourceAttribution = Literal["current_upload", "user_selected_default_library", "explicit_history_reference", "system_default"]
+SOURCE_ATTRIBUTION_VALUES = {"current_upload", "user_selected_default_library", "explicit_history_reference", "system_default"}
 
 
 class LLMInputAsset(BaseModel):
@@ -48,6 +49,8 @@ class LLMTaskPlan(BaseModel):
     workflow_steps: list[LLMWorkflowStep] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
     requires_confirmation: bool = False
+    execution_required: bool = True
+    response_mode: str = ""
     clarification_question: str = ""
     confidence: float = 0.0
     source_attribution: dict[str, SourceAttribution] = Field(default_factory=dict)
@@ -63,12 +66,144 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _coerce_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def _coerce_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    return [str(item).strip() for item in items if str(item or "").strip()]
+
+
+def _available_dataset_names_for_normalization(context: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    active = _as_dict(context.get("active_dataset"))
+    if active.get("name"):
+        names.add(str(active["name"]))
+    for item in _as_list(context.get("available_datasets")):
+        if isinstance(item, dict) and item.get("name"):
+            names.add(str(item["name"]))
+    return names
+
+
+def _normalize_source_value(value: Any, fallback: str = "system_default") -> str:
+    source = str(value or "").strip()
+    return source if source in SOURCE_ATTRIBUTION_VALUES else fallback
+
+
+def _source_for_name(name: str, raw_source_attribution: Any, available_dataset_names: set[str]) -> str:
+    if isinstance(raw_source_attribution, dict):
+        source = raw_source_attribution.get(name)
+        if source:
+            return _normalize_source_value(source, "system_default")
+    if isinstance(raw_source_attribution, list) and len(raw_source_attribution) == 1:
+        return _normalize_source_value(raw_source_attribution[0], "current_upload" if name in available_dataset_names else "system_default")
+    if name in available_dataset_names:
+        return "current_upload"
+    return "system_default"
+
+
+def _normalize_phase2_payload(data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Repair JSON-mode type drift without inventing tools, fields, or products."""
+    normalized = dict(data)
+    available_dataset_names = _available_dataset_names_for_normalization(context)
+    asset_roles = _as_dict(normalized.get("asset_roles"))
+    raw_source_attribution = normalized.get("source_attribution")
+
+    input_assets: list[dict[str, Any]] = []
+    for item in _coerce_list(normalized.get("input_assets")):
+        if isinstance(item, dict):
+            asset = dict(item)
+            name = str(asset.get("name") or asset.get("dataset_name") or "").strip()
+            if not name:
+                continue
+            asset["name"] = name
+            asset["role"] = str(asset.get("role") or asset_roles.get(name) or "input_asset")
+            asset["source"] = _normalize_source_value(asset.get("source"), _source_for_name(name, raw_source_attribution, available_dataset_names))
+            input_assets.append(asset)
+        else:
+            name = str(item or "").strip()
+            if not name:
+                continue
+            input_assets.append(
+                {
+                    "role": str(asset_roles.get(name) or "input_asset"),
+                    "name": name,
+                    "source": _source_for_name(name, raw_source_attribution, available_dataset_names),
+                }
+            )
+    normalized["input_assets"] = input_assets
+
+    normalized["requested_downloads"] = _as_list(normalized.get("requested_downloads"))
+    normalized["download_requests"] = _as_list(normalized.get("download_requests"))
+    normalized["time_range"] = _as_dict(normalized.get("time_range"))
+    if normalized.get("study_area") is None:
+        normalized["study_area"] = ""
+    if normalized.get("spatial_resolution") is None:
+        normalized["spatial_resolution"] = ""
+    normalized["candidate_tools"] = _coerce_string_list(normalized.get("candidate_tools"))
+    normalized["selected_tools"] = _coerce_string_list(normalized.get("selected_tools"))
+    normalized["expected_outputs"] = _coerce_string_list(normalized.get("expected_outputs"))
+    normalized["explicit_history_references"] = _coerce_string_list(normalized.get("explicit_history_references"))
+    normalized["response_mode"] = "" if normalized.get("response_mode") is None else str(normalized.get("response_mode") or "")
+    normalized["clarification_question"] = "" if normalized.get("clarification_question") is None else str(normalized.get("clarification_question") or "")
+    try:
+        normalized["confidence"] = float(normalized.get("confidence") or 0.0)
+    except Exception:
+        normalized["confidence"] = 0.0
+
+    steps: list[dict[str, Any]] = []
+    for index, item in enumerate(_coerce_list(normalized.get("workflow_steps"))):
+        if not isinstance(item, dict):
+            continue
+        step = dict(item)
+        step["step_id"] = str(step.get("step_id") or f"step_{index + 1}")
+        step["tool_name"] = str(step.get("tool_name") or "")
+        step["args"] = _as_dict(step.get("args"))
+        step["depends_on"] = _coerce_string_list(step.get("depends_on"))
+        step["expected_outputs"] = _coerce_string_list(step.get("expected_outputs"))
+        steps.append(step)
+    normalized["workflow_steps"] = steps
+
+    source_attribution: dict[str, str] = {}
+    if isinstance(raw_source_attribution, dict):
+        for key, value in raw_source_attribution.items():
+            source_attribution[str(key)] = _normalize_source_value(value, "system_default")
+    elif isinstance(raw_source_attribution, list) and len(raw_source_attribution) == 1:
+        source = _normalize_source_value(raw_source_attribution[0], "current_upload")
+        for key in [*(asset.get("name") for asset in input_assets), *asset_roles.keys()]:
+            if str(key or "").strip():
+                source_attribution[str(key)] = source
+    for asset in input_assets:
+        name = str(asset.get("name") or "")
+        if name:
+            source_attribution.setdefault(name, str(asset.get("source") or "system_default"))
+    normalized["source_attribution"] = source_attribution
+    return normalized
+
+
 def _error(code: str, message: str, **detail: Any) -> dict[str, Any]:
     return {"code": code, "message": message, **detail}
 
 
 def _is_phase2_payload(data: dict[str, Any]) -> bool:
-    return any(key in data for key in ("primary_goal", "operation", "input_assets", "workflow_steps", "selected_tools"))
+    return any(key in data for key in ("primary_goal", "operation", "input_assets", "workflow_steps", "selected_tools", "execution_required", "response_mode"))
+
+
+def _is_answer_only_plan(model: LLMTaskPlan) -> bool:
+    intent = str(model.intent or "").strip()
+    response_mode = str(model.response_mode or "").strip()
+    return (
+        model.execution_required is False
+        or response_mode == "answer_only"
+        or intent in {"knowledge_qa", "capability_question", "usage_help", "result_explanation"}
+    )
 
 
 def _candidate_tools(context: dict[str, Any]) -> set[str]:
@@ -283,6 +418,7 @@ def _fallback_plan(task_type: str, errors: list[dict[str, Any]], response_langua
 
 
 def _validate_phase2_task_plan(data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    data = _normalize_phase2_payload(data, context)
     response_language = str(data.get("response_language") or context.get("response_language") or "en-US")
     try:
         model = LLMTaskPlan.model_validate(data)
@@ -304,6 +440,72 @@ def _validate_phase2_task_plan(data: dict[str, Any], context: dict[str, Any]) ->
     workflow_steps: list[dict[str, Any]] = []
     tool_plan: list[dict[str, Any]] = []
     validated_args: dict[str, dict[str, Any]] = {}
+
+    if _is_answer_only_plan(model):
+        if selected_tools or model.workflow_steps:
+            errors.append(
+                _error(
+                    "ANSWER_ONLY_PLAN_HAS_TOOLS",
+                    "Answer-only TaskPlan must not select tools or workflow steps.",
+                    tools=selected_tools,
+                )
+            )
+        raw = model.model_dump(mode="json")
+        expected_outputs = list(model.expected_outputs) or ["chat_answer"]
+        if errors:
+            return {"ok": False, "errors": errors, "fallback_plan": _fallback_plan(model.intent, errors, response_language)}
+        plan = {
+            "task_type": model.intent,
+            "primary_goal": model.primary_goal,
+            "operation": model.operation or "answer_question",
+            "execution_required": False,
+            "response_mode": "answer_only",
+            "required_inputs": [],
+            "missing_inputs": [],
+            "recommended_tools": [],
+            "candidate_tools": [],
+            "selected_tools": [],
+            "tool_preconditions": {},
+            "execution_steps": [],
+            "expected_outputs": expected_outputs,
+            "should_ask_clarification": bool(str(model.clarification_question or "").strip()),
+            "clarification_question": str(model.clarification_question or ""),
+            "resolved_fields": {},
+            "resolved_objects": {"selected_assets": []},
+            "input_assets": [],
+            "asset_roles": {},
+            "slots": {"goal": model.primary_goal, "confidence": float(model.confidence)},
+            "tool_plan": [],
+            "validated_tool_args": {},
+            "workflow_plan": [],
+            "slot_validation_errors": [],
+            "semantic_parse": {"intent": model.intent, "operation": model.operation or "answer_question"},
+            "download_plan": {"requested_downloads": []},
+            "requested_downloads": [],
+            "download_requests": [],
+            "study_area": raw.get("study_area"),
+            "time_range": raw.get("time_range", {}),
+            "spatial_resolution": raw.get("spatial_resolution"),
+            "requires_confirmation": False,
+            "confidence": float(model.confidence),
+            "source_attribution": raw.get("source_attribution", {}),
+            "explicit_history_references": raw.get("explicit_history_references", []),
+            "response_language": response_language,
+            "forbidden_tools": [],
+            "llm_explanation": str(data.get("explanation") or ""),
+            "llm_task_plan": {
+                **raw,
+                "execution_required": False,
+                "response_mode": "answer_only",
+                "candidate_tools": [],
+                "selected_tools": [],
+                "workflow_steps": [],
+                "expected_outputs": expected_outputs,
+                "download_requests": [],
+                "requested_downloads": [],
+            },
+        }
+        return {"ok": True, "errors": [], "plan": plan}
 
     for tool_name in selected_tools:
         if candidate_tools and tool_name not in candidate_tools:
@@ -373,6 +575,7 @@ def _validate_phase2_task_plan(data: dict[str, Any], context: dict[str, Any]) ->
         "workflow_plan": workflow_steps,
         "slot_validation_errors": [],
         "semantic_parse": {"intent": model.intent, "operation": model.operation},
+        "confirmation_id": raw.get("confirmation_id"),
         "download_plan": {"requested_downloads": download_requests},
         "requested_downloads": download_requests,
         "download_requests": download_requests,

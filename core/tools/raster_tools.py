@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from typing import Any
 
 from core.tools import raster_helpers as _helpers
@@ -55,6 +56,84 @@ _LEGACY_DEPENDENCIES = (
 
 for _name in _LEGACY_DEPENDENCIES:
     globals()[_name] = getattr(_helpers, _name)
+
+
+_RASTER_ALGEBRA_NP_FUNCTIONS = {
+    "where",
+    "clip",
+    "log",
+    "log1p",
+    "sqrt",
+    "abs",
+    "minimum",
+    "maximum",
+    "sin",
+    "cos",
+    "tan",
+}
+
+
+def _validate_raster_algebra_ast(parsed: ast.Expression, *, variables: set[str]) -> None:
+    allowed_nodes = (
+        ast.Expression,
+        ast.BinOp,
+        ast.UnaryOp,
+        ast.BoolOp,
+        ast.Compare,
+        ast.Call,
+        ast.Name,
+        ast.Load,
+        ast.Constant,
+        ast.Tuple,
+        ast.List,
+        ast.Attribute,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Pow,
+        ast.Mod,
+        ast.USub,
+        ast.UAdd,
+        ast.And,
+        ast.Or,
+        ast.Not,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+    )
+    forbidden_nodes = (
+        ast.Subscript,
+        ast.Lambda,
+        ast.IfExp,
+        ast.Dict,
+        ast.Set,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+        ast.Await,
+        ast.Yield,
+        ast.NamedExpr,
+    )
+    for node in ast.walk(parsed):
+        if isinstance(node, forbidden_nodes):
+            raise ValueError("栅格表达式不允许下标、lambda、推导式或复杂 Python 语法。")
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"栅格表达式包含不支持的元素: {type(node).__name__}")
+        if isinstance(node, ast.Name) and node.id not in variables and node.id != "np":
+            raise ValueError(f"栅格表达式引用了未声明的变量: {node.id}")
+        if isinstance(node, ast.Attribute):
+            if not isinstance(node.value, ast.Name) or node.value.id != "np" or node.attr not in _RASTER_ALGEBRA_NP_FUNCTIONS:
+                raise ValueError(f"栅格表达式只允许白名单 NumPy 函数: np.{node.attr}")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Attribute):
+                raise ValueError("栅格表达式只允许调用白名单 NumPy 函数。")
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id != "np" or node.func.attr not in _RASTER_ALGEBRA_NP_FUNCTIONS:
+                raise ValueError(f"栅格表达式只允许调用白名单 NumPy 函数: np.{node.func.attr}")
 
 def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> list[Any]:
 
@@ -434,15 +513,26 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
 
 
     @tool
-    def dem_terrain_derivatives(dem_name: str, output_prefix: str, derivatives: str = "slope,aspect,terrain") -> str:
+    def dem_terrain_derivatives(dem_name: str, output_prefix: str, derivatives: str = "slope,aspect,terrain", slope_units: str = "degree") -> str:
         """Create DEM derivatives such as slope, aspect, terrain factor, TPI, or TRI rasters."""
-        inputs = {"dem_name": dem_name, "output_prefix": output_prefix, "derivatives": derivatives}
+        inputs = {"dem_name": dem_name, "output_prefix": output_prefix, "derivatives": derivatives, "slope_units": slope_units}
         errors = validate_dataset_exists(manager, dem_name) + validate_output_path(manager.derived_dir, output_prefix)
         if not errors:
             errors.extend(validate_raster_readable(manager, dem_name))
             errors.extend(validate_crs(manager, dem_name))
         requested = [item.strip().lower() for item in str(derivatives or "").split(",") if item.strip()] or ["slope", "aspect", "terrain"]
         invalid = [item for item in requested if item not in {"slope", "aspect", "terrain", "tpi", "tri"}]
+        units = str(slope_units or "degree").strip().lower()
+        if units not in {"degree", "percent"}:
+            return tool_result_error(
+                "dem_terrain_derivatives",
+                inputs=inputs,
+                error_code="SLOPE_UNITS_UNSUPPORTED",
+                error_title="坡度单位不支持",
+                user_message="slope_units 必须是 degree 或 percent。",
+                diagnostics={"allowed": ["degree", "percent"], "received": slope_units},
+                next_actions=["请在 TaskPlan 中明确 slope_units=degree 或 slope_units=percent。"],
+            ).to_json()
         if invalid:
             return tool_result_error("dem_terrain_derivatives", inputs=inputs, error_code="DEM_DERIVATIVE_UNSUPPORTED", error_title="Unsupported DEM derivative", user_message=f"Unsupported derivatives: {', '.join(invalid)}.").to_json()
         if errors:
@@ -450,13 +540,25 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
         try:
             raster_path = manager.get_raster_path(dem_name)
             with rasterio.open(raster_path) as src:
+                if src.crs and src.crs.is_geographic:
+                    return tool_result_error(
+                        "dem_terrain_derivatives",
+                        inputs=inputs,
+                        error_code="DEM_PROJECTED_CRS_REQUIRED",
+                        error_title="DEM 需要投影坐标系",
+                        user_message="不能直接对地理坐标 CRS 的 DEM 计算平面坡度。请先通过已验证计划重投影到米制投影坐标系，或确认目标投影。",
+                        diagnostics={"source_crs": str(src.crs)},
+                        next_actions=["先执行 raster_reproject 到合适的投影 CRS，再计算坡度坡向。"],
+                    ).to_json()
                 band = src.read(1, masked=True).astype("float32")
                 arr = np.asarray(band.filled(np.nan), dtype="float32")
                 xres = abs(float(src.transform.a)) or 1.0
                 yres = abs(float(src.transform.e)) or 1.0
             gy, gx = np.gradient(arr, yres, xres)
-            slope = np.degrees(np.arctan(np.sqrt(gx * gx + gy * gy)))
+            slope_rise_run = np.sqrt(gx * gx + gy * gy)
+            slope = np.degrees(np.arctan(slope_rise_run)) if units == "degree" else slope_rise_run * 100.0
             aspect = (np.degrees(np.arctan2(-gx, gy)) + 360.0) % 360.0
+            aspect = np.where(np.isclose(slope_rise_run, 0.0) | ~np.isfinite(slope_rise_run), np.nan, aspect)
             padded = np.pad(arr, 1, mode="edge")
             neighborhood_mean = sum(padded[y:y + arr.shape[0], x:x + arr.shape[1]] for y in range(3) for x in range(3)) / 9.0
             tpi = arr - neighborhood_mean
@@ -464,43 +566,148 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             arrays = {"slope": slope, "aspect": aspect, "terrain": tpi, "tpi": tpi, "tri": tri}
             datasets: list[str] = []
             artifacts: list[ArtifactInfo] = []
+            statistics: dict[str, dict[str, float | int | None]] = {}
             for derivative in requested:
                 suffix = "terrain" if derivative == "tpi" else derivative
-                stored_name, output_path, _ = _write_raster_dataset_like(raster_path, f"{output_prefix}_{suffix}", arrays[derivative], source_tool="dem_terrain_derivatives", meta_updates={"source_dem": dem_name, "derivative": derivative})
+                values = np.asarray(arrays[derivative], dtype="float32")
+                valid = values[np.isfinite(values)]
+                statistics[derivative] = {
+                    "min": float(valid.min()) if valid.size else None,
+                    "max": float(valid.max()) if valid.size else None,
+                    "mean": float(valid.mean()) if valid.size else None,
+                    "valid_count": int(valid.size),
+                }
+                stored_name, output_path, _ = _write_raster_dataset_like(
+                    raster_path,
+                    f"{output_prefix}_{suffix}",
+                    values,
+                    source_tool="dem_terrain_derivatives",
+                    meta_updates={"source_dem": dem_name, "derivative": derivative, "slope_units": units, "aspect_flat_value": "NoData"},
+                )
                 datasets.append(stored_name)
                 artifacts.append(ArtifactInfo(f"raster:{output_path.name}", str(output_path), "raster", f"{stored_name} DEM derivative", f"{derivative} derived from DEM {dem_name}.", "created", False))
-            return tool_result_ok("dem_terrain_derivatives", inputs=inputs, outputs={"datasets": datasets, "map_ready": True, "map_layer_ids": [_map_layer_id(name) for name in datasets]}, artifacts=artifacts, summary=f"Created DEM derivative datasets: {', '.join(datasets)}.").to_json()
+            map_layers = [{"layer_id": _map_layer_id(name), "name": name, "dataset_name": name, "type": "raster"} for name in datasets]
+            return tool_result_ok(
+                "dem_terrain_derivatives",
+                inputs=inputs,
+                outputs={
+                    "datasets": datasets,
+                    "derivatives": requested,
+                    "slope_units": units,
+                    "aspect_range": [0, 360],
+                    "aspect_flat_value": "NoData",
+                    "statistics": statistics,
+                    "map_ready": True,
+                    "map_layer_ids": [_map_layer_id(name) for name in datasets],
+                },
+                artifacts=artifacts,
+                map_layers=map_layers,
+                diagnostics={"source_dem": dem_name, "slope_units": units, "nodata": -9999.0},
+                summary=f"Created DEM derivative datasets: {', '.join(datasets)}.",
+            ).to_json()
         except Exception as exc:
             return _tool_internal_error("dem_terrain_derivatives", inputs, exc)
 
 
     @tool
-    def raster_reproject(raster_name: str, target_crs: str, output_name: str, resampling: str = "bilinear") -> str:
+    def raster_reproject(raster_name: str, target_crs: str, output_name: str, resampling: str = "bilinear", target_resolution: str = "") -> str:
         """Reproject a raster dataset and register the output as a map-ready GeoTIFF."""
         from rasterio.enums import Resampling
         from rasterio.warp import calculate_default_transform, reproject
 
-        inputs = {"raster_name": raster_name, "target_crs": target_crs, "output_name": output_name, "resampling": resampling}
+        inputs = {"raster_name": raster_name, "target_crs": target_crs, "output_name": output_name, "resampling": resampling, "target_resolution": target_resolution}
         errors = validate_dataset_exists(manager, raster_name) + validate_output_path(manager.derived_dir, output_name, allowed_suffixes={".tif", ".tiff"})
         if not errors:
             errors.extend(validate_raster_readable(manager, raster_name))
             errors.extend(validate_crs(manager, raster_name))
+        resolution_value: tuple[float, float] | None = None
+        if str(target_resolution or "").strip():
+            parts = [item.strip() for item in re.split(r"[,xX\s]+", str(target_resolution or "")) if item.strip()]
+            if len(parts) == 1:
+                parts = [parts[0], parts[0]]
+            try:
+                parsed_resolution = (float(parts[0]), float(parts[1]))
+                if parsed_resolution[0] <= 0 or parsed_resolution[1] <= 0:
+                    raise ValueError("target resolution must be positive")
+                resolution_value = parsed_resolution
+            except Exception:
+                return tool_result_error(
+                    "raster_reproject",
+                    inputs=inputs,
+                    error_code="TARGET_RESOLUTION_INVALID",
+                    error_title="目标分辨率非法",
+                    user_message="target_resolution 必须是正数，格式可以是 '30' 或 '30,30'，单位为目标 CRS 的坐标单位。",
+                    diagnostics={"target_resolution": target_resolution},
+                    next_actions=["请在 TaskPlan 中使用正数目标分辨率，或留空以保留 calculate_default_transform 的默认输出分辨率。"],
+                ).to_json()
         if errors:
             return _tool_error_from_validation("raster_reproject", inputs, errors)
         try:
             source_path = manager.get_raster_path(raster_name)
             output_stem = Path(output_name).stem if Path(output_name).suffix else output_name
             output_path = manager.derived_dir / f"{_artifact_safe_name(output_stem)}.tif"
-            mode = getattr(Resampling, str(resampling or "bilinear"), Resampling.bilinear)
+            resampling_name = str(resampling or "bilinear").strip().lower()
+            if not hasattr(Resampling, resampling_name):
+                return tool_result_error(
+                    "raster_reproject",
+                    inputs=inputs,
+                    error_code="RESAMPLING_UNSUPPORTED",
+                    error_title="重采样方法不支持",
+                    user_message="resampling 必须是 rasterio 支持的方法，例如 nearest、bilinear、cubic 或 average。",
+                    diagnostics={"resampling": resampling},
+                    next_actions=["请选择 nearest、bilinear、cubic 或 average 后重试。"],
+                ).to_json()
+            mode = getattr(Resampling, resampling_name)
             with rasterio.open(source_path) as src:
-                transform, width, height = calculate_default_transform(src.crs, target_crs, src.width, src.height, *src.bounds)
+                source_resolution = [abs(float(src.transform.a)), abs(float(src.transform.e))]
+                kwargs: dict[str, Any] = {}
+                if resolution_value is not None:
+                    kwargs["resolution"] = resolution_value
+                transform, width, height = calculate_default_transform(src.crs, target_crs, src.width, src.height, *src.bounds, **kwargs)
                 profile = src.profile.copy()
                 profile.update(crs=target_crs, transform=transform, width=width, height=height)
                 with rasterio.open(output_path, "w", **profile) as dst:
                     for index in range(1, src.count + 1):
                         reproject(source=rasterio.band(src, index), destination=rasterio.band(dst, index), src_transform=src.transform, src_crs=src.crs, dst_transform=transform, dst_crs=target_crs, resampling=mode)
-            stored_name = manager.put_raster_path(output_stem, output_path, meta={"crs": target_crs, "source_raster": raster_name, "resampling": str(resampling), "map_ready": True, "map_layer_id": _map_layer_id(output_stem), "layer_kind": _dataset_map_kind(output_stem, "raster"), "source_tool": "raster_reproject"})
-            return tool_result_ok("raster_reproject", inputs=inputs, outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_reproject"), "path": str(output_path), "target_crs": target_crs}, artifacts=[ArtifactInfo(f"raster:{output_path.name}", str(output_path), "raster", f"{stored_name} reprojected raster", "", "created", False)], summary=f"Reprojected raster {raster_name} to {target_crs} as {stored_name}.").to_json()
+            target_res = [abs(float(transform.a)), abs(float(transform.e))]
+            transform_values = [float(value) for value in tuple(transform)]
+            stored_name = manager.put_raster_path(
+                output_stem,
+                output_path,
+                meta={
+                    "crs": target_crs,
+                    "source_raster": raster_name,
+                    "resampling": resampling_name,
+                    "source_resolution": source_resolution,
+                    "target_resolution": target_res,
+                    "target_transform": transform_values,
+                    "map_ready": True,
+                    "map_layer_id": _map_layer_id(output_stem),
+                    "layer_kind": _dataset_map_kind(output_stem, "raster"),
+                    "source_tool": "raster_reproject",
+                },
+            )
+            diagnostics = {
+                "source_crs": str(src.crs),
+                "target_crs": target_crs,
+                "source_resolution": source_resolution,
+                "target_resolution": target_res,
+                "target_resolution_units": "target_crs_units",
+                "target_transform": transform_values,
+                "width": int(width),
+                "height": int(height),
+                "resampling": resampling_name,
+                "target_resolution_requested": list(resolution_value) if resolution_value is not None else None,
+            }
+            return tool_result_ok(
+                "raster_reproject",
+                inputs=inputs,
+                outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_reproject"), "path": str(output_path), "target_crs": target_crs, "target_resolution": target_res, "resampling": resampling_name, "target_transform": transform_values},
+                artifacts=[ArtifactInfo(f"raster:{output_path.name}", str(output_path), "raster", f"{stored_name} reprojected raster", "", "created", False)],
+                map_layers=[{"layer_id": _map_layer_id(stored_name), "name": stored_name, "dataset_name": stored_name, "type": "raster"}],
+                diagnostics=diagnostics,
+                summary=f"Reprojected raster {raster_name} to {target_crs} as {stored_name}.",
+            ).to_json()
         except Exception as exc:
             return _tool_internal_error("raster_reproject", inputs, exc)
 
@@ -528,29 +735,75 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             return _tool_error_from_validation("raster_algebra", inputs, errors)
         try:
             parsed = ast.parse(expression, mode="eval")
+            _validate_raster_algebra_ast(parsed, variables=set(mapping))
             first_dataset = next(iter(mapping.values()))
             first_path = manager.get_raster_path(first_dataset)
             with rasterio.open(first_path) as reference:
                 shape = (reference.height, reference.width)
+                reference_crs = str(reference.crs) if reference.crs else ""
+                reference_transform = tuple(reference.transform)
+                reference_res = (abs(float(reference.transform.a)), abs(float(reference.transform.e)))
             arrays: dict[str, np.ndarray] = {}
             for variable, dataset_name in mapping.items():
                 with rasterio.open(manager.get_raster_path(dataset_name)) as src:
                     if (src.height, src.width) != shape:
-                        raise ValueError("All input rasters must have the same width and height in raster_algebra.")
+                        return tool_result_error(
+                            "raster_algebra",
+                            inputs=inputs,
+                            error_code="RASTER_ALIGNMENT_MISMATCH",
+                            error_title="栅格未对齐",
+                            user_message="所有输入栅格必须具有相同宽高、CRS、分辨率和网格变换后才能进行栅格计算。",
+                            diagnostics={"variable": variable, "dataset": dataset_name, "reason": "shape_mismatch"},
+                            next_actions=["先使用 raster_reproject/重采样将栅格对齐，再执行栅格计算。"],
+                        ).to_json()
+                    if (str(src.crs) if src.crs else "") != reference_crs or tuple(src.transform) != reference_transform:
+                        return tool_result_error(
+                            "raster_algebra",
+                            inputs=inputs,
+                            error_code="RASTER_ALIGNMENT_MISMATCH",
+                            error_title="栅格未对齐",
+                            user_message="所有输入栅格必须具有相同 CRS、分辨率和网格变换后才能进行栅格计算。",
+                            diagnostics={
+                                "variable": variable,
+                                "dataset": dataset_name,
+                                "reference_crs": reference_crs,
+                                "input_crs": str(src.crs) if src.crs else "",
+                                "reference_resolution": reference_res,
+                                "input_resolution": (abs(float(src.transform.a)), abs(float(src.transform.e))),
+                            },
+                            next_actions=["先重投影或重采样对齐输入栅格。"],
+                        ).to_json()
                     band = src.read(1, masked=True).astype("float32")
                     arrays[variable] = np.asarray(band.filled(np.nan), dtype="float32")
-            safe_np = type("SafeNumpy", (), {name: getattr(np, name) for name in ["where", "clip", "log", "log1p", "sqrt", "abs", "minimum", "maximum", "sin", "cos", "tan"]})
+            safe_np = type("SafeNumpy", (), {name: getattr(np, name) for name in sorted(_RASTER_ALGEBRA_NP_FUNCTIONS)})
             result = eval(compile(parsed, "<raster_algebra>", "eval"), {"__builtins__": {}, "np": safe_np}, arrays)
-            stored_name, output_path, _ = _write_raster_dataset_like(first_path, output_name, np.asarray(result, dtype="float32"), source_tool="raster_algebra", meta_updates={"expression": expression, "input_rasters": mapping})
-            return tool_result_ok("raster_algebra", inputs=inputs, outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_algebra"), "path": str(output_path), "expression": expression}, artifacts=[ArtifactInfo(f"raster:{output_path.name}", str(output_path), "raster", f"{stored_name} raster algebra", "", "created", False)], summary=f"Created raster algebra output {stored_name}.").to_json()
+            result_arr = np.asarray(result, dtype="float32")
+            valid = result_arr[np.isfinite(result_arr)]
+            statistics = {
+                "min": float(valid.min()) if valid.size else None,
+                "max": float(valid.max()) if valid.size else None,
+                "mean": float(valid.mean()) if valid.size else None,
+                "std": float(valid.std()) if valid.size else None,
+                "valid_count": int(valid.size),
+            }
+            stored_name, output_path, _ = _write_raster_dataset_like(first_path, output_name, result_arr, source_tool="raster_algebra", meta_updates={"expression": expression, "input_rasters": mapping})
+            return tool_result_ok(
+                "raster_algebra",
+                inputs=inputs,
+                outputs={**_map_ready_outputs(manager, stored_name, source_tool="raster_algebra"), "path": str(output_path), "expression": expression, "input_rasters": mapping, "statistics": statistics},
+                artifacts=[ArtifactInfo(f"raster:{output_path.name}", str(output_path), "raster", f"{stored_name} raster algebra", "", "created", False)],
+                map_layers=[{"layer_id": _map_layer_id(stored_name), "name": stored_name, "dataset_name": stored_name, "type": "raster"}],
+                diagnostics={"reference_crs": reference_crs, "reference_resolution": reference_res, "variables": sorted(mapping)},
+                summary=f"Created raster algebra output {stored_name}.",
+            ).to_json()
         except Exception as exc:
             return _tool_internal_error("raster_algebra", inputs, exc)
 
 
     @tool
-    def extract_raster_values_to_points(point_name: str, raster_name: str, output_name: str, field_name: str = "raster_val", band: int = 1) -> str:
+    def extract_raster_values_to_points(point_name: str, raster_name: str, output_name: str, field_name: str = "raster_val", band: int = 1, method: str = "nearest") -> str:
         """将栅格像元值提取到点图层属性表中，适合站点-栅格匹配、样点验证和建模前特征抽取。"""
-        inputs = {"point_name": point_name, "raster_name": raster_name, "output_name": output_name, "field_name": field_name, "band": band}
+        inputs = {"point_name": point_name, "raster_name": raster_name, "output_name": output_name, "field_name": field_name, "band": band, "method": method}
         errors = []
         errors.extend(validate_dataset_exists(manager, point_name))
         errors.extend(validate_dataset_exists(manager, raster_name))
@@ -568,6 +821,17 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "user_message": "请指定用于保存栅格值的输出字段名。",
                     "next_actions": ["提供 field_name，例如 raster_val。"],
                     "diagnostics": {},
+                }
+            )
+        sample_method = str(method or "nearest").strip().lower()
+        if sample_method not in {"nearest", "bilinear"}:
+            errors.append(
+                {
+                    "error_code": "RASTER_SAMPLING_METHOD_UNSUPPORTED",
+                    "error_title": "采样方法不支持",
+                    "user_message": "method 必须是 nearest 或 bilinear。",
+                    "next_actions": ["请在 TaskPlan 中明确 method=nearest 或 method=bilinear。"],
+                    "diagnostics": {"allowed": ["nearest", "bilinear"], "received": method},
                 }
             )
         if errors:
@@ -591,30 +855,50 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 if pts.crs and src.crs and pts.crs != src.crs:
                     pts = pts.to_crs(src.crs)
                 coords = [(geom.x, geom.y) for geom in pts.geometry if geom is not None]
-                values = [val[0] if len(val) else None for val in src.sample(coords, indexes=band)]
+                if sample_method == "nearest":
+                    values = [val[0] if len(val) else None for val in src.sample(coords, indexes=band)]
+                else:
+                    data = src.read(band, masked=True).astype("float32")
+                    values = []
+                    for x, y in coords:
+                        row, col = src.index(x, y)
+                        if row < 0 or col < 0 or row >= src.height - 1 or col >= src.width - 1:
+                            values.append(np.nan)
+                            continue
+                        x0, y0 = src.xy(row, col)
+                        dx = min(1.0, max(0.0, abs((x - x0) / (src.transform.a or 1.0))))
+                        dy = min(1.0, max(0.0, abs((y - y0) / (src.transform.e or -1.0))))
+                        window = np.ma.array(data[row : row + 2, col : col + 2]).astype("float32")
+                        if window.count() == 0:
+                            values.append(np.nan)
+                        else:
+                            filled = window.filled(np.nan)
+                            values.append(float((filled[0, 0] * (1 - dx) * (1 - dy)) + (filled[0, 1] * dx * (1 - dy)) + (filled[1, 0] * (1 - dx) * dy) + (filled[1, 1] * dx * dy)))
                 result = points.copy()
                 result[field_name] = values
 
             saved_name = manager.put_vector(output_name, result)
             output_path = manager.get(saved_name).path
-            manager.log_operation("鏍呮牸鎶芥牱鍒扮偣", f"{raster_name} -> {point_name} -> {saved_name}", "analysis")
+            artifact = manager.register_artifact(
+                path=str(output_path),
+                type="dataset",
+                title=f"{saved_name} raster sampled points",
+                description=f"点图层 {point_name} 提取栅格 {raster_name} 后的结果。",
+                quality_status="ok",
+                preview_available=True,
+                dataset_id=saved_name,
+                source_tool="extract_raster_values_to_points",
+            )
+            manager.log_operation("栅格抽样到点", f"{raster_name} -> {point_name} -> {saved_name}", "analysis")
             return tool_result_ok(
                 "extract_raster_values_to_points",
                 inputs=inputs,
-                outputs={"result_dataset": saved_name, "feature_count": int(len(result)), "field_name": field_name, "path": str(output_path)},
-                artifacts=[
-                    ArtifactInfo(
-                        artifact_id=f"dataset_{uuid4().hex[:10]}",
-                        path=str(output_path),
-                        type="dataset",
-                        title=f"{saved_name} raster sampled points",
-                        description=f"点图层 {point_name} 提取栅格 {raster_name} 后的结果。",
-                        quality_status="created",
-                        preview_available=False,
-                    )
-                ],
+                outputs={"result_dataset": saved_name, "feature_count": int(len(result)), "field_name": field_name, "path": str(output_path), "method": sample_method},
+                artifacts=[artifact],
+                map_layers=[{"layer_id": _map_layer_id(saved_name), "name": saved_name, "dataset_name": saved_name, "type": "vector"}],
+                tables=[{"table_id": saved_name, "title": saved_name, "dataset_name": saved_name}],
                 summary=f"栅格值提取完成，结果数据集 {saved_name}，字段 {field_name}。",
-                diagnostics={"sample_count": int(len(values)), "band": int(band), "raster": raster_name},
+                diagnostics={"sample_count": int(len(values)), "missing_count": int(pd.Series(values).isna().sum()), "band": int(band), "raster": raster_name, "method": sample_method},
                 next_actions=["检查提取字段的缺失值和异常值。", "可继续用于建模或专题制图。"],
             ).to_json()
         except Exception as exc:

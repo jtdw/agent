@@ -200,6 +200,26 @@ class ReliabilityLifecycleTests(unittest.TestCase):
             self.assertFalse(store.retrieve_knowledge("private", limit=1))
             self.assertEqual(store.retrieve_knowledge("system", limit=1)[0]["knowledge_id"], "system_doc")
 
+    def test_commercial_download_jobs_can_be_cancelled_by_session(self) -> None:
+        from core.commercial.service import CommercialService
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = CommercialService(Path(tmp))
+            service.create_user("u1@example.invalid", plan="basic", user_id="u1")
+            job = service.submit_job(
+                user_id="u1",
+                source_key="fixture",
+                resource_type="dem",
+                region="test",
+                account_mode="own",
+                session_id="s1",
+            )
+            cancelled = service.cancel_session_jobs("u1", "s1", reason="session deleted")
+            self.assertEqual(cancelled, [job["job_id"]])
+            patched = service.get_job(job["job_id"])
+            self.assertEqual(patched["status"], "canceled")
+            self.assertEqual(patched["stage"], "session_deleted")
+
 
 if __name__ == "__main__":
     unittest.main()

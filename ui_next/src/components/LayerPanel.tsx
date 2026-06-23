@@ -312,6 +312,19 @@ export function LayerPanel({
     setNotice('该任务没有可解析的 artifact_id，暂不能提供下载入口。');
   };
 
+  const downloadWorkspaceArtifact = async (artifactId: string | undefined, fallbackName: string) => {
+    if (!artifactId) {
+      setNotice('该成果缺少 artifact_id，无法通过安全下载解析器下载。');
+      return;
+    }
+    try {
+      const metadata = await api.artifactMetadata(artifactId, userId, sessionId);
+      await api.downloadArtifactById(artifactId, metadata.filename || metadata.title || fallbackName, userId, sessionId);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '文件已清理、无访问权限或下载链接已失效。');
+    }
+  };
+
   const deleteJob = async (job: DownloadJob) => {
     setBusy(true);
     try {
@@ -601,15 +614,16 @@ export function LayerPanel({
             {notice && <p className="mt-2 text-xs leading-5 text-slate-500 dark:text-slate-400">{notice}</p>}
           </div>
 
-          {artifacts.length > 0 && (
+          {artifacts.filter((item) => item.artifact_id).length > 0 && (
             <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
               <div className="mb-2 flex items-center gap-2 text-sm font-black"><Download size={16} strokeWidth={1.5} /> 最近成果</div>
               <div className="space-y-2">
-                {artifacts.map((item, i) => {
+                {artifacts.filter((item) => item.artifact_id).map((item) => {
                   const safeName = item.filename || item.name || item.title || item.artifact_id || '成果文件';
+                  const stableKey = item.artifact_id || safeName;
                   return (
-                  <div key={`${item.artifact_id || safeName}-${i}`} className="flex items-center justify-between gap-2 rounded-2xl border border-white/35 bg-white/48 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/72 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
-                    <button type="button" onClick={() => downloadUrl(item.download_url, safeName)} className="min-w-0 flex-1 truncate text-left">
+                  <div key={stableKey} className="flex items-center justify-between gap-2 rounded-2xl border border-white/35 bg-white/48 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/72 dark:border-white/10 dark:bg-white/5 dark:text-slate-300">
+                    <button type="button" onClick={() => downloadWorkspaceArtifact(item.artifact_id, safeName)} className="min-w-0 flex-1 truncate text-left">
                     {safeName}
                     </button>
                     <button type="button" onClick={() => deleteArtifact(item)} disabled={busy} className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-coral transition hover:bg-white/60 disabled:opacity-50" title="删除结果文件">

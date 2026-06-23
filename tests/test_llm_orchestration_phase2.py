@@ -7,12 +7,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import pytest
 from fastapi.testclient import TestClient
 
 from core.config import Settings
 from core.context_builder import build_conversation_context
 from core.service import GISWorkspaceService
 from core.task_plan_schema import validate_llm_task_plan
+
+
+pytestmark = pytest.mark.slow
 
 
 def _phase2_plan(**overrides):
@@ -71,7 +75,9 @@ class LLMOrchestrationPhase2Tests(unittest.TestCase):
     def make_service(self, root: Path) -> GISWorkspaceService:
         settings = Settings(api_key="", workdir=root / "workspace")
         settings.ensure_dirs()
-        return GISWorkspaceService(settings)
+        service = GISWorkspaceService(settings)
+        service.set_interaction_mode("tool_enabled")
+        return service
 
     def test_phase2_task_plan_schema_converts_to_legacy_execution_plan(self) -> None:
         context = {
@@ -154,6 +160,7 @@ class LLMOrchestrationPhase2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             service.current_session_id = service.create_new_session()
+            service.set_interaction_mode("tool_enabled")
             active_plan = {
                 "status": "ready",
                 "mode": "active",
@@ -182,6 +189,7 @@ class LLMOrchestrationPhase2Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             service.current_session_id = service.create_new_session()
+            service.set_interaction_mode("tool_enabled")
             unavailable = {
                 "status": "unavailable",
                 "mode": "active",

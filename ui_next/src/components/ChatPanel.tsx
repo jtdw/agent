@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSquare, Pencil, PlayCircle, Plus, RefreshCcw, SearchCheck, Sparkles, Trash2, UploadCloud, X } from 'lucide-react';
-import { api, ChatMessage, ChatModelState, ChatSession, CommercialUser, ResultPanel, WorkspaceMention } from '@/lib/api';
+import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSquare, Pencil, PlayCircle, Plus, RefreshCcw, SearchCheck, Sparkles, Trash2, UploadCloud, Wrench, X } from 'lucide-react';
+import { api, ChatMessage, ChatModelState, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
 import { isLocalSecureContext } from './mapLayerPolicy';
@@ -61,6 +61,40 @@ function ThinkingDots() {
       ))}
     </div>
   );
+}
+
+function ThinkingStatusCard({ mode }: { mode: 'chat_only' | 'tool_enabled' }) {
+  const steps = mode === 'tool_enabled'
+    ? ['理解目标', '生成计划', '等待校验']
+    : ['理解问题', '检索知识', '组织回答'];
+  return (
+    <div data-testid="chat-thinking-status" className="w-full max-w-[min(88%,32rem)] rounded-[22px] border border-slate-200/80 bg-white/84 px-4 py-3 shadow-[0_14px_34px_rgba(15,23,42,.08)] backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/68">
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-xs font-black text-slate-900 dark:text-slate-100">{mode === 'tool_enabled' ? '正在准备工具任务' : '正在组织回答'}</div>
+          <div className="mt-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">{mode === 'tool_enabled' ? '如需执行，会先生成计划并完成校验。' : '聊天模式不会创建任务或操作数据。'}</div>
+        </div>
+        <ThinkingDots />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {steps.map((step, index) => (
+          <span key={step} className={cn('rounded-full px-2 py-1 text-[11px] font-black', index === 0 ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/35 dark:text-blue-200' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300')}>
+            {step}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RealtimeSyncIndicator({ state }: { state: 'connecting' | 'live' | 'polling' }) {
+  const label = state === 'live' ? '实时同步' : state === 'connecting' ? '正在连接' : '定时同步';
+  const tone = state === 'live'
+    ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/35 dark:text-emerald-200'
+    : state === 'connecting'
+      ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/35 dark:text-blue-200'
+      : 'bg-amber-50 text-amber-700 dark:bg-amber-950/35 dark:text-amber-200';
+  return <span data-testid="realtime-sync-indicator" className={cn('inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-black', tone)}>{label}</span>;
 }
 
 const PROMPT_GROUPS = [
@@ -138,6 +172,118 @@ function messageKey(message: ChatMessage) {
   return `message-${stableParts.join('-')}`;
 }
 
+function messageIsToolTask(message: ChatMessage) {
+  const meta = message.meta || {};
+  const mode = String(meta.mode || '');
+  const actionType = String(meta.action_required?.type || '');
+  const interactionType = String(meta.interaction_type || '');
+  const reason = String(meta.reason || '');
+  return reason !== 'tool_mode_required' && (
+    interactionType === 'tool_task'
+    || Boolean(meta.task_card)
+    || Boolean(meta.management_view)
+    || Boolean(meta.download_management_view)
+    || ['background_worker', 'validated_download_executor', 'coordinated_workflow', 'validated_workflow_executor', 'validated_tool_executor'].includes(mode)
+    || ['confirmation_required', 'login_required'].includes(actionType)
+  );
+}
+
+function responseAssistantMessage(response: {
+  reply?: string;
+  model?: string;
+  reason?: string;
+  artifacts?: unknown;
+  files?: unknown;
+  presentation_result?: unknown;
+  execution_summary?: unknown;
+  user_facing_result?: unknown;
+  management_view?: unknown;
+  download_management_view?: unknown;
+  task_card?: unknown;
+  confirmed_pending_confirmation_id?: unknown;
+  [key: string]: unknown;
+}): ChatMessage {
+  const meta: Record<string, unknown> = {
+    model: response.model,
+    reason: response.reason,
+    artifacts: response.artifacts || response.files || [],
+    presentation_result: response.presentation_result,
+    execution_summary: response.execution_summary,
+    user_facing_result: response.user_facing_result,
+  };
+  ['management_view', 'download_management_view', 'task_card', 'confirmed_pending_confirmation_id', 'interaction_type', 'mode', 'status'].forEach((key) => {
+    if (response[key] !== undefined) meta[key] = response[key];
+  });
+  return { role: 'assistant', content: assistantReplyContent(response.reply), meta };
+}
+
+function messageMatchesConfirmation(message: ChatMessage, confirmationId: string) {
+  const token = confirmationId.trim();
+  if (!token || message.role !== 'assistant') return false;
+  const meta = message.meta || {};
+  const action = (meta.action_required || {}) as Record<string, unknown>;
+  return String(action.confirmed_action_id || '') === token
+    || String(meta.confirmed_pending_confirmation_id || '') === token
+    || String(meta.confirmation_id || '') === token;
+}
+
+function taskIdsFromMessage(message: ChatMessage) {
+  const meta = message.meta || {};
+  const action = (meta.action_required || {}) as Record<string, unknown>;
+  const managementView = (meta.management_view || meta.download_management_view || {}) as Record<string, unknown>;
+  const card = (meta.task_card || {}) as Record<string, unknown>;
+  return new Set(
+    [
+      action.job_id,
+      managementView.task_id,
+      managementView.job_id,
+      card.task_id,
+      meta.job_id,
+      meta.task_id,
+    ]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  );
+}
+
+function messageMatchesJob(message: ChatMessage, jobId: string) {
+  const target = jobId.trim();
+  if (!target || message.role !== 'assistant') return false;
+  return taskIdsFromMessage(message).has(target);
+}
+
+function messageMatchesRealtimeEvent(message: ChatMessage, event: RealtimeChatEvent) {
+  if (message.role !== 'assistant') return false;
+  const taskId = String(event.task_id || '').trim();
+  const jobId = String(event.job_id || '').trim();
+  const ids = taskIdsFromMessage(message);
+  return Boolean((taskId && ids.has(taskId)) || (jobId && ids.has(jobId)));
+}
+
+function mergeTaskCardUpdate(
+  current: ChatMessage[],
+  matcher: (message: ChatMessage) => boolean,
+  update: ChatMessage,
+  options: { consumeAction?: boolean } = {}
+) {
+  let matched = false;
+  const next = [...current];
+  for (let index = next.length - 1; index >= 0; index -= 1) {
+    const existing = next[index];
+    if (!matcher(existing)) continue;
+    matched = true;
+    const mergedMeta = { ...(existing.meta || {}), ...(update.meta || {}) } as NonNullable<ChatMessage['meta']>;
+    if (options.consumeAction) delete mergedMeta.action_required;
+    next[index] = {
+      ...existing,
+      content: update.content || existing.content,
+      meta: mergedMeta,
+    };
+    break;
+  }
+  return matched ? next : [...current, update];
+}
+
 function messageSignature(message: ChatMessage) {
   return `${message.role}|${String(message.content || '')}`;
 }
@@ -157,6 +303,11 @@ function mergeStableClientMessageIds(current: ChatMessage[], incoming: ChatMessa
     const id = bucket?.shift();
     return id ? { ...message, id } : message;
   });
+}
+
+function mergeServerMessages(current: ChatMessage[], incoming: ChatMessage[]) {
+  if (!incoming.length && current.length > 0) return current;
+  return mergeStableClientMessageIds(current, incoming);
 }
 
 function MarkdownMessage({ content }: { content: string }) {
@@ -225,6 +376,13 @@ export function ChatWorkspace({
     });
     return Array.from(byId.values());
   }, [chatModels?.models]);
+  const currentInteractionMode = useMemo<'chat_only' | 'tool_enabled'>(() => {
+    const session = visibleSessions.find((item) => item.session_id === currentSessionId);
+    return session?.interaction_mode === 'tool_enabled' ? 'tool_enabled' : 'chat_only';
+  }, [currentSessionId, visibleSessions]);
+  const interactionModeLabel = currentInteractionMode === 'tool_enabled'
+    ? '工具模式：可以在确认和校验后执行下载、GIS 处理和建模。'
+    : '聊天模式：只回答问题，不会操作数据或创建任务。';
   const renderMessages = useMemo(() => {
     const byKey = new Map<string, ChatMessage>();
     messages.forEach((message) => {
@@ -238,6 +396,7 @@ export function ChatWorkspace({
   const [gscloudLoginOpen, setGSCloudLoginOpen] = useState(false);
   const [pendingLoginJobId, setPendingLoginJobId] = useState('');
   const [resumeReadyJobIds, setResumeReadyJobIds] = useState<Set<string>>(() => new Set());
+  const [realtimeSyncState, setRealtimeSyncState] = useState<'connecting' | 'live' | 'polling'>('polling');
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -247,8 +406,60 @@ export function ChatWorkspace({
   const stickToBottomRef = useRef(true);
   const handledLoginMessageRef = useRef('');
   const announcedDownloadJobsRef = useRef<Set<string>>(new Set());
+  const sessionRefreshSeqRef = useRef(0);
+  const lastKnownUserIdRef = useRef('');
+  const lastSuccessfulSessionUserIdRef = useRef('');
+  const latestUserIdRef = useRef('');
   const mountedRef = useRef(true);
+  const realtimeEventSourceRef = useRef<EventSource | null>(null);
+  const realtimeEventIdsRef = useRef<Set<string>>(new Set());
+  const realtimeTaskVersionRef = useRef(0);
   const userId = user?.user_id || '';
+  latestUserIdRef.current = userId;
+
+  function applyRealtimeEvent(event: RealtimeChatEvent) {
+    const eventId = String(event.event_id || '').trim();
+    if (!eventId || realtimeEventIdsRef.current.has(eventId)) return;
+    realtimeEventIdsRef.current.add(eventId);
+    if (realtimeEventIdsRef.current.size > 800) {
+      realtimeEventIdsRef.current = new Set(Array.from(realtimeEventIdsRef.current).slice(-400));
+    }
+    const version = Number(event.version || 0);
+    if (version > 0 && version < 1_000_000_000) {
+      if (version <= realtimeTaskVersionRef.current) return;
+      realtimeTaskVersionRef.current = version;
+    }
+    const taskUpdate = event.task_update && typeof event.task_update === 'object' ? event.task_update : {};
+    const meta: Record<string, unknown> = {
+      task_id: event.task_id || '',
+      job_id: event.job_id || '',
+      status: event.status || '',
+      realtime_sync: realtimeSyncState,
+      streaming: event.kind === 'model_token',
+      ...taskUpdate,
+    };
+    if (event.management_view) meta.management_view = event.management_view;
+    if (event.presentation_result) meta.presentation_result = event.presentation_result;
+    const content = event.kind === 'model_token'
+      ? event.delta || ''
+      : event.kind === 'model_complete'
+        ? event.delta || ''
+        : event.message || '';
+    setMessages((current) => {
+      const next = [...current];
+      for (let index = next.length - 1; index >= 0; index -= 1) {
+        const existing = next[index];
+        if (!messageMatchesRealtimeEvent(existing, event)) continue;
+        next[index] = {
+          ...existing,
+          content: event.kind === 'model_token' ? `${existing.content || ''}${content}` : (content || existing.content),
+          meta: { ...(existing.meta || {}), ...meta, streaming: event.kind === 'model_token' },
+        };
+        return next;
+      }
+      return current;
+    });
+  }
 
   useEffect(() => {
     mountedRef.current = true;
@@ -257,29 +468,91 @@ export function ChatWorkspace({
     };
   }, []);
 
-  const refreshSessions = async () => {
-    if (!userId) {
-      setSessions([]);
-      setCurrentSessionId('');
-      onSessionChange?.('');
-      setMessages([]);
+  useEffect(() => {
+    realtimeEventSourceRef.current?.close();
+    realtimeEventSourceRef.current = null;
+    realtimeEventIdsRef.current = new Set();
+    realtimeTaskVersionRef.current = 0;
+    if (!userId || !currentSessionId) {
+      setRealtimeSyncState('polling');
       return;
     }
-    const r = await api.chatSessions(userId);
-    setSessions(r.sessions || []);
+    let disposed = false;
+    setRealtimeSyncState('connecting');
+    const receive = (event: RealtimeChatEvent) => {
+      if (!disposed) applyRealtimeEvent(event);
+    };
+    api.replayChatEvents(userId, currentSessionId, 0)
+      .then((result) => result.events.forEach(receive))
+      .catch(() => {
+        if (!disposed) setRealtimeSyncState('polling');
+      });
+    const source = api.openChatEventStream(userId, currentSessionId, 0);
+    realtimeEventSourceRef.current = source;
+    const eventTypes: RealtimeChatEvent['kind'][] = ['task_status', 'task_progress', 'task_result', 'model_token', 'model_complete', 'warning', 'error'];
+    const handle = (raw: MessageEvent<string>) => {
+      try {
+        receive(JSON.parse(raw.data) as RealtimeChatEvent);
+      } catch {}
+    };
+    eventTypes.forEach((type) => source.addEventListener(type, handle as EventListener));
+    source.onopen = () => {
+      if (!disposed) setRealtimeSyncState('live');
+    };
+    source.onerror = () => {
+      if (!disposed) setRealtimeSyncState('polling');
+    };
+    return () => {
+      disposed = true;
+      eventTypes.forEach((type) => source.removeEventListener(type, handle as EventListener));
+      source.close();
+      if (realtimeEventSourceRef.current === source) realtimeEventSourceRef.current = null;
+    };
+  }, [userId, currentSessionId]);
+
+  const refreshSessions = async () => {
+    const requestedUserId = userId;
+    const seq = ++sessionRefreshSeqRef.current;
+    if (!userId) {
+      if (lastKnownUserIdRef.current) {
+        lastKnownUserIdRef.current = '';
+        lastSuccessfulSessionUserIdRef.current = '';
+        setSessions([]);
+        setCurrentSessionId('');
+        onSessionChange?.('');
+        setMessages([]);
+        return;
+      }
+    }
+    if (requestedUserId) lastKnownUserIdRef.current = requestedUserId;
+    let r = await api.chatSessions(requestedUserId);
+    if ((!r.sessions || r.sessions.length === 0) && r.current_session_id) {
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+      if (seq === sessionRefreshSeqRef.current && latestUserIdRef.current === requestedUserId) {
+        const retry = await api.chatSessions(requestedUserId);
+        if ((retry.sessions || []).length > 0) r = retry;
+      }
+    }
+    if (seq !== sessionRefreshSeqRef.current || latestUserIdRef.current !== requestedUserId) return;
+    const nextSessions = (r.sessions || []).length > 0
+      ? r.sessions || []
+      : r.current_session_id
+        ? [{ session_id: r.current_session_id, title: '新对话' }]
+        : [];
+    if (requestedUserId && nextSessions.length === 0 && lastSuccessfulSessionUserIdRef.current === requestedUserId) {
+      return;
+    }
+    setSessions(nextSessions);
+    if (nextSessions.length > 0) lastSuccessfulSessionUserIdRef.current = requestedUserId;
     setCurrentSessionId(r.current_session_id || '');
     onSessionChange?.(r.current_session_id || '');
-    setMessages((current) => {
-      if ((!r.messages || r.messages.length === 0) && current.length > 0) return current;
-      return mergeStableClientMessageIds(current, normalizeChatMessages(r.messages));
-    });
+    setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
   };
 
   useEffect(() => {
     refreshSessions().catch(() => {
-      setSessions([]);
-      setCurrentSessionId('');
-      setMessages([]);
+      setError('聊天记录加载失败，已保留当前显示内容，可稍后重试。');
+      setMessages((current) => current.length ? [...current, { role: 'system', content: '聊天记录暂时无法刷新，已保留当前显示内容。', meta: { reason: 'chat_load_failed' } }] : current);
     });
   }, [userId]);
 
@@ -315,14 +588,61 @@ export function ChatWorkspace({
         if (!job && !view) continue;
         if ((status === 'completed' || status === 'success' || status === 'succeeded') && !announcedDownloadJobsRef.current.has(jobId)) {
           announcedDownloadJobsRef.current.add(jobId);
-          setMessages((current) => [...current, {
+          const artifactRefs = view?.artifact_refs || job?.artifacts || [];
+          const summary = view?.user_message || '下载完成。结果文件已注册，可以直接下载。';
+          setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
             role: 'assistant',
-            content: '下载完成。结果文件已注册，可以直接下载。',
-            meta: { artifacts: job?.artifacts || view?.artifact_refs || [], reason: 'download_success' }
-          }]);
+            content: summary,
+            meta: {
+              artifacts: artifactRefs,
+              reason: 'download_success',
+              interaction_type: 'tool_task',
+              management_view: view,
+              presentation_result: {
+                schema_version: 'presentation-result/v1',
+                status: 'succeeded',
+                concise_summary: summary,
+                artifact_refs: artifactRefs,
+                map_layer_refs: view?.map_layer_refs || [],
+                warnings: view?.warnings || [],
+                next_action_suggestions: view?.available_actions?.includes('view_artifacts') ? ['查看或下载结果文件'] : [],
+              },
+              execution_summary: {
+                schema_version: 'execution-summary/v1',
+                status: 'succeeded',
+                summary,
+                artifact_count: Array.isArray(artifactRefs) ? artifactRefs.length : 0,
+              },
+            }
+          }));
           return;
         }
         if (status === 'failed' || status === 'canceled' || status === 'cancelled') {
+          const failedStatus = status === 'canceled' || status === 'cancelled' ? 'cancelled' : 'failed';
+          const summary = view?.user_message || view?.error_title || '任务失败或已取消。';
+          setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
+            role: 'assistant',
+            content: summary,
+            meta: {
+              reason: 'download_failed',
+              interaction_type: 'tool_task',
+              management_view: view,
+              presentation_result: {
+                schema_version: 'presentation-result/v1',
+                status: failedStatus,
+                concise_summary: view?.display_title || '下载任务',
+                artifact_refs: [],
+                warnings: view?.warnings || [],
+                error_summary: summary,
+                next_action_suggestions: view?.available_actions?.includes('retry') ? ['重试任务'] : [],
+              },
+              execution_summary: {
+                schema_version: 'execution-summary/v1',
+                status: failedStatus,
+                summary,
+              },
+            }
+          }));
           return;
         }
       } catch {
@@ -340,7 +660,28 @@ export function ChatWorkspace({
         : result.reason === 'clarification_required'
           ? '任务仍缺少下载参数，请先补充范围或其他必要参数。'
           : '任务尚未恢复，请检查登录状态。';
-      setMessages((current) => [...current, { role: 'assistant', content, meta: { reason: result.reason || 'download_resume' } }]);
+      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
+        role: 'assistant',
+        content,
+        meta: {
+          reason: result.reason || 'download_resume',
+          interaction_type: 'tool_task',
+          management_view: result.management_view,
+          presentation_result: {
+            schema_version: 'presentation-result/v1',
+            status: result.auto_started ? 'running' : 'awaiting_confirmation',
+            concise_summary: content,
+            artifact_refs: [],
+            warnings: [],
+            next_action_suggestions: result.auto_started ? [] : ['检查登录状态后继续'],
+          },
+          execution_summary: {
+            schema_version: 'execution-summary/v1',
+            status: result.auto_started ? 'running' : 'awaiting_confirmation',
+            summary: content,
+          },
+        }
+      }));
       if (result.auto_started) void watchDownloadJob(jobId);
       setResumeReadyJobIds((current) => {
         const next = new Set(current);
@@ -356,10 +697,91 @@ export function ChatWorkspace({
     if (!jobId) return;
     try {
       await api.cancelDownloadJob(jobId, userId, '用户在登录引导中取消任务。', currentSessionId);
-      setMessages((current) => [...current, { role: 'assistant', content: '下载任务已取消。', meta: { reason: 'download_cancelled' } }]);
+      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
+        role: 'assistant',
+        content: '下载任务已取消。',
+        meta: {
+          reason: 'download_cancelled',
+          interaction_type: 'tool_task',
+          presentation_result: {
+            schema_version: 'presentation-result/v1',
+            status: 'cancelled',
+            concise_summary: '下载任务已取消。',
+            artifact_refs: [],
+            warnings: [],
+          },
+          execution_summary: {
+            schema_version: 'execution-summary/v1',
+            status: 'cancelled',
+            summary: '下载任务已取消。',
+          },
+        }
+      }));
       setGSCloudLoginOpen(false);
     } catch (cause) {
       setMessages((current) => [...current, { role: 'assistant', content: assistantErrorContent(cause), meta: { reason: 'error' } }]);
+    }
+  };
+
+  const retryDownload = async (jobId: string) => {
+    if (!jobId) return;
+    try {
+      const result = await api.retryDownloadJob(jobId, userId, currentSessionId);
+      const retryJobId = String(result.management_view?.task_id || result.job?.job_id || '');
+      const targetJobId = retryJobId || jobId;
+      const status = String(result.management_view?.status || result.job?.status || (result.auto_started ? 'running' : 'queued'));
+      const content = result.auto_started
+        ? '已创建重试任务并开始后台下载。'
+        : result.reason === 'login_required'
+          ? '已创建重试任务，但需要先完成数据源登录。'
+          : '已创建重试任务，等待后台调度。';
+      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
+        role: 'assistant',
+        content,
+        meta: {
+          reason: 'download_retry',
+          interaction_type: 'tool_task',
+          management_view: result.management_view,
+          action_required: status === 'waiting_login' ? { type: 'login_required', job_id: targetJobId } : undefined,
+          presentation_result: {
+            schema_version: 'presentation-result/v1',
+            status: status === 'waiting_login' ? 'waiting_login' : status === 'failed' ? 'failed' : 'running',
+            concise_summary: content,
+            artifact_refs: [],
+            warnings: [],
+            next_action_suggestions: status === 'waiting_login' ? ['完成登录后继续下载'] : ['等待任务完成'],
+          },
+          execution_summary: {
+            schema_version: 'execution-summary/v1',
+            status,
+            summary: content,
+          },
+        }
+      }));
+      if (targetJobId && status !== 'waiting_login') void watchDownloadJob(targetJobId);
+    } catch (cause) {
+      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
+        role: 'assistant',
+        content: assistantErrorContent(cause),
+        meta: {
+          reason: 'download_retry_failed',
+          interaction_type: 'tool_task',
+          presentation_result: {
+            schema_version: 'presentation-result/v1',
+            status: 'failed',
+            concise_summary: '重试任务失败。',
+            artifact_refs: [],
+            warnings: [],
+            error_summary: assistantErrorContent(cause),
+            next_action_suggestions: ['检查任务状态或稍后重试'],
+          },
+          execution_summary: {
+            schema_version: 'execution-summary/v1',
+            status: 'failed',
+            summary: '重试任务失败。',
+          },
+        }
+      }));
     }
   };
 
@@ -491,16 +913,78 @@ export function ChatWorkspace({
       return;
     }
     const optimisticUserMessage: ChatMessage = { id: `pending-${Date.now()}-${hashString(text)}`, role: 'user', content: text };
-    setMessages((v) => [...v, optimisticUserMessage]);
     setThinking(true);
     const controller = new AbortController();
     const taskId = `chat_${Date.now()}_${hashString(text)}`;
+    const streamingAssistantMessage: ChatMessage = {
+      id: `stream-${taskId}`,
+      role: 'assistant',
+      content: '',
+      meta: {
+        task_id: taskId,
+        status: 'planning',
+        streaming: true,
+        realtime_sync: realtimeSyncState,
+      }
+    };
+    setMessages((v) => [...v, optimisticUserMessage, streamingAssistantMessage]);
     abortRef.current = controller;
     activeTaskIdRef.current = taskId;
     try {
-      const r = await api.ask(text, userId, currentSessionId, { ...chatContext, session_id: currentSessionId }, controller.signal, taskId);
-      if (r.messages) setMessages((current) => mergeStableClientMessageIds(current, normalizeChatMessages(r.messages)));
-      else setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason, artifacts: r.artifacts || r.files || [], presentation_result: r.presentation_result, execution_summary: r.execution_summary, user_facing_result: r.user_facing_result } }]);
+      await api.streamChat(
+        text,
+        userId,
+        currentSessionId,
+        { ...chatContext, session_id: currentSessionId },
+        { onEvent: applyRealtimeEvent },
+        controller.signal,
+        taskId,
+      );
+      setLastFailedPrompt('');
+      refreshSessions().catch(() => {});
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      const content = assistantErrorContent(e);
+      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, taskId), {
+        role: 'assistant',
+        content,
+        meta: { task_id: taskId, reason: 'error', status: 'failed', streaming: false },
+      }));
+      setLastFailedPrompt(text);
+      setError('');
+    } finally {
+      setThinking(false);
+      if (abortRef.current === controller) abortRef.current = null;
+      if (activeTaskIdRef.current === taskId) activeTaskIdRef.current = '';
+    }
+  };
+
+  const confirmAction = async (confirmationPrompt: string, confirmedActionId: string) => {
+    const prompt = confirmationPrompt.trim();
+    const token = confirmedActionId.trim();
+    if (!token || thinking) return;
+    if (!userId) {
+      setError('请先登录账号，再确认执行。');
+      return;
+    }
+    setError('');
+    setThinking(true);
+    const controller = new AbortController();
+    const taskId = `chat_confirm_${Date.now()}_${hashString(token)}`;
+    abortRef.current = controller;
+    activeTaskIdRef.current = taskId;
+    try {
+      const r = await api.confirmChatAction(token, prompt || '确认执行', userId, currentSessionId, { ...chatContext, session_id: currentSessionId }, controller.signal, taskId);
+      if (r.messages) {
+        const incoming = normalizeChatMessages(r.messages);
+        const updated = incoming.find((message) => message.role === 'assistant' && messageMatchesConfirmation(message, token))
+          || [...incoming].reverse().find((message) => message.role === 'assistant' && messageIsToolTask(message));
+        setMessages((current) => updated
+          ? mergeTaskCardUpdate(current, (message) => messageMatchesConfirmation(message, token), updated, { consumeAction: true })
+          : mergeServerMessages(current, incoming));
+      } else {
+        setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesConfirmation(message, token), responseAssistantMessage(r), { consumeAction: true }));
+      }
       if (r.sessions) setSessions(r.sessions);
       if (r.result_panel) onResultPanel?.(r.result_panel);
       const nextSessionId = r.current_session_id || currentSessionId;
@@ -512,20 +996,12 @@ export function ChatWorkspace({
       if (e instanceof DOMException && e.name === 'AbortError') return;
       const content = assistantErrorContent(e);
       setMessages((v) => [...v, { role: 'assistant', content, meta: { reason: 'error' } }]);
-      setLastFailedPrompt(text);
       setError('');
     } finally {
       setThinking(false);
       if (abortRef.current === controller) abortRef.current = null;
       if (activeTaskIdRef.current === taskId) activeTaskIdRef.current = '';
     }
-  };
-
-  const confirmAction = (confirmationPrompt: string, confirmedActionId: string) => {
-    const prompt = confirmationPrompt.trim();
-    const token = confirmedActionId.trim();
-    if (!prompt || !token) return;
-    sendPrompt(`${prompt} confirmed_action_id=${token}`);
   };
 
   const send = () => sendPrompt(input);
@@ -604,6 +1080,23 @@ export function ChatWorkspace({
     }
   };
 
+  const setInteractionMode = async (mode: 'chat_only' | 'tool_enabled') => {
+    if (!currentSessionId || mode === currentInteractionMode || thinking) return;
+    if (!userId) {
+      setError('请先登录账号，再切换会话模式。');
+      return;
+    }
+    setError('');
+    try {
+      const r = await api.setChatInteractionMode(currentSessionId, mode, userId);
+      setSessions(r.sessions || []);
+      if (r.current_session_id) setCurrentSessionId(r.current_session_id);
+      if (r.messages) setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '切换会话模式失败');
+    }
+  };
+
   const deleteSession = async () => {
     if (!currentSessionId || thinking) return;
     setError('');
@@ -611,6 +1104,7 @@ export function ChatWorkspace({
       setError('请先登录账号，再管理对话。');
       return;
     }
+    if (!window.confirm('删除当前对话？删除后该对话的聊天记录和会话级数据将不可恢复。')) return;
     try {
       const r = sessions.length > 1
         ? await api.deleteChatSession(currentSessionId, userId)
@@ -644,7 +1138,7 @@ export function ChatWorkspace({
     setError('');
     try {
       const r = await api.retryMessage(editingId, text, userId, currentSessionId);
-      setMessages(normalizeChatMessages(r.messages));
+      setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
       setSessions(r.sessions || []);
       const nextSessionId = r.current_session_id || currentSessionId;
       setCurrentSessionId(nextSessionId);
@@ -734,7 +1228,7 @@ export function ChatWorkspace({
             <>
               <div className="flex min-w-0 items-center gap-2">
                 <div className="min-w-0 flex-1">
-                  <h1 className="truncate text-sm font-bold text-slate-950 dark:text-slate-50">{currentSession?.title || '新对话'}</h1>
+                  <div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-bold text-slate-950 dark:text-slate-50">{currentSession?.title || '新对话'}</h1><RealtimeSyncIndicator state={realtimeSyncState} /></div>
                   <p className="mt-0.5 text-[11px] font-medium text-slate-400">{messages.length} 条消息</p>
                 </div>
                 <button onClick={onClose} className="chat-icon-action" title="隐藏聊天" aria-label="隐藏聊天">
@@ -772,7 +1266,7 @@ export function ChatWorkspace({
           ) : (
             <>
               <div className="min-w-0 flex-1">
-                <h1 className="truncate text-sm font-bold text-slate-950 dark:text-slate-50">{currentSession?.title || '新对话'}</h1>
+                <div className="flex min-w-0 items-center gap-2"><h1 className="truncate text-sm font-bold text-slate-950 dark:text-slate-50">{currentSession?.title || '新对话'}</h1><RealtimeSyncIndicator state={realtimeSyncState} /></div>
                 <p className="mt-0.5 text-[11px] font-medium text-slate-400">{messages.length} 条消息</p>
               </div>
               {visibleSessions.length > 0 && (
@@ -877,12 +1371,16 @@ export function ChatWorkspace({
               const isUser = m.role === 'user';
               const isSystem = m.role === 'system';
               const isEditing = isUser && m.message_id && editingId === m.message_id;
+              const isToolTask = !isUser && !isSystem && messageIsToolTask(m);
               return (
                 <motion.div key={messageKey(m)} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
                   <div className={cn(
-                    'group min-w-0 max-w-[92%] whitespace-pre-wrap break-words rounded-[22px] px-4 py-3 text-sm leading-6 shadow-[0_14px_32px_rgba(15,23,42,.09)]',
-                    isUser && 'bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-[0_16px_36px_rgba(15,98,254,.22)]',
+                    'group min-w-0 whitespace-pre-wrap break-words text-sm leading-6',
+                    !isToolTask && 'rounded-[22px] px-4 py-3 shadow-[0_14px_32px_rgba(15,23,42,.09)]',
+                    isUser && 'max-w-[min(66%,34rem)] rounded-[18px] bg-gradient-to-br from-blue-600 to-cyan-600 px-3.5 py-2.5 text-white shadow-[0_12px_26px_rgba(15,98,254,.18)]',
+                    !isUser && (isToolTask ? 'w-full max-w-[min(96%,58rem)]' : 'max-w-[min(86%,48rem)]'),
                     !isUser && !isSystem && 'border border-slate-200/80 bg-white/78 text-slate-700 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/55 dark:text-slate-200',
+                    isToolTask && 'border-0 bg-transparent p-0 shadow-none backdrop-blur-0 dark:bg-transparent',
                     isSystem && 'border border-emerald-300/35 bg-emerald-50/80 text-emerald-700 backdrop-blur-xl dark:bg-emerald-950/30 dark:text-emerald-200'
                   )}>
                     {isSystem && <FileUp className="mr-2 inline" size={15} strokeWidth={1.7} />}
@@ -911,6 +1409,7 @@ export function ChatWorkspace({
                           onLogin={openGSCloudLogin}
                           onResume={resumeDownload}
                           onCancel={cancelDownload}
+                          onRetry={retryDownload}
                           onClarification={chooseClarification}
                           onConfirmAction={confirmAction}
                           sessionId={currentSessionId}
@@ -932,7 +1431,7 @@ export function ChatWorkspace({
               );
             })}
           </AnimatePresence>
-          {thinking && <div className="flex justify-start"><div className="rounded-2xl border border-slate-200/80 bg-white/72 px-4 py-3 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/55"><ThinkingDots /></div></div>}
+          {thinking && <div className="flex justify-start"><ThinkingStatusCard mode={currentInteractionMode} /></div>}
           {error && <div className="rounded-2xl border border-coral/30 bg-coral/10 px-4 py-3 text-sm text-coral">{error}</div>}
         </div>
 
@@ -947,21 +1446,52 @@ export function ChatWorkspace({
               </button>
             ))}
           </div>
-          <ChatComposer
-            value={input}
-            onChange={setInput}
-            onSend={send}
-            onUpload={uploadFiles}
-            onStop={stopCurrentRequest}
-            sending={thinking}
-            uploading={uploading}
-            disabled={!userId}
-            voiceSupported={voiceSupported}
-            listening={listening}
-            voiceUnavailableReason={voiceUnavailableReason}
-            onVoiceToggle={toggleVoice}
-            mentionItems={workspaceMentions}
-          />
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2" aria-label="会话交互模式">
+              <div className="inline-flex rounded-2xl border border-slate-200 bg-white/80 p-1 shadow-sm dark:border-slate-700 dark:bg-slate-900/75">
+                <button
+                  type="button"
+                  data-testid="interaction-mode-chat"
+                  className={cn('inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black transition-colors', currentInteractionMode === 'chat_only' ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-950' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/10')}
+                  title="聊天模式：只回答问题，不操作数据"
+                  aria-pressed={currentInteractionMode === 'chat_only'}
+                  disabled={thinking || !userId}
+                  onClick={() => setInteractionMode('chat_only')}
+                >
+                  <MessageSquare size={14} /> 聊天
+                </button>
+                <button
+                  type="button"
+                  data-testid="interaction-mode-tool"
+                  className={cn('inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black transition-colors', currentInteractionMode === 'tool_enabled' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/10')}
+                  title="工具模式：经计划和校验后执行工具"
+                  aria-pressed={currentInteractionMode === 'tool_enabled'}
+                  disabled={thinking || !userId}
+                  onClick={() => setInteractionMode('tool_enabled')}
+                >
+                  <Wrench size={14} /> 工具
+                </button>
+              </div>
+              <div className="max-w-full text-[11px] leading-snug text-slate-500 dark:text-slate-400">{interactionModeLabel}</div>
+            </div>
+            <div className="min-w-0 flex-1">
+              <ChatComposer
+                value={input}
+                onChange={setInput}
+                onSend={send}
+                onUpload={uploadFiles}
+                onStop={stopCurrentRequest}
+                sending={thinking}
+                uploading={uploading}
+                disabled={!userId}
+                voiceSupported={voiceSupported}
+                listening={listening}
+                voiceUnavailableReason={voiceUnavailableReason}
+                onVoiceToggle={toggleVoice}
+                mentionItems={workspaceMentions}
+              />
+            </div>
+          </div>
         </div>
         {!isPage && <div {...dragHandle} className="absolute right-0 top-0 h-full w-2 cursor-ew-resize" />}
         <ModalPortal>

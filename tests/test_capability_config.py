@@ -30,6 +30,7 @@ class CapabilityConfigTests(unittest.TestCase):
                 }
             )
             store.upsert_knowledge({**first, "version": "v2", "content": "更新后的匹配规则。"})
+            store.approve("knowledge", "soil_notes", actor="reviewer", summary="activate v2")
 
             hits = store.retrieve_knowledge("土壤水分 栅格 匹配", limit=3)
             self.assertEqual(hits[0]["knowledge_id"], "soil_notes")
@@ -41,7 +42,8 @@ class CapabilityConfigTests(unittest.TestCase):
 
             rolled = store.rollback("knowledge", "soil_notes", "v1")
             self.assertEqual(rolled["version"], "v1")
-            self.assertEqual(rolled["status"], "enabled")
+            self.assertEqual(rolled["status"], "draft")
+            store.approve("knowledge", "soil_notes", actor="reviewer", summary="restore v1")
             self.assertIn("时间窗口", store.retrieve_knowledge("土壤水分", limit=1)[0]["content"])
 
     def test_configured_product_is_visible_to_catalog_and_validator(self) -> None:
@@ -202,13 +204,20 @@ class CapabilityConfigTests(unittest.TestCase):
                         "applicable_scope": "general",
                         "reliability": "medium",
                         "version": "v1",
-                        "status": "enabled",
                         "content": "用于测试的知识。",
                     },
                 )
                 self.assertEqual(created.status_code, 200, created.text)
                 listed = client.get("/api/admin/capabilities/knowledge", headers={"x-admin-token": "secret"})
                 self.assertEqual(listed.status_code, 200)
+                self.assertEqual(listed.json()["items"], [])
+                approved = client.post(
+                    "/api/admin/capabilities/knowledge/api_doc/status",
+                    headers={"x-admin-token": "secret"},
+                    json={"status": "active", "actor": "reviewer", "summary": "approved"},
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                listed = client.get("/api/admin/capabilities/knowledge", headers={"x-admin-token": "secret"})
                 self.assertEqual(listed.json()["items"][0]["knowledge_id"], "api_doc")
                 self.assertEqual(listed.json()["registry_version"], "capability-config/v1")
 
@@ -239,6 +248,14 @@ class CapabilityConfigTests(unittest.TestCase):
 
                 searched = client.get("/api/admin/capabilities/knowledge/search/test?query=soil", headers={"x-admin-token": "secret"})
                 self.assertEqual(searched.status_code, 200)
+                self.assertEqual(searched.json()["items"], [])
+                approved = client.post(
+                    "/api/admin/capabilities/knowledge/uploaded_soil/status",
+                    headers={"x-admin-token": "secret"},
+                    json={"status": "active", "actor": "reviewer", "summary": "approved"},
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                searched = client.get("/api/admin/capabilities/knowledge/search/test?query=soil", headers={"x-admin-token": "secret"})
                 self.assertEqual(searched.json()["items"][0]["knowledge_id"], "uploaded_soil")
 
 

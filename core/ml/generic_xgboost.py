@@ -22,7 +22,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
+from sklearn.model_selection import GroupShuffleSplit, RandomizedSearchCV, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 
@@ -30,6 +30,8 @@ from core.data_manager import DataManager
 from core.model_results import generate_model_result_id
 from core.tool_contracts import ToolResult, tool_result_error, tool_result_ok
 
+from .modeling_advisor import build_default_modeling_advisor_client, build_zhipu_modeling_advice, modeling_advisor_enabled
+from .modeling_profile import build_modeling_profile
 from .raster_stack import build_raster_stack, stack_training_frame, write_prediction_raster
 from .spatial_features import extract_raster_features, parse_name_list
 
@@ -188,9 +190,112 @@ def _make_pipeline(feature_df: pd.DataFrame, model_type: str, random_state: int)
     return Pipeline([("preprocess", preprocessor), ("model", model)]), numeric, categorical
 
 
-def _split_indices(df: pd.DataFrame, *, split_method: str, test_size: float, random_state: int, group_col: str = "", date_col: str = "") -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+def _apply_auto_tuning(
+    pipeline: Pipeline,
+    x_train: pd.DataFrame,
+    y_train: np.ndarray,
+    *,
+    model_type: str,
+    tuning_budget: str,
+    random_state: int,
+) -> tuple[Pipeline, dict[str, Any]]:
+    budget = str(tuning_budget or "small").lower()
+    n_iter = {"small": 4, "medium": 8, "large": 16}.get(budget, 4)
+    param_distributions = {
+        "model__n_estimators": [60, 100, 160, 240],
+        "model__max_depth": [2, 3, 4, 5],
+        "model__learning_rate": [0.03, 0.06, 0.1, 0.15],
+        "model__subsample": [0.75, 0.9, 1.0],
+        "model__colsample_bytree": [0.75, 0.9, 1.0],
+    }
+    scoring = "f1_macro" if model_type == "classification" else "neg_root_mean_squared_error"
+    cv = 3 if len(x_train) >= 30 else 2
+    search = RandomizedSearchCV(
+        pipeline,
+        param_distributions=param_distributions,
+        n_iter=n_iter,
+        scoring=scoring,
+        cv=cv,
+        random_state=random_state,
+        n_jobs=1,
+        error_score="raise",
+    )
+    search.fit(x_train, y_train)
+    return search.best_estimator_, {
+        "enabled": True,
+        "status": "completed",
+        "budget": budget,
+        "n_iter": n_iter,
+        "cv": cv,
+        "scoring": scoring,
+        "best_params": search.best_params_,
+        "best_score": _json_safe(search.best_score_),
+    }
+
+
+def _shap_status(pipeline: Pipeline, x_sample: pd.DataFrame, *, enabled: bool) -> dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "status": "disabled"}
+    try:
+        import shap  # type: ignore
+
+        transformed = pipeline.named_steps["preprocess"].transform(x_sample)
+        explainer = shap.TreeExplainer(pipeline.named_steps["model"])
+        values = explainer.shap_values(transformed)
+        arr = np.asarray(values)
+        return {"enabled": True, "status": "computed", "sample_count": int(len(x_sample)), "shape": list(arr.shape)}
+    except Exception as exc:
+        return {"enabled": True, "status": "unavailable", "reason": exc.__class__.__name__}
+
+
+def _modeling_advisor_status(profile: dict[str, Any], *, enabled: bool | None, client: Any | None) -> dict[str, Any]:
+    if not modeling_advisor_enabled(enabled):
+        return {"enabled": False, "status": "disabled"}
+    advisor_client = client or build_default_modeling_advisor_client()
+    if advisor_client is None:
+        return {"enabled": True, "status": "fallback_local", "error": "advisor_client_unavailable"}
+    result = build_zhipu_modeling_advice(profile, client=advisor_client)
+    return {"enabled": True, **{key: value for key, value in result.items() if key != "payload_profile"}}
+
+
+def _spatial_group_labels(df: pd.DataFrame, lon_col: str, lat_col: str) -> np.ndarray:
+    bins = min(5, max(2, int(np.sqrt(len(df)) // 2 or 2)))
+    lon_bins = pd.qcut(pd.to_numeric(df[lon_col], errors="coerce").rank(method="first"), q=bins, duplicates="drop")
+    lat_bins = pd.qcut(pd.to_numeric(df[lat_col], errors="coerce").rank(method="first"), q=bins, duplicates="drop")
+    return np.asarray([f"{lon}_{lat}" for lon, lat in zip(lon_bins.astype(str), lat_bins.astype(str))])
+
+
+def _split_indices(
+    df: pd.DataFrame,
+    *,
+    split_method: str,
+    test_size: float,
+    random_state: int,
+    group_col: str = "",
+    date_col: str = "",
+    lon_col: str = "",
+    lat_col: str = "",
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     idx = np.arange(len(df))
     method = str(split_method or "auto").lower()
+    has_date = bool(date_col and date_col in df.columns)
+    has_space = bool(lon_col and lat_col and lon_col in df.columns and lat_col in df.columns)
+    if method in {"spatiotemporal", "auto"} and has_date and has_space:
+        ordered = pd.to_datetime(df[date_col], errors="coerce").sort_values().index.to_numpy()
+        cut = max(1, int(len(ordered) * (1 - test_size)))
+        if cut >= len(ordered):
+            cut = max(1, len(ordered) - 1)
+        return (
+            ordered[:cut],
+            ordered[cut:],
+            {"method": "spatiotemporal", "date_col": date_col, "lon_col": lon_col, "lat_col": lat_col, "test_size": test_size},
+        )
+    if method in {"spatial", "spatial_block", "auto"} and has_space and len(df) >= 10:
+        groups = _spatial_group_labels(df, lon_col, lat_col)
+        if len(set(groups)) > 1:
+            splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+            train, test = next(splitter.split(df, groups=groups))
+            return train, test, {"method": "spatial", "lon_col": lon_col, "lat_col": lat_col, "test_size": test_size}
     if (method in {"group", "auto"} and group_col and group_col in df.columns and df[group_col].nunique() > 1):
         splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
         train, test = next(splitter.split(df, groups=df[group_col]))
@@ -258,10 +363,16 @@ def _fit_table_model(
     task_type: str,
     group_col: str,
     date_col: str,
+    lon_col: str,
+    lat_col: str,
     split_method: str,
     test_size: float,
     random_state: int,
     max_training_samples: int,
+    auto_tune: bool,
+    tuning_budget: str,
+    enable_shap: bool,
+    modeling_advisor: dict[str, Any],
     extra_diagnostics: dict[str, Any] | None = None,
 ) -> ToolResult:
     inputs = {
@@ -327,9 +438,36 @@ def _fit_table_model(
         label_encoder = LabelEncoder()
         y = label_encoder.fit_transform(y_raw.astype(str))
     split_df = df.loc[source_indices].reset_index(drop=True)
-    train_idx, test_idx, split_info = _split_indices(split_df, split_method=split_method, test_size=test_size, random_state=random_state, group_col=group_col, date_col=date_col)
+    fields_lower = {str(col).lower(): str(col) for col in split_df.columns}
+    resolved_lon_col = lon_col or fields_lower.get("lon") or fields_lower.get("lng") or fields_lower.get("longitude") or fields_lower.get("x") or ""
+    resolved_lat_col = lat_col or fields_lower.get("lat") or fields_lower.get("latitude") or fields_lower.get("y") or ""
+    train_idx, test_idx, split_info = _split_indices(
+        split_df,
+        split_method=split_method,
+        test_size=test_size,
+        random_state=random_state,
+        group_col=group_col,
+        date_col=date_col,
+        lon_col=resolved_lon_col,
+        lat_col=resolved_lat_col,
+    )
     pipeline, numeric_cols, categorical_cols = _make_pipeline(x, model_type, random_state)
-    pipeline.fit(x.iloc[train_idx], y[train_idx])
+    tuning_info = {"enabled": bool(auto_tune), "status": "disabled"}
+    if auto_tune:
+        try:
+            pipeline, tuning_info = _apply_auto_tuning(
+                pipeline,
+                x.iloc[train_idx],
+                y[train_idx],
+                model_type=model_type,
+                tuning_budget=tuning_budget,
+                random_state=random_state,
+            )
+        except Exception as exc:
+            tuning_info = {"enabled": True, "status": "failed", "reason": exc.__class__.__name__}
+            pipeline.fit(x.iloc[train_idx], y[train_idx])
+    else:
+        pipeline.fit(x.iloc[train_idx], y[train_idx])
     pred = pipeline.predict(x.iloc[test_idx])
     proba = pipeline.predict_proba(x.iloc[test_idx]) if model_type == "classification" and hasattr(pipeline, "predict_proba") else None
     metrics = _metrics(model_type, y[test_idx], pred, proba)
@@ -352,11 +490,13 @@ def _fit_table_model(
         result_path = Path(manager.get(result_dataset).path)
         result_artifact = _artifact(result_path, "csv", f"{output_name}.csv", dataset_name=result_dataset)
     importance_df = _feature_importance(pipeline, feature_cols)
+    shap_info = _shap_status(pipeline, x.iloc[train_idx[: min(len(train_idx), 200)]], enabled=enable_shap)
     metrics_dataset = manager.put_table(f"{output_name}_metrics", pd.DataFrame([metrics]))
     importance_dataset = manager.put_table(f"{output_name}_feature_importance", importance_df)
     model_path = manager.derived_dir / f"{_safe_name(output_name)}_model.joblib"
     joblib.dump({"pipeline": pipeline, "label_encoder": label_encoder, "features": feature_cols, "target": target_col}, model_path)
     summary_path = manager.derived_dir / f"{_safe_name(output_name)}_summary.json"
+    modeling_profile = build_modeling_profile(df, dataset_name=output_name, data_type="vector" if gdf is not None else "table")
     diagnostics = {
         "target_col": target_col,
         "features": feature_cols,
@@ -367,7 +507,11 @@ def _fit_table_model(
         "task_mode": task_mode,
         "model_type": model_type,
         "top_features": importance_df.head(10).to_dict(orient="records"),
-        "limitations": ["SHAP not computed in V1", "Hyperparameter search not enabled"],
+        "tuning": tuning_info,
+        "shap": shap_info,
+        "modeling_profile": modeling_profile,
+        "modeling_advisor": modeling_advisor,
+        "limitations": [],
     }
     diagnostics.update(extra_diagnostics or {})
     summary_path.write_text(json.dumps({"metrics": _json_safe(metrics), "diagnostics": _json_safe(diagnostics)}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -431,11 +575,18 @@ def run_generic_xgboost_workflow(
     sample_dataset_name: str = "",
     x_col: str = "",
     y_col: str = "",
+    lon_col: str = "",
+    lat_col: str = "",
     date_col: str = "",
     group_col: str = "",
     split_method: str = "auto",
     test_size: float = 0.2,
     random_state: int = 42,
+    auto_tune: bool = False,
+    tuning_budget: str = "small",
+    enable_shap: bool = False,
+    enable_modeling_advisor: bool | None = None,
+    modeling_advisor_client: Any | None = None,
     max_training_samples: int = 200000,
     max_prediction_pixels: int = 5000000,
     raster_resampling: str = "bilinear",
@@ -487,6 +638,7 @@ def run_generic_xgboost_workflow(
             x, y, stack_diag = stack_training_frame(stack, max_training_samples=max_training_samples, random_state=random_state)
             df = pd.DataFrame(x, columns=stack.feature_names)
             df["__target__"] = y
+            modeling_profile = build_modeling_profile(df, dataset_name=output, data_type="raster_stack")
             result = _fit_table_model(
                 manager,
                 df=df,
@@ -498,10 +650,16 @@ def run_generic_xgboost_workflow(
                 task_type=task_type,
                 group_col="",
                 date_col="",
+                lon_col="",
+                lat_col="",
                 split_method=split_method,
                 test_size=test_size,
                 random_state=random_state,
                 max_training_samples=max_training_samples,
+                auto_tune=auto_tune,
+                tuning_budget=tuning_budget,
+                enable_shap=enable_shap,
+                modeling_advisor=_modeling_advisor_status(modeling_profile, enabled=enable_modeling_advisor, client=modeling_advisor_client),
                 extra_diagnostics={"raster_stack": stack_diag},
             )
             if not result.ok:
@@ -537,9 +695,11 @@ def run_generic_xgboost_workflow(
             sample_name = sample_dataset_name or dataset_name
             sample_gdf, extracted_features, spatial_diag = extract_raster_features(manager, sample_name, raster_list, x_col=x_col, y_col=y_col)
             features = feature_list or extracted_features
+            sample_df = pd.DataFrame(sample_gdf.drop(columns=["geometry"], errors="ignore"))
+            modeling_profile = build_modeling_profile(sample_df, dataset_name=sample_name, data_type="vector")
             return _fit_table_model(
                 manager,
-                df=pd.DataFrame(sample_gdf.drop(columns=["geometry"], errors="ignore")),
+                df=sample_df,
                 gdf=sample_gdf,
                 target_col=target_col,
                 feature_cols=features,
@@ -548,10 +708,16 @@ def run_generic_xgboost_workflow(
                 task_type=task_type,
                 group_col=group_col,
                 date_col=date_col,
+                lon_col=lon_col or x_col,
+                lat_col=lat_col or y_col,
                 split_method=split_method,
                 test_size=test_size,
                 random_state=random_state,
                 max_training_samples=max_training_samples,
+                auto_tune=auto_tune,
+                tuning_budget=tuning_budget,
+                enable_shap=enable_shap,
+                modeling_advisor=_modeling_advisor_status(modeling_profile, enabled=enable_modeling_advisor, client=modeling_advisor_client),
                 extra_diagnostics=spatial_diag,
             )
         if not dataset_name:
@@ -564,6 +730,7 @@ def run_generic_xgboost_workflow(
                 diagnostics={"required_inputs": ["dataset_name"]},
             )
         df, gdf, task_mode = _dataframe_from_dataset(manager, dataset_name)
+        modeling_profile = build_modeling_profile(df, dataset_name=dataset_name, data_type="vector" if gdf is not None else "table")
         return _fit_table_model(
             manager,
             df=df,
@@ -575,10 +742,16 @@ def run_generic_xgboost_workflow(
             task_type=task_type,
             group_col=group_col,
             date_col=date_col,
+            lon_col=lon_col or x_col,
+            lat_col=lat_col or y_col,
             split_method=split_method,
             test_size=test_size,
             random_state=random_state,
             max_training_samples=max_training_samples,
+            auto_tune=auto_tune,
+            tuning_budget=tuning_budget,
+            enable_shap=enable_shap,
+            modeling_advisor=_modeling_advisor_status(modeling_profile, enabled=enable_modeling_advisor, client=modeling_advisor_client),
         )
     except RuntimeError as exc:
         text = str(exc)

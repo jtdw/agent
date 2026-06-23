@@ -123,6 +123,41 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         forbidden_uses=["不能裁剪未下载完成或不存在的栅格"],
     ),
     _card(
+        "raster_reproject",
+        "将真实已加载栅格重投影为目标 CRS，并注册 map-ready GeoTIFF。",
+        ["data_processing", "raster_reproject", "raster_resample"],
+        ["raster_name", "target_crs", "output_name"],
+        ["raster_dataset", "artifact", "map_layer"],
+        optional_inputs=["resampling", "target_resolution"],
+        input_asset_roles=["source_raster", "target_crs"],
+        preconditions=["输入必须是可读取栅格", "源 CRS 必须存在", "target_crs 必须由 TaskPlan 明确给出", "target_resolution 如提供必须为目标 CRS 单位下的正数", "重采样方法必须受 rasterio 支持"],
+        common_failure_cases=["源 CRS 缺失", "target_crs 非法", "target_resolution 非法", "输出路径非法", "重投影后无有效像元"],
+        forbidden_uses=["不能凭用户原文临时决定目标 CRS 或目标分辨率", "不能把重投影描述为裁剪或下载"],
+    ),
+    _card(
+        "dem_terrain_derivatives",
+        "从已验证的投影坐标 DEM 生成坡度、坡向等地形派生栅格。",
+        ["terrain_analysis", "dem", "slope", "aspect"],
+        ["dem_name", "output_prefix"],
+        ["raster_dataset", "artifact", "map_layer", "terrain_statistics"],
+        optional_inputs=["derivatives", "slope_units"],
+        input_asset_roles=["dem_raster"],
+        preconditions=["DEM 必须是真实已加载栅格", "DEM 必须有 CRS", "平面坡度计算要求投影坐标 CRS", "slope_units 必须明确为 degree 或 percent"],
+        common_failure_cases=["DEM 是地理坐标 CRS", "NoData 全覆盖", "derivatives 参数不支持", "输出路径非法"],
+        forbidden_uses=["不得直接对经纬度 DEM 计算平面坡度", "不得伪造坡度统计或坡向范围"],
+    ),
+    _card(
+        "raster_algebra",
+        "对已对齐的栅格执行受限表达式计算，可用于明确波段/栅格映射的 NDVI。",
+        ["raster_calculation", "ndvi_calculation", "data_processing"],
+        ["expression", "input_rasters", "output_name"],
+        ["raster_dataset", "artifact", "map_layer", "raster_statistics"],
+        input_asset_roles=["aligned_raster_inputs", "formula"],
+        preconditions=["表达式变量必须映射到真实栅格数据集", "输入栅格 CRS、范围、分辨率和形状必须一致", "NDVI 的 red/nir 映射必须由用户或真实元数据明确"],
+        common_failure_cases=["缺少变量映射", "栅格未对齐", "表达式非法", "NoData 导致结果为空"],
+        forbidden_uses=["不得凭文件名猜测红光或近红外波段", "不得扫描工作区自动混入其他栅格"],
+    ),
+    _card(
         "table_to_points",
         "将含经纬度/坐标字段的表格转换为点图层。",
         ["data_processing", "table_to_points", "mapping"],
@@ -132,6 +167,53 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         preconditions=["坐标字段必须来自真实表字段", "CRS 必须明确"],
         common_failure_cases=["缺少经度或纬度字段", "坐标列不是数值", "坐标超出 CRS 合理范围"],
         forbidden_uses=["不能仅凭列名以外的猜测创建点位"],
+    ),
+    _card(
+        "vector_buffer",
+        "对矢量图层生成缓冲区，米制缓冲会在地理 CRS 下使用验证后的临时投影处理。",
+        ["data_processing", "vector_buffer"],
+        ["dataset_name", "distance", "unit", "output_name"],
+        ["vector_dataset", "artifact", "map_layer"],
+        input_asset_roles=["target_vector"],
+        preconditions=["输入必须是矢量数据", "distance 必须为正数", "unit 必须明确", "输入 CRS 必须存在"],
+        common_failure_cases=["距离非法", "CRS 缺失", "无法估计投影坐标系", "缓冲结果为空"],
+        forbidden_uses=["不得在距离和单位缺失时自动执行", "不得把经纬度单位误当米直接缓冲"],
+    ),
+    _card(
+        "vector_spatial_join",
+        "按明确空间关系连接两个矢量图层，并输出真实要素数、字段和 artifact。",
+        ["data_processing", "spatial_join"],
+        ["target_name", "join_name", "predicate", "output_name"],
+        ["vector_dataset", "artifact", "map_layer"],
+        optional_inputs=["how", "field_conflict_strategy"],
+        input_asset_roles=["target_vector", "join_vector"],
+        preconditions=["两个输入都必须是矢量数据", "CRS 必须存在", "predicate 必须是支持的空间关系", "字段冲突策略必须明确或使用默认 suffix"],
+        common_failure_cases=["空间关系不支持", "连接方式不支持", "CRS 缺失", "结果为空"],
+        forbidden_uses=["不得在目标图层或连接图层不明确时执行", "不得凭历史 selected object 自动补连接图层"],
+    ),
+    _card(
+        "extract_raster_values_to_points",
+        "把一个栅格的像元值采样到点图层字段中，适合站点-栅格特征提取。",
+        ["data_processing", "raster_sampling", "station_raster_feature_extraction"],
+        ["point_name", "raster_name", "output_name", "field_name"],
+        ["vector_dataset", "artifact", "sample_diagnostics"],
+        optional_inputs=["band", "method"],
+        input_asset_roles=["point_station_layer", "feature_raster"],
+        preconditions=["点图层必须是真实 Point 几何", "栅格必须可读取", "点和栅格 CRS 必须存在", "method 必须为 nearest 或 bilinear"],
+        common_failure_cases=["点图层 CRS 缺失", "栅格波段不存在", "采样结果 NoData 过多", "输出字段缺失"],
+        forbidden_uses=["不得在站点坐标不明确时执行", "不得伪造采样值或缺失率"],
+    ),
+    _card(
+        "batch_register_points_to_rasters",
+        "把多个栅格批量采样到点图层，输出长表或宽表，供建模或质量检查使用。",
+        ["data_processing", "raster_sampling", "station_raster_feature_extraction", "modeling"],
+        ["point_name", "raster_names", "output_name"],
+        ["table_dataset", "vector_dataset", "artifact", "sample_diagnostics"],
+        optional_inputs=["id_cols", "output_mode", "value_field_prefix", "band", "parse_date", "date_regex"],
+        input_asset_roles=["point_station_layer", "feature_rasters"],
+        preconditions=["点图层和所有栅格必须来自真实元数据", "栅格列表必须由 TaskPlan 明确选择", "输出模式必须为 long 或 wide"],
+        common_failure_cases=["栅格列表为空", "ID 字段不存在", "波段越界", "采样结果缺失"],
+        forbidden_uses=["不得自动扫描工作区混入其他栅格", "不得替 XGBoost 伪造训练特征"],
     ),
     _card(
         "plot_dataset",
@@ -156,6 +238,18 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         preconditions=["目标变量和特征必须来自真实元数据", "样本数应足以训练/验证", "空间验证需要坐标或几何"],
         common_failure_cases=["目标列缺失", "特征列缺失", "有效样本不足", "训练/验证切分不可行"],
         forbidden_uses=["不能伪造 RMSE/MAE/R2/NSE 或模型产物", "不能在缺少目标变量时训练"],
+    ),
+    _card(
+        "train_xgboost_fusion_model",
+        "训练表格或点数据的 XGBoost 回归模型，支持经纬度字段驱动的空间分块验证、残差、特征重要性、精度指标和模型文件输出。",
+        ["modeling", "xgboost", "soil_moisture", "spatial_validation"],
+        ["dataset_name", "target_col", "feature_cols", "output_name"],
+        ["prediction_table", "residual_table", "model_metrics", "feature_importance", "model_file", "diagnostic_images"],
+        optional_inputs=["date_col", "split_date", "lon_col", "lat_col", "spatial_validation", "validation_method", "spatial_block_count", "random_state", "requested_outputs"],
+        input_asset_roles=["training_table", "target_variable", "feature_variables", "coordinate_fields", "optional_time_field"],
+        preconditions=["目标列、特征列、坐标列和时间列必须来自真实 Asset Profile", "空间分块验证需要真实有效的 lon/lat 或点几何", "样本量必须满足训练和验证要求"],
+        common_failure_cases=["目标列缺失", "特征列缺失", "坐标列无效", "样本不足", "xgboost 依赖不可用", "空间分块不足以形成验证折"],
+        forbidden_uses=["不得伪造 RMSE/MAE/R2 或残差诊断", "不得在缺少目标变量或有效坐标时执行空间分块验证", "不得扫描工作区混入未被 TaskPlan 选择的数据"],
     ),
     _card(
         "geographical_conformal_prediction",
@@ -195,7 +289,19 @@ def validate_tool_card(card: dict[str, Any]) -> list[str]:
 
 
 def candidate_tool_cards(query: str, *, task_type: str = "", limit: int = 8) -> list[dict[str, Any]]:
-    terms = {token.lower() for token in str(query or "").replace("_", " ").split() if token.strip()}
+    raw_query = str(query or "")
+    terms = {token.lower() for token in raw_query.replace("_", " ").split() if token.strip()}
+    lower_query = raw_query.lower()
+    synonym_terms: list[str] = []
+    if any(token in raw_query for token in ("站点", "采样", "提取")) and ("栅格" in raw_query or "raster" in lower_query):
+        synonym_terms.extend(["raster_sampling", "station_raster_feature_extraction", "table_to_points"])
+    if any(token in raw_query for token in ("坡度", "坡向", "地形")) or any(token in lower_query for token in ("slope", "aspect", "terrain")):
+        synonym_terms.extend(["terrain_analysis", "dem_terrain_derivatives", "raster_reproject"])
+    if "ndvi" in lower_query or any(token in raw_query for token in ("红光", "近红外", "栅格计算")):
+        synonym_terms.extend(["ndvi_calculation", "raster_calculation", "raster_algebra"])
+    if "裁剪" in raw_query and ("栅格" in raw_query or "raster" in lower_query):
+        synonym_terms.extend(["raster_clip", "clip_raster_by_vector"])
+    terms.update(term.lower() for term in synonym_terms if term)
     if task_type:
         terms.add(str(task_type).lower())
     scored: list[tuple[int, dict[str, Any]]] = []

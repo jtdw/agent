@@ -4,6 +4,7 @@ from copy import deepcopy
 from typing import Any
 
 from core.product_catalog import product_by_id
+from core.dataset_availability import availability_for_product, availability_time_error
 
 
 DOWNLOAD_TOOLS = {
@@ -23,6 +24,14 @@ OPERATION_TOOL_PREFIXES = {
     "table_to_points": {"table_to_points"},
     "make_map": {"plot_dataset"},
     "clip": {"vector_clip_by_vector", "clip_raster_by_vector"},
+    "raster_calculation": {"raster_algebra"},
+    "ndvi_calculation": {"raster_algebra"},
+    "terrain_analysis": {"dem_terrain_derivatives", "raster_reproject"},
+    "raster_reproject": {"raster_reproject"},
+    "raster_resample": {"raster_reproject"},
+    "vector_buffer": {"vector_buffer", "reproject_vector"},
+    "spatial_join": {"vector_spatial_join", "reproject_vector"},
+    "raster_sampling": {"extract_raster_values_to_points", "batch_register_points_to_rasters", "table_to_points", "raster_reproject"},
     "gcp_uncertainty": {"geographical_conformal_prediction"},
 }
 
@@ -49,6 +58,25 @@ def _tool_names(plan: dict[str, Any]) -> list[str]:
         if str(name or "").strip():
             names.append(str(name).strip())
     return list(dict.fromkeys(names))
+
+
+def _steps(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for field in ("workflow_plan", "tool_plan"):
+        for step in _as_list(plan.get(field)):
+            if isinstance(step, dict):
+                items.append(step)
+    return items
+
+
+def _step_args(step: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    tool_name = str(step.get("tool_name") or "")
+    validated = _as_dict(plan.get("validated_tool_args"))
+    args = validated.get(tool_name)
+    if isinstance(args, dict):
+        return args
+    args = step.get("validated_tool_args") if isinstance(step.get("validated_tool_args"), dict) else step.get("args")
+    return args if isinstance(args, dict) else {}
 
 
 def _available_dataset_names(context: dict[str, Any]) -> set[str]:
@@ -94,6 +122,26 @@ def validate_task_plan_before_execution(plan: dict[str, Any], context: dict[str,
     errors: list[dict[str, Any]] = []
     blocked_tools: list[str] = []
     tool_names = _tool_names(plan)
+    execution_required = bool(plan.get("execution_required", True))
+    response_mode = str(plan.get("response_mode") or "").strip()
+    if execution_required is False or response_mode == "answer_only":
+        if tool_names:
+            errors.append(_error("ANSWER_ONLY_PLAN_HAS_TOOLS", "Answer-only TaskPlan must not select executable tools.", tools=tool_names))
+            blocked_tools.extend(tool_names)
+        execution_plan = _blocked_execution_plan(plan) if errors else deepcopy(plan)
+        execution_plan["execution_required"] = False
+        execution_plan["response_mode"] = "answer_only"
+        execution_plan["tool_plan"] = []
+        execution_plan["workflow_plan"] = []
+        execution_plan["validated_tool_args"] = {}
+        return {
+            "ok": not errors,
+            "status": "valid_answer_only" if not errors else "blocked",
+            "errors": errors,
+            "blocked_tools": list(dict.fromkeys([name for name in blocked_tools if name])),
+            "execution_plan": execution_plan,
+            "trace": _trace(plan, context, blocked_tools),
+        }
     requested_downloads = _as_list(plan.get("requested_downloads")) or _as_list(_as_dict(plan.get("download_plan")).get("requested_downloads"))
 
     download_tools = [name for name in tool_names if name in DOWNLOAD_TOOLS or "download" in name.lower() or "gscloud" in name.lower()]
@@ -165,6 +213,27 @@ def validate_task_plan_before_execution(plan: dict[str, Any], context: dict[str,
         blocked_tools.extend(tool_names)
         errors.append(_error("CONFIRMATION_REQUIRED", "Plan requires confirmation before execution."))
 
+    for step in _steps(plan):
+        tool_name = str(step.get("tool_name") or "")
+        args = _step_args(step, plan)
+        if tool_name == "raster_reproject":
+            resampling = str(args.get("resampling") or "bilinear").strip().lower()
+            if resampling not in {"nearest", "bilinear", "cubic", "average", "mode", "max", "min", "med", "q1", "q3", "sum", "rms"}:
+                blocked_tools.append(tool_name)
+                errors.append(_error("RESAMPLING_UNSUPPORTED", "Raster resampling method is not supported.", tool_name=tool_name, resampling=resampling))
+            target_resolution = str(args.get("target_resolution") or "").strip()
+            if target_resolution:
+                parts = [item.strip() for item in target_resolution.replace("x", ",").replace("X", ",").replace(" ", ",").split(",") if item.strip()]
+                if len(parts) == 1:
+                    parts = [parts[0], parts[0]]
+                try:
+                    parsed = [float(parts[0]), float(parts[1])]
+                    if parsed[0] <= 0 or parsed[1] <= 0:
+                        raise ValueError("target_resolution must be positive")
+                except Exception:
+                    blocked_tools.append(tool_name)
+                    errors.append(_error("TARGET_RESOLUTION_INVALID", "Raster target_resolution must be a positive number or pair in target CRS units.", tool_name=tool_name, target_resolution=target_resolution))
+
     for index, request in enumerate(requested_downloads):
         if not isinstance(request, dict):
             continue
@@ -201,6 +270,24 @@ def validate_task_plan_before_execution(plan: dict[str, Any], context: dict[str,
                         index=index,
                     )
                 )
+            else:
+                availability_profile = availability_for_product(product_id)
+                availability_error = availability_time_error(product_id, time_range, availability_profile)
+                if availability_error:
+                    blocked_tools.extend(tool_names)
+                    start = availability_error.get("start") or "未知"
+                    end = availability_error.get("end") or "未知"
+                    errors.append(
+                        _error(
+                            "DOWNLOAD_TIME_RANGE_OUT_OF_AVAILABILITY",
+                            f"该产品已验证可用时间范围为 {start} 至 {end}，请求时间不在可下载范围内。",
+                            product_id=product_id,
+                            product_name=product.get("display_name_zh"),
+                            requested_time_range=time_range,
+                            availability=availability_error,
+                            index=index,
+                        )
+                    )
 
     blocked_tools = list(dict.fromkeys([name for name in blocked_tools if name]))
     ok = not errors

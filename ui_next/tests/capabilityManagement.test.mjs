@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const apiSource = await readFile('src/lib/api.ts', 'utf8');
+const panelSource = await readFile('src/components/CapabilityManagementPanel.tsx', 'utf8');
+
+assert.match(apiSource, /actor\?: string/, 'capability status updates must accept an actor');
+assert.match(apiSource, /summary\?: string/, 'capability status updates must accept a review summary');
+assert.match(apiSource, /JSON\.stringify\(\{ status, actor: options\?\.actor \|\| 'admin', summary: options\?\.summary \|\| '' \}\)/, 'status update must send actor and summary to backend');
+assert.match(apiSource, /systemReset/, 'api client must expose admin system reset');
+assert.match(apiSource, /\/api\/admin\/system-reset/, 'system reset must call the admin reset endpoint');
+assert.match(apiSource, /storageCleanupScan/, 'api client must expose storage cleanup scan');
+assert.match(apiSource, /storageCleanupDelete/, 'api client must expose storage cleanup delete');
+assert.match(apiSource, /\/api\/admin\/storage-cleanup\/scan/, 'storage cleanup scan must use admin endpoint');
+assert.match(apiSource, /adminPlatformAccounts/, 'api client must expose platform account listing');
+assert.match(apiSource, /upsertAdminPlatformAccount/, 'api client must expose platform account upsert');
+assert.match(apiSource, /startAdminPlatformAccountLogin/, 'api client must expose platform account login refresh');
+assert.match(apiSource, /adminPlatformAccountHealth/, 'api client must expose platform account login health check');
+assert.match(apiSource, /updateAdminPlatformAccountStatus/, 'api client must expose platform account status update');
+assert.match(apiSource, /\/api\/admin\/platform-accounts/, 'platform account management must use admin endpoint');
+assert.match(apiSource, /datasetAvailabilityProfiles/, 'api client must expose dataset availability listing');
+assert.match(apiSource, /scanDatasetAvailability/, 'api client must expose dataset availability scan');
+assert.match(apiSource, /updateDatasetAvailabilityStatus/, 'api client must expose dataset availability status update');
+assert.match(apiSource, /\/api\/admin\/dataset-availability/, 'dataset availability management must use admin endpoint');
+
+assert.match(panelSource, /提交审核/, 'capability panel must expose submit-for-review action');
+assert.match(panelSource, /激活/, 'capability panel must expose active approval action');
+assert.match(panelSource, /status: 'pending_review'/, 'submit action must use pending_review');
+assert.match(panelSource, /updateStatus\(item, 'active'\)/, 'activation action must use active');
+assert.match(panelSource, /Test retrieval query/, 'capability panel must keep retrieval test input');
+assert.match(panelSource, /resetConfirmText/, 'capability panel must require explicit reset confirmation text');
+assert.match(panelSource, /systemReset/, 'capability panel must call structured reset API');
+assert.match(panelSource, /keep_accounts/, 'capability panel must expose keep-accounts reset mode');
+assert.match(panelSource, /full_reset/, 'capability panel must expose full reset mode');
+assert.match(panelSource, /scanStorageCleanup/, 'capability panel must expose historical storage scan');
+assert.match(panelSource, /runStorageCleanup/, 'capability panel must expose historical storage cleanup action');
+assert.match(panelSource, /删除历史缓存/, 'historical storage cleanup must require explicit Chinese confirmation text');
+assert.match(panelSource, /平台账号管理/, 'capability panel must render platform account management card');
+assert.match(panelSource, /addPlatformAccount/, 'platform account card must support adding accounts');
+assert.match(panelSource, /startPlatformLogin/, 'platform account card must support login state refresh');
+assert.match(panelSource, /refreshPlatformAccountHealth/, 'platform account card must support health checking');
+assert.match(panelSource, /disablePlatformAccount/, 'platform account card must support disabling accounts');
+assert.match(panelSource, /账号密码不会返回到前端/, 'platform account card must explain secret handling');
+assert.match(panelSource, /数据集可用性扫描/, 'capability panel must render dataset availability scan card');
+assert.match(panelSource, /scanAvailabilityProfile/, 'dataset availability card must support scanning products');
+assert.match(panelSource, /loadAvailabilityProfiles/, 'dataset availability card must support listing profiles');
+assert.match(panelSource, /updateAvailabilityStatus/, 'dataset availability card must support review status updates');
+assert.match(panelSource, /生成 draft 档案/, 'dataset availability scan must explain draft review flow');
+
+console.log('capabilityManagement.test.mjs passed');

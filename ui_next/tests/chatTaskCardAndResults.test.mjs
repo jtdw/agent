@@ -1,0 +1,62 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const root = resolve(import.meta.dirname, '..');
+const renderer = readFileSync(resolve(root, 'src/components/ChatMessageRenderer.tsx'), 'utf8');
+const panel = readFileSync(resolve(root, 'src/components/ChatPanel.tsx'), 'utf8');
+const api = readFileSync(resolve(root, 'src/lib/api.ts'), 'utf8');
+
+assert.match(renderer, /function TaskStatusCard/, 'ChatMessageRenderer must render tool work through one unified task card');
+assert.match(renderer, /GIS 任务/, 'TaskStatusCard must present a user-readable GIS task header');
+assert.match(renderer, /任务结果/, 'ResultGroups must present a user-readable result section');
+assert.match(renderer, /下一步建议/, 'ResultGroups must render canonical next_action_suggestions');
+assert.match(renderer, /interaction_type/, 'ChatMessageRenderer must consume explicit backend interaction_type metadata');
+assert.match(renderer, /function ResultGroups/, 'ChatMessageRenderer must group canonical PresentationResult artifacts through ResultGroups');
+assert.match(renderer, /推荐查看/, 'ResultGroups must include the recommended group');
+assert.match(renderer, /数据结果/, 'ResultGroups must include the data group');
+assert.match(renderer, /图像预览/, 'ResultGroups must include the image preview group');
+assert.match(renderer, /模型与报告/, 'ResultGroups must include the model/report group');
+assert.match(renderer, /下载推荐结果/, 'ResultGroups must expose a recommended download action');
+assert.match(renderer, /下载全部结果/, 'ResultGroups must expose an all-results download action');
+assert.match(renderer, /presentationResult \|\| userResult/, 'PresentationResult must remain preferred over user_facing_result');
+assert.doesNotMatch(renderer, /JSON\.stringify\([^)]*normalized_results/i, 'Chat UI must not render raw normalized_results');
+assert.match(renderer, /confirmedActionId/, 'Confirmation actions must use structured confirmed action IDs');
+assert.match(renderer, /onConfirmAction\?\.\(confirmationPrompt, confirmedActionId\)/, 'Confirmation button must use the structured confirmed action ID');
+assert.match(renderer, /onRetry\?\.\(jobId\)/, 'Task retry button must call the structured retry handler with job_id');
+assert.match(renderer, /canCancelTask/, 'Task card must expose cancel action for cancellable running or queued jobs');
+assert.doesNotMatch(renderer, /status === 'failed' && <button[^]*onClarification\?\.\('retry'/, 'Failed task retry must not be routed as a clarification free-text action');
+assert.doesNotMatch(renderer, /sendPrompt\(['"`]继续/, 'Confirmation button must not submit a free-text continue request');
+
+const chatModeIndex = panel.indexOf('interaction-mode-chat');
+const toolModeIndex = panel.indexOf('interaction-mode-tool');
+const composerIndex = panel.indexOf('<ChatComposer');
+assert.ok(chatModeIndex >= 0 && chatModeIndex < composerIndex, 'Mode segmented control must be rendered before the composer');
+assert.ok(toolModeIndex >= 0 && toolModeIndex < composerIndex, 'Tool mode button must be rendered before the composer');
+assert.match(panel, /function ThinkingStatusCard/, 'ChatPanel must show a real-time status card while the assistant is working');
+assert.match(panel, /RealtimeSyncIndicator/, 'ChatPanel must expose realtime connection state');
+assert.match(panel, /applyRealtimeEvent/, 'ChatPanel must merge realtime events into existing messages');
+assert.match(panel, /api\.streamChat/, 'ChatPanel must use the POST SSE chat stream');
+assert.match(panel, /api\.openChatEventStream/, 'ChatPanel must subscribe to session task SSE events');
+assert.match(panel, /messageMatchesRealtimeEvent/, 'Realtime events must target an existing assistant message');
+assert.match(panel, /messageIsToolTask/, 'ChatPanel must identify tool task messages without frontend keyword detection');
+assert.match(panel, /mergeTaskCardUpdate/, 'ChatPanel must merge task state changes into the existing task card');
+assert.match(panel, /messageMatchesConfirmation/, 'Confirmation responses must target the original awaiting-confirmation card');
+assert.match(panel, /messageMatchesJob/, 'Download job updates must target the original running task card');
+assert.match(panel, /reason: 'download_success'[\s\S]*mergeTaskCardUpdate/, 'Download completion must update the existing task card');
+assert.match(panel, /const retryDownload = async \(jobId: string\)/, 'ChatPanel must expose a structured download retry handler');
+assert.match(panel, /api\.retryDownloadJob\(jobId, userId, currentSessionId\)/, 'ChatPanel retry must call backend retry endpoint with session_id');
+assert.match(panel, /onRetry=\{retryDownload\}/, 'Task card must receive the structured retry handler');
+assert.match(panel, /max-w-\[min\(66%,34rem\)\]/, 'User message bubbles should remain compact instead of occupying the whole row');
+assert.doesNotMatch(panel, /Boolean\(meta\.presentation_result\)/, 'Answer-only PresentationResult must not promote a chat message into a tool task card');
+assert.doesNotMatch(renderer, /Boolean\(presentationResult\)/, 'Answer-only PresentationResult must render as conversation/result content, not a tool task card');
+
+assert.match(api, /artifactMetadata/, 'Artifact display must resolve metadata by artifact_id');
+assert.match(api, /downloadArtifactById/, 'Artifact downloads must go through the backend artifact resolver');
+assert.match(api, /streamChat/, 'API client must expose chat SSE streaming');
+assert.match(api, /openChatEventStream/, 'API client must expose task SSE subscription');
+assert.match(api, /replayChatEvents/, 'API client must expose event replay for reconnect recovery');
+assert.match(renderer, /chat-streaming-placeholder/, 'Chat renderer must show a streaming placeholder');
+assert.match(renderer, /chat-streaming-cursor/, 'Chat renderer must show an active streaming cursor');
+
+console.log('chatTaskCardAndResults.test.mjs passed');

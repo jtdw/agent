@@ -8,6 +8,7 @@ from unittest import mock
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pytest
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Point
@@ -19,6 +20,9 @@ from core.service import GISWorkspaceService
 from core.task_planner import build_task_plan
 from core.tool_contracts import parse_tool_result
 from core.workflow_executor import execute_workflow_plan, parse_workflow_result
+
+
+pytestmark = pytest.mark.slow
 
 
 class CheckpointGenericXGBoostMigrationTests(unittest.TestCase):
@@ -327,6 +331,7 @@ class CheckpointGenericXGBoostMigrationTests(unittest.TestCase):
     def test_service_dialog_runs_generic_xgboost_and_returns_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
+            service.set_interaction_mode("tool_enabled")
             rows = 36
             service.manager.put_table(
                 "points",

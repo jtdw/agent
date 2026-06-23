@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
+import pytest
 from pydantic import ValidationError
 
 from core.presentation_result import (
@@ -12,6 +13,9 @@ from core.presentation_result import (
     build_presentation_bundle_from_raw_execution,
     build_presentation_result,
 )
+
+
+pytestmark = pytest.mark.slow
 
 
 class PresentationResultTests(unittest.TestCase):
@@ -120,6 +124,35 @@ class PresentationResultTests(unittest.TestCase):
         )
         self.assertEqual(awaiting["status"], "awaiting_confirmation")
         self.assertEqual(awaiting["clarification_question"], "Log in to GSCloud")
+
+    def test_failed_canonical_step_overrides_successful_coordinator_status(self) -> None:
+        failed = build_presentation_result(
+            task_goal="dem slope",
+            task_plan_summary={"primary_goal": "dem_slope_aspect", "response_language": "zh-CN"},
+            coordinator_status="succeeded",
+            normalized_results=[
+                {
+                    "status": "failed",
+                    "step_id": "terrain",
+                    "tool_name": "dem_terrain_derivatives",
+                    "outputs": {},
+                    "artifacts": [],
+                    "warnings": [],
+                    "errors": [
+                        {
+                            "code": "DEM_PROJECTED_CRS_REQUIRED",
+                            "message": "不能直接对地理坐标 CRS 的 DEM 计算平面坡度。",
+                        }
+                    ],
+                    "next_actions": ["先执行 raster_reproject 到合适的投影 CRS，再计算坡度坡向。"],
+                    "input_asset_ids": ["dem_geo"],
+                }
+            ],
+            response_language="zh-CN",
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertFalse(failed["artifact_refs"])
+        self.assertIn("DEM_PROJECTED_CRS_REQUIRED", failed["error_summary"])
 
     def test_old_result_structures_are_ignored(self) -> None:
         result = build_presentation_result(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import difflib
 import io
@@ -1289,6 +1290,78 @@ def _try_special_mask_from_query(df: pd.DataFrame, expr: str) -> pd.Series | Non
     return None
 
 
+def _validate_safe_filter_expression(expr: str, columns: list[str], label: str) -> None:
+    """Allow only simple dataframe filter expressions.
+
+    The expression may reference dataframe columns, constants, comparisons,
+    boolean operators, membership checks, and basic arithmetic. It may not call
+    functions, access attributes, use comprehensions, subscripts, or reference
+    names that are not columns.
+    """
+    try:
+        parsed = ast.parse(expr, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"{label} 表达式语法无效: {expr}") from exc
+
+    allowed_names = {str(col) for col in columns}
+    allowed_nodes = (
+        ast.Expression,
+        ast.BoolOp,
+        ast.UnaryOp,
+        ast.BinOp,
+        ast.Compare,
+        ast.Name,
+        ast.Load,
+        ast.Constant,
+        ast.List,
+        ast.Tuple,
+        ast.And,
+        ast.Or,
+        ast.Not,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+        ast.In,
+        ast.NotIn,
+        ast.Is,
+        ast.IsNot,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Mod,
+        ast.Pow,
+        ast.USub,
+        ast.UAdd,
+    )
+    forbidden_nodes = (
+        ast.Call,
+        ast.Attribute,
+        ast.Subscript,
+        ast.Lambda,
+        ast.IfExp,
+        ast.Dict,
+        ast.Set,
+        ast.ListComp,
+        ast.SetComp,
+        ast.DictComp,
+        ast.GeneratorExp,
+        ast.Await,
+        ast.Yield,
+        ast.NamedExpr,
+    )
+    for node in ast.walk(parsed):
+        if isinstance(node, forbidden_nodes):
+            raise ValueError(f"{label} 不允许函数调用、属性访问、下标访问或复杂表达式。")
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"{label} 包含不支持的表达式元素: {type(node).__name__}")
+        if isinstance(node, ast.Name) and node.id not in allowed_names:
+            raise ValueError(f"{label} 引用了不存在或不允许的字段: {node.id}")
+
+
 def _build_mask_from_query(df: pd.DataFrame, expr: str, label: str) -> pd.Series:
     if not expr.strip():
         return pd.Series(True, index=df.index)
@@ -1309,6 +1382,11 @@ def _build_mask_from_query(df: pd.DataFrame, expr: str, label: str) -> pd.Series
     last_error: Exception | None = None
     for candidate_expr in [rewritten_expr, expr]:
         if not candidate_expr.strip():
+            continue
+        try:
+            _validate_safe_filter_expression(candidate_expr, [str(col) for col in df.columns], label)
+        except Exception as exc_validate:
+            last_error = exc_validate
             continue
         try:
             mask = df.eval(candidate_expr, engine="python")

@@ -336,6 +336,25 @@ def build_conversation_context(
 
 
 def format_context_for_agent(context: dict[str, Any]) -> str:
+    def _compact_knowledge_snippets(value: Any) -> list[dict[str, Any]]:
+        snippets: list[dict[str, Any]] = []
+        for item in _as_list(value):
+            if not isinstance(item, dict):
+                continue
+            snippets.append(
+                {
+                    "knowledge_chunk_id": item.get("knowledge_chunk_id") or item.get("id") or "",
+                    "knowledge_id": item.get("knowledge_id") or item.get("id") or "",
+                    "knowledge_version": item.get("knowledge_version") or item.get("version") or "",
+                    "title": item.get("title") or "",
+                    "content": item.get("content") or "",
+                    "source": item.get("source") or "",
+                    "applicable_scope": item.get("applicable_scope") or item.get("scope") or "",
+                    "reliability": item.get("reliability") or item.get("trust_level") or "",
+                }
+            )
+        return snippets
+
     payload = {
         "intent": _as_dict(context.get("intent")).get("intent"),
         "agent_policy": context.get("agent_policy"),
@@ -358,7 +377,7 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         "semantic_field_candidates": context.get("semantic_field_candidates"),
         "likely_target_fields": context.get("likely_target_fields"),
         "likely_mapping_fields": context.get("likely_mapping_fields"),
-        "knowledge_snippets": context.get("knowledge_snippets"),
+        "knowledge_snippets": _compact_knowledge_snippets(context.get("knowledge_snippets")),
         "candidate_tool_cards": context.get("candidate_tool_cards"),
         "download_candidates": context.get("download_candidates"),
         "area_candidates": context.get("area_candidates"),

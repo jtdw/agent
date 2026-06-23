@@ -14,8 +14,6 @@ import { useEffect, useState } from 'react';
 import { api, type ChatArtifact } from '@/lib/api';
 import { cn } from '@/lib/cn';
 
-const LARGE_DOWNLOAD_THRESHOLD_BYTES = 25 * 1024 * 1024;
-
 function artifactIcon(kind = '', filename = '') {
   const text = `${kind} ${filename}`.toLowerCase();
   if (/\.(png|jpg|jpeg|webp)$/.test(text)) return FileImage;
@@ -54,11 +52,6 @@ function isMarkdownArtifact(artifact: ChatArtifact, filename = '') {
 function isJsonArtifact(artifact: ChatArtifact, filename = '') {
   const text = `${artifact.mime_type || ''} ${artifact.kind || ''} ${artifact.type || ''} ${artifact.artifact_type || ''} ${filename}`.toLowerCase();
   return text.includes('json') || /\.json$/.test(filename.toLowerCase());
-}
-
-function isArchiveArtifact(artifact: ChatArtifact, filename = '') {
-  const text = `${artifact.mime_type || ''} ${artifact.kind || ''} ${artifact.type || ''} ${artifact.artifact_type || ''} ${filename}`.toLowerCase();
-  return text.includes('zip') || text.includes('archive') || /\.(zip|7z|tar|gz)(\?|$)/.test(filename.toLowerCase());
 }
 
 export function formatFileSize(bytes?: number, sizeKb?: number) {
@@ -104,6 +97,7 @@ export function ArtifactDownloadCard({
   const missing = resolved.status === 'missing';
   const mapReady = Boolean(resolved.map_ready || resolved.meta?.map_ready || resolved.meta?.map_layer_id || resolved.meta?.dataset_name);
   const resolvedDownloadUrl = resolved.download_url || (!resolved.artifact_id ? artifact.download_url : '');
+  const canDownload = Boolean(resolved.artifact_id) && !deleted && !missing;
   const imagePreviewUrl = !missing && isImageArtifact(resolved, filename) && resolvedDownloadUrl ? resolvedDownloadUrl : '';
   const rows = previewRows(resolved.preview);
   const columns = previewColumns(resolved.preview, rows);
@@ -130,17 +124,17 @@ export function ArtifactDownloadCard({
   }, [artifact.artifact_id, userId, sessionId, deleted]);
 
   const download = async () => {
-    if (!resolvedDownloadUrl || downloading || deleted || missing) return;
+    if (downloading || deleted || missing) return;
+    if (!resolved.artifact_id) {
+      setError('文件已清理、无访问权限或下载链接已失效。');
+      return;
+    }
     setDownloading(true);
     setError('');
     try {
-      if (isArchiveArtifact(artifact, filename) || (artifact.size_bytes || 0) >= LARGE_DOWNLOAD_THRESHOLD_BYTES) {
-        api.downloadNative(resolvedDownloadUrl, filename);
-      } else {
-        await api.downloadAuthenticated(resolvedDownloadUrl, filename);
-      }
+      await api.downloadArtifactById(resolved.artifact_id, filename, userId, sessionId);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '下载失败');
+      setError(cause instanceof Error ? cause.message : '文件已清理、无访问权限或下载链接已失效。');
     } finally {
       setDownloading(false);
     }
@@ -239,7 +233,7 @@ export function ArtifactDownloadCard({
         <button data-testid="artifact-delete" type="button" onClick={remove} disabled={deleting || deleted || !artifact.artifact_id} className="artifact-card-action" title="删除" aria-label="删除结果文件">
           {deleting ? <Loader2 size={15} className="animate-spin" /> : <Trash2 size={15} />}
         </button>
-        <button data-testid="artifact-download" type="button" onClick={download} disabled={downloading || resolving || deleted || missing || !resolvedDownloadUrl} className={cn('artifact-card-action is-primary', downloading && 'opacity-60')} title="下载" aria-label="下载">
+        <button data-testid="artifact-download" type="button" onClick={download} disabled={downloading || resolving || !canDownload} className={cn('artifact-card-action is-primary', downloading && 'opacity-60')} title={canDownload ? '下载' : '文件已清理、无访问权限或下载链接已失效'} aria-label="下载">
           {downloading ? <Loader2 size={15} className="animate-spin" /> : <Download size={15} />}
         </button>
       </div>

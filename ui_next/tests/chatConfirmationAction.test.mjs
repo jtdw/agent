@@ -10,10 +10,12 @@ assert.match(renderer, /onConfirmAction/, 'ChatMessageRenderer must expose a con
 assert.match(renderer, /confirmed_action_id/, 'Confirmation UI must pass the backend confirmation token');
 assert.match(renderer, /data-testid="download-confirmation-required"/, 'Confirmation action should have a stable test id');
 assert.match(panel, /confirmAction/, 'ChatPanel must implement a confirmAction handler');
-assert.match(panel, /confirmed_action_id=\$\{/, 'ChatPanel must resend the original request with the confirmation token');
+assert.match(panel, /api\.confirmChatAction/, 'ChatPanel must confirm actions through the structured confirmation API');
+assert.doesNotMatch(panel, /confirmed_action_id=\$\{/, 'ChatPanel must not append confirmation tokens to a visible user message');
 assert.match(panel, /onConfirmAction=\{confirmAction\}/, 'ChatPanel must wire confirmation callback into the message renderer');
 assert.match(api, /confirmation_required/, 'ChatActionRequired type must explicitly include confirmation_required');
 assert.match(api, /confirmed_action_id\?: string/, 'ChatActionRequired type must expose confirmed_action_id');
 assert.match(api, /confirmation_prompt\?: string/, 'ChatActionRequired type must expose confirmation_prompt');
+assert.match(api, /confirmChatAction/, 'API client must expose structured chat confirmation');
 
 console.log('chat confirmation action tests passed');

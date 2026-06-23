@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from core.response_language import localized_text, normalize_response_language
+from core.zhipu_json_client import LLMProviderError
 
 
 CoordinatorDecisionValue = Literal["continue", "stop_success", "stop_failure", "request_clarification", "request_confirmation"]
@@ -116,7 +117,7 @@ def _invoke_client(client: Any, payload: dict[str, Any]) -> Any:
                     "You may only choose validated remaining TaskPlan steps and must rely on normalized ToolResult facts. "
                     "Use the provided response_language for user-facing reason and user_question.",
                 ),
-                ("user", json.dumps(payload, ensure_ascii=False, default=str)),
+                ("user", json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)),
             ]
         )
     if callable(client):
@@ -155,7 +156,7 @@ def build_coordinator_decision(
         try:
             from .llm_task_planner import build_default_llm_task_planner_client
 
-            client = build_default_llm_task_planner_client()
+            client = build_default_llm_task_planner_client(operation="coordinator")
         except Exception:
             client = None
     payload = _coordinator_payload(
@@ -170,6 +171,24 @@ def build_coordinator_decision(
     response_language = str(payload.get("response_language") or "")
     try:
         raw = _invoke_client(client, payload)
+    except LLMProviderError as exc:
+        zh = response_language.startswith("zh")
+        messages = {
+            "safety_blocked": "模型内容安全策略拦截了本次协调决策，未继续执行工具。",
+            "rate_limited": "模型服务当前限流，未继续执行工具。",
+            "timeout": "模型服务响应超时，未继续执行工具。",
+            "invalid_response": "模型返回格式无效，未继续执行工具。",
+        }
+        return {
+            "status": exc.kind,
+            "decision": _decision(
+                "stop_failure",
+                reason=messages.get(exc.kind, "LLM 工作流协调器当前不可用。") if zh else f"Coordinator provider error: {exc.kind}.",
+                response_language=response_language,
+            ),
+            "error": f"{exc.kind}: {exc}",
+            "payload": payload,
+        }
     except Exception as exc:
         return {
             "status": "unavailable",

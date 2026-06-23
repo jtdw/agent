@@ -112,6 +112,52 @@ def _is_shandian_boundary_layer(layer: dict[str, Any]) -> bool:
     return "shandian" in text or "闪电河" in text
 
 
+def _is_download_artifact_without_map_binding(artifact: dict[str, Any]) -> bool:
+    path = Path(str(artifact.get("path") or ""))
+    if "downloads" not in {part.lower() for part in path.parts}:
+        return False
+    meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
+    return not str(meta.get("dataset_name") or artifact.get("dataset_id") or "").strip() and not bool(meta.get("map_ready"))
+
+
+def _strip_numeric_suffixes(value: str) -> str:
+    clean = str(value or "")
+    while re.search(r"_\d+$", clean):
+        clean = re.sub(r"_\d+$", "", clean)
+    return clean
+
+
+def _download_dataset_dedupe_key(item: dict[str, Any]) -> str:
+    name = str(item.get("name") or "")
+    path = Path(str(item.get("path") or ""))
+    text = f"{name} {path}".lower()
+    if "gscloud" not in text and "download" not in text:
+        return ""
+    normalized_name = _strip_numeric_suffixes(name)
+    if normalized_name.endswith("_mosaic"):
+        normalized_name = normalized_name[: -len("_mosaic")]
+    if normalized_name:
+        return normalized_name
+    stem = _strip_numeric_suffixes(path.stem or name)
+    if "gscloud" in stem:
+        marker = stem.find("gscloud")
+        prefix_start = stem.rfind("_", 0, marker)
+        if prefix_start >= 0:
+            stem = stem[prefix_start + 1 :]
+    if stem.endswith("_mosaic"):
+        stem = stem[: -len("_mosaic")]
+    return stem
+
+
+def _layer_download_dedupe_key(layer: dict[str, Any]) -> str:
+    return _download_dataset_dedupe_key(
+        {
+            "name": str(layer.get("dataset_name") or layer.get("name") or ""),
+            "path": str((layer.get("meta") if isinstance(layer.get("meta"), dict) else {}).get("source_path") or ""),
+        }
+    )
+
+
 class MapLayerService:
     def __init__(self, service: GISWorkspaceService):
         self.service = service
@@ -361,7 +407,16 @@ class MapLayerService:
             except Exception:
                 dataset_name = ""
         if not dataset_name:
-            dataset_name = self.service.manager.load_path(str(path), name=path.stem)
+            dataset_name = self.service.manager.find_dataset_by_path(path)
+        if not dataset_name:
+            if suffix in RASTER_EXTS:
+                dataset_name = self.service.manager.register_raster_reference(
+                    path,
+                    name=path.stem,
+                    meta={"source": "artifact_reference", "artifact_id": str(artifact.get("artifact_id") or "")},
+                )
+            else:
+                dataset_name = self.service.manager.load_path(str(path), name=path.stem)
         dataset = next((item for item in self.service.manager.list_datasets() if item.get("name") == dataset_name), None)
         if not dataset:
             return None
@@ -400,8 +455,14 @@ class MapLayerService:
         artifacts_by_dataset = _artifact_dataset_index(artifacts)
         layers: list[dict[str, Any]] = []
         diagnostics: list[dict[str, Any]] = []
+        seen_download_datasets: set[str] = set()
         for item in self.service.manager.list_datasets():
             name = str(item.get("name") or "")
+            dedupe_key = _download_dataset_dedupe_key(item)
+            if dedupe_key:
+                if dedupe_key in seen_download_datasets:
+                    continue
+                seen_download_datasets.add(dedupe_key)
             artifact = artifacts_by_dataset.get(name)
             if artifact is None:
                 try:
@@ -418,6 +479,8 @@ class MapLayerService:
 
         dataset_layer_ids = {layer.get("id") for layer in layers}
         for artifact in artifacts:
+            if _is_download_artifact_without_map_binding(artifact):
+                continue
             meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
             layer_id = str(meta.get("map_layer_id") or "")
             if layer_id and layer_id in dataset_layer_ids:
@@ -441,7 +504,17 @@ class MapLayerService:
             if fallback:
                 layers.insert(0, fallback)
 
-        return {"layers": _dedupe_boundary_layers(layers), "diagnostics": diagnostics}
+        deduped_layers: list[dict[str, Any]] = []
+        seen_layer_downloads: set[str] = set()
+        for layer in layers:
+            key = _layer_download_dedupe_key(layer)
+            if key:
+                if key in seen_layer_downloads:
+                    continue
+                seen_layer_downloads.add(key)
+            deduped_layers.append(layer)
+
+        return {"layers": _dedupe_boundary_layers(deduped_layers), "diagnostics": diagnostics}
 
     def refresh_artifact(self, artifact_id: str, user_id: str = "", session_id: str = "") -> dict[str, Any]:
         artifact = self.service.manager.get_artifact(artifact_id)
@@ -451,8 +524,17 @@ class MapLayerService:
         suffix = path.suffix.lower()
         meta = artifact.get("meta") if isinstance(artifact.get("meta"), dict) else {}
         dataset_name = str(meta.get("dataset_name") or "").strip()
+        if not dataset_name:
+            dataset_name = self.service.manager.find_dataset_by_path(path)
         if not dataset_name and suffix in VECTOR_EXTS.union(RASTER_EXTS):
-            dataset_name = self.service.manager.load_path(str(path), name=path.stem)
+            if suffix in RASTER_EXTS:
+                dataset_name = self.service.manager.register_raster_reference(
+                    path,
+                    name=path.stem,
+                    meta={"source": "artifact_reference", "artifact_id": artifact_id},
+                )
+            else:
+                dataset_name = self.service.manager.load_path(str(path), name=path.stem)
         if not dataset_name and suffix in SPATIAL_IMAGE_EXTS and isinstance(meta.get("bounds"), list):
             layer_id = str(meta.get("map_layer_id") or f"artifact_{safe_layer_id(artifact_id)}")
             refreshed_meta = _merge_meta(meta, {"map_ready": True, "map_layer_id": layer_id, "layer_kind": meta.get("layer_kind") or "image"})

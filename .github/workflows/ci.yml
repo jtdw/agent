@@ -12,8 +12,8 @@ jobs:
     env:
       ZAI_API_KEY: ci-test-key
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install Python dependencies
@@ -31,10 +31,10 @@ jobs:
   frontend-build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
       - name: Install frontend dependencies
@@ -59,13 +59,13 @@ jobs:
       GIS_AGENT_BACKEND_URL: http://127.0.0.1:8765
       GIS_AGENT_FRONTEND_URL: http://127.0.0.1:5173
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
       - name: Install Python dependencies

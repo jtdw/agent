@@ -4,7 +4,6 @@ import json
 import os
 import shutil
 import zipfile
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -14,6 +13,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from .archive_manifest import extract_loadable_members
 from .auth import load_cookies_from_storage_state, source_download_dir, storage_state_path
 from .base import DomesticDownloadResult, DomesticSource
 from ..data_manager import DataManager
@@ -65,6 +65,12 @@ def safe_name(text: str) -> str:
             keep.append("_")
     out = "".join(keep).strip("._-")
     return out or f"download_{uuid4().hex[:8]}"
+
+
+def _prepare_extract_dir(output_dir: Path) -> None:
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
 
 def make_requests_session(source: DomesticSource | None = None, workdir: Path | None = None) -> requests.Session:
@@ -213,16 +219,14 @@ def capture_browser_download(
 def _extract_archive(path: Path, output_dir: Path) -> Path | None:
     suffix = path.suffix.lower()
     if suffix == ".zip" and zipfile.is_zipfile(path):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(path, "r") as zf:
-            safe_extract_zip(zf, output_dir)
+        extract_loadable_members(path, output_dir, allowed_exts=LOADABLE_EXTS, max_datasets=1, clean=True)
         return output_dir
     if suffix == ".7z":
         try:
             import py7zr  # type: ignore
         except Exception as exc:
             raise RuntimeError("解压 .7z 需要安装 py7zr：pip install py7zr") from exc
-        output_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_extract_dir(output_dir)
         with py7zr.SevenZipFile(path, mode="r") as z:
             names = z.getnames() if hasattr(z, "getnames") else []
             _assert_archive_members_safe([str(name) for name in names], output_dir)
@@ -234,7 +238,7 @@ def _extract_archive(path: Path, output_dir: Path) -> Path | None:
             import rarfile  # type: ignore
         except Exception as exc:
             raise RuntimeError("解压 .rar 需要安装 rarfile，并确保系统有 unrar/bsdtar。") from exc
-        output_dir.mkdir(parents=True, exist_ok=True)
+        _prepare_extract_dir(output_dir)
         with rarfile.RarFile(path) as rf:
             infos = rf.infolist()
             for member in infos:
@@ -290,12 +294,11 @@ def postprocess_download(
     if not downloaded_path.exists() or downloaded_path.stat().st_size == 0:
         raise RuntimeError(f"下载文件不存在或为空: {downloaded_path}")
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = safe_name(output_name or downloaded_path.stem)
     extract_dir: Path | None = None
     if downloaded_path.suffix.lower() in ARCHIVE_EXTS:
         try:
-            extract_dir = manager.derived_dir / f"{base_name}_extracted_{stamp}"
+            extract_dir = manager.derived_dir / f"{base_name}_extracted"
             extract_dir = _extract_archive(downloaded_path, extract_dir)
         except Exception as exc:
             # 保留原始下载，不中断整体流程。
@@ -307,7 +310,7 @@ def postprocess_download(
     auto_loaded = False
     if auto_load and load_candidate:
         try:
-            dataset_name = manager.load_path(str(load_candidate), name=base_name)
+            dataset_name = manager.register_dataset_reference(load_candidate, name=base_name, meta={"source": "download_postprocess"})
             auto_loaded = True
         except Exception as exc:
             manager.log_operation("国内数据源自动加载失败", f"{load_candidate}: {exc}", "download")

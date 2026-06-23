@@ -4,10 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from core.chat_response import build_chat_response
 from core.config import Settings
 from core.response_postprocess import dedupe_assistant_reply, repair_mojibake_text
 from core.service import GISWorkspaceService
+
+
+pytestmark = pytest.mark.slow
 
 
 class ChatResponseContractTests(unittest.TestCase):
@@ -247,6 +252,7 @@ class ChatResponseContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             service.current_session_id = service.create_new_session()
+            service.set_interaction_mode("tool_enabled")
             service.manager.put_table("stations", pd.DataFrame({"x": [1, 2], "y": [3, 4]}))
             active_plan = {
                 "status": "ready",

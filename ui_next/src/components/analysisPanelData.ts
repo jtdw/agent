@@ -139,12 +139,12 @@ function downloads(dashboard: unknown, resultPanel?: ResultPanel | null): Analys
   if (resultPanel?.files?.length) {
     return resultPanel.files
       .map((item) => {
-        const url = String(item.download_url || '');
-        if (!url) return null;
+        const artifactId = String(item.artifact_id || '');
+        if (!artifactId) return null;
         const name = String(item.filename || item.label || item.name || '成果文件');
         const lower = name.toLowerCase();
         const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
-        return { artifactId: String(item.artifact_id || ''), label: name, url, kind };
+        return { artifactId, label: name, url: '', kind };
       })
       .filter((item): item is AnalysisDownload => Boolean(item))
       .slice(0, 20);
@@ -155,13 +155,13 @@ function downloads(dashboard: unknown, resultPanel?: ResultPanel | null): Analys
   const seen = new Set<string>();
   return artifacts
     .map((item) => {
-      const url = String(item.download_url || '');
-      if (!url || seen.has(url)) return null;
-      seen.add(url);
+      const artifactId = String(item.artifact_id || item.id || '');
+      if (!artifactId || seen.has(artifactId)) return null;
+      seen.add(artifactId);
       const name = String(item.filename || item.label || item.name || item.title || '成果文件');
       const lower = name.toLowerCase();
       const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
-      return { artifactId: String(item.artifact_id || item.id || ''), label: name, url, kind };
+      return { artifactId, label: name, url: '', kind };
     })
     .filter((item): item is AnalysisDownload => Boolean(item))
     .slice(0, 8);

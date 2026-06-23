@@ -5,15 +5,19 @@ import hashlib
 import os
 import re
 import tempfile
+import time
+from queue import Empty
+from threading import Event, Thread
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlencode
+from uuid import uuid4
 from zipfile import ZipFile
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from api.routes.data_sources import create_data_sources_router
@@ -37,6 +41,9 @@ from core.archive_utils import safe_extract_zip
 from core.artifacts import artifact_download_url, assert_artifact_path_allowed, content_disposition_attachment, public_artifact_payload, safe_download_filename, shapefile_zip_path
 from core.chat_response import attach_chat_state, build_chat_response
 from core.chat_tasks import cancel_chat_task, finish_chat_task, start_chat_task
+from core.download_request_executor import _attach_registered_download_artifacts
+from core.durable_jobs import DurableJobStore
+from core.realtime_events import GLOBAL_REALTIME_EVENT_HUB, TaskEventStore
 from core.response_quality import validate_response_before_send
 from core.presentation_result import build_presentation_bundle
 from core.management_views import download_job_to_management_view
@@ -47,16 +54,22 @@ from core.response_language import detect_response_language
 from core.api_utils import api_guard, resolve_child_path
 from core.local_library import LocalFileLibrary
 from core.capability_config import CapabilityConfigStore, CAPABILITY_CONFIG_VERSION
+from core.dataset_availability import DATASET_AVAILABILITY_SCHEMA_VERSION, DatasetAvailabilityStore
+from core.dataset_availability_scanner import scan_dataset_availability
+from core.system_reset import reset_system_workspace
+from core.storage_cleanup import cleanup_storage_candidates, scan_storage_cleanup_candidates
+from core.compat_usage import CompatibilityUsageStore
+from core.trial_monitoring import TrialMonitoringStore
 from core.map_layers import MapLayerService
 from core.semantic_parser import parse_user_semantics
 from core.station_data import find_station_archives, parse_ismn_station_zip
-from core.domestic_sources.intent_router import GSCloudIntentRoute, route_gscloud_download_intent
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
+from core.domestic_sources.gscloud_adapter import gscloud_platform_state_path
+from core.commercial.login_jobs import start_gscloud_login_process
 from core.ops_config import require_valid_production_config, validate_production_config
 from core.llm_config import check_llm_provider_health, validate_llm_config
-from core.gscloud_route_registry import GSCloudDirectDownloadRoute, match_direct_download_route, route_by_product_key, validate_unique_product_keys
 from services.data_sources.gscloud_accounts import GSCloudAccountService
 from services.downloads.resume import DownloadResumeService
 
@@ -279,10 +292,21 @@ class AskIn(BaseModel):
     frontend_context: dict[str, Any] = Field(default_factory=dict)
 
 
+class ChatConfirmIn(BaseModel):
+    confirmation_id: str = Field(min_length=1, max_length=200)
+    confirmation_prompt: str = Field(default="", max_length=4000)
+    user_id: str = ""
+    session_id: str = ""
+    session_token: str = ""
+    task_id: str = ""
+    frontend_context: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatSessionIn(BaseModel):
     user_id: str = ""
     session_id: str = ""
     title: str = ""
+    interaction_mode: Literal["chat_only", "tool_enabled"] | None = None
 
 
 class ChatRetryIn(BaseModel):
@@ -392,6 +416,28 @@ def guard(fn):
 
 def _capability_store() -> CapabilityConfigStore:
     return CapabilityConfigStore()
+
+
+def _dataset_availability_store() -> DatasetAvailabilityStore:
+    return DatasetAvailabilityStore()
+
+
+def _compat_usage_store() -> CompatibilityUsageStore:
+    return CompatibilityUsageStore(base_settings.workdir / "compat_usage.db")
+
+
+def _trial_monitoring_store() -> TrialMonitoringStore:
+    return TrialMonitoringStore(base_settings.workdir / "trial_monitoring.db")
+
+
+def _compat_actor_type(request: Request) -> str:
+    explicit = str(request.headers.get("x-actor-type") or "").strip().lower()
+    if explicit:
+        return explicit
+    user_agent = str(request.headers.get("user-agent") or "").lower()
+    if "testclient" in user_agent or "playwright" in user_agent:
+        return "automated_test"
+    return "trial_user"
 
 
 def _require_capability_admin(request: Request) -> None:
@@ -746,7 +792,17 @@ def _assert_download_job_session(job: dict, session_id: str = "") -> None:
         raise PermissionError("download job belongs to another session")
 
 
-def _download_tool_result_for_job(job: dict) -> dict:
+def _manager_for_download_job(user_id: str, job: dict) -> Any | None:
+    session_id = str((job or {}).get("session_id") or "").strip()
+    if not user_id or not session_id:
+        return None
+    try:
+        return _scoped_workspace_service(user_id, session_id).manager
+    except Exception:
+        return None
+
+
+def _download_tool_result_for_job(job: dict, *, user_id: str = "") -> dict:
     job_id = str((job or {}).get("job_id") or "")
     scene_job = None
     tile_job = None
@@ -754,14 +810,22 @@ def _download_tool_result_for_job(job: dict) -> dict:
         scene_job = next((item for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id), None)
     if job_id and list_gscloud_tile_jobs is not None:
         tile_job = next((item for item in list_gscloud_tile_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id), None)
-    return download_job_to_tool_result(job, scene_job=scene_job, tile_job=tile_job)
+    tool_result = download_job_to_tool_result(job, scene_job=scene_job, tile_job=tile_job)
+    manager = _manager_for_download_job(user_id, job)
+    if manager is not None:
+        product = {
+            "product_id": str(job.get("output_name") or job.get("resource_type") or "download"),
+            "resource_type": str(job.get("resource_type") or "download"),
+        }
+        tool_result = _attach_registered_download_artifacts(manager, tool_result, job, product)
+    return tool_result
 
 
 def _attach_download_tool_result(payload: dict, job_key: str = "job") -> dict:
     patched = dict(payload or {})
     job = patched.get(job_key)
     if isinstance(job, dict):
-        tool_result = _download_tool_result_for_job(job)
+        tool_result = _download_tool_result_for_job(job, user_id=str(job.get("user_id") or ""))
         step_result = {**tool_result, "step_id": "download_job"}
         bundle = build_presentation_bundle(
             task_goal="download_status",
@@ -788,7 +852,7 @@ def _attach_download_tool_result(payload: dict, job_key: str = "job") -> dict:
     jobs = patched.get("jobs")
     if isinstance(jobs, list):
         patched["management_views"] = [
-            download_job_to_management_view(item, tool_result=_download_tool_result_for_job(item))
+            download_job_to_management_view(item, tool_result=_download_tool_result_for_job(item, user_id=str(item.get("user_id") or "")))
             for item in jobs
             if isinstance(item, dict)
         ]
@@ -1023,6 +1087,7 @@ def status():
             "status": llm_validation.get("status"),
             "provider": llm_validation.get("provider"),
             "model": llm_validation.get("model"),
+            "role_models": llm_validation.get("role_models", {}),
             "api_key_present": llm_validation.get("api_key_present"),
             "intent_classifier": llm_validation.get("enable_llm_intent_classifier"),
             "fallback_to_rule_classifier": llm_validation.get("fallback_to_rule_classifier"),
@@ -1193,11 +1258,207 @@ def messages(request: Request, user_id: str = Query(default="")):
     return guard(run)
 
 
+def _task_event_store_for_service(service: GISWorkspaceService) -> TaskEventStore:
+    return TaskEventStore(Path(service.manager.workdir) / "durable_jobs.db")
+
+
+def _event_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _bridge_commercial_download_events(service: GISWorkspaceService, *, user_id: str, session_id: str) -> None:
+    event_store = _task_event_store_for_service(service)
+    try:
+        jobs = commercial_service.list_jobs(user_id=user_id, session_id=session_id, limit=100)
+    except Exception:
+        return
+    for job in jobs if isinstance(jobs, list) else []:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        try:
+            tool_result = download_job_to_tool_result(job)
+            view = download_job_to_management_view(job, tool_result=tool_result)
+        except Exception:
+            continue
+        raw_status = str(view.get("status") or "running")
+        status = "cancelled" if raw_status == "canceled" else raw_status
+        if status not in {"queued", "running", "awaiting_confirmation", "waiting_login", "paused", "succeeded", "failed", "cancelled"}:
+            status = "running"
+        kind = "task_progress" if status == "running" else "task_status"
+        if status == "succeeded":
+            kind = "task_result"
+        elif status == "failed":
+            kind = "error"
+        elif status == "cancelled":
+            kind = "warning"
+        artifact_refs = view.get("artifact_refs") if isinstance(view.get("artifact_refs"), list) else []
+        layer_refs = view.get("map_layer_refs") if isinstance(view.get("map_layer_refs"), list) else []
+        message = str(view.get("user_message") or view.get("display_title") or "下载任务状态已更新。")
+        presentation = {
+            "schema_version": "presentation-result/v1",
+            "status": status,
+            "concise_summary": message,
+            "artifact_refs": artifact_refs,
+            "map_layer_refs": layer_refs,
+            "warnings": view.get("warnings") if isinstance(view.get("warnings"), list) else [],
+            "error_summary": str(view.get("error_title") or "") if status in {"failed", "cancelled"} else "",
+            "next_action_suggestions": view.get("available_actions") if isinstance(view.get("available_actions"), list) else [],
+        }
+        task_update = {
+            "interaction_type": "tool_task",
+            "management_view": view,
+            "task_card": {
+                "task_id": job_id,
+                "status": status,
+                "progress": view.get("progress"),
+                "current_step": _event_dict(view.get("action_state")).get("stage") or "",
+                "summary": message,
+            },
+        }
+        fingerprint = json.dumps(
+            {
+                "status": status,
+                "progress": view.get("progress"),
+                "updated_at": view.get("updated_at"),
+                "artifacts": artifact_refs,
+                "error_code": view.get("error_code"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        event_store.append_if_changed(
+            checkpoint_key=f"commercial-download:{job_id}",
+            fingerprint=fingerprint,
+            user_id=user_id,
+            session_id=session_id,
+            task_id=job_id,
+            job_id=job_id,
+            kind=kind,
+            status=status,
+            progress=int(float(view.get("progress") or 0)),
+            current_step=str(_event_dict(view.get("action_state")).get("stage") or ""),
+            message=message,
+            management_view=view,
+            presentation_result=presentation,
+            task_update=task_update,
+        )
+
+
+def _public_task_events(service: GISWorkspaceService, *, user_id: str, session_id: str, after_version: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+    _bridge_commercial_download_events(service, user_id=user_id, session_id=session_id)
+    return _task_event_store_for_service(service).public_events(
+        user_id=user_id,
+        session_id=session_id,
+        after_version=after_version,
+        limit=limit,
+    )
+
+
+def _sse_event(event: dict[str, Any]) -> str:
+    payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    return f"id: {int(event.get('version') or 0)}\nevent: {str(event.get('kind') or 'message')}\ndata: {payload}\n\n"
+
+
+def _stream_task_update(response: dict[str, Any]) -> dict[str, Any]:
+    messages = response.get("messages") if isinstance(response.get("messages"), list) else []
+    assistant = next((item for item in reversed(messages) if isinstance(item, dict) and item.get("role") == "assistant"), {})
+    meta = assistant.get("meta") if isinstance(assistant.get("meta"), dict) else {}
+    allowed = {
+        "action_required",
+        "interaction_type",
+        "mode",
+        "status",
+        "management_view",
+        "download_management_view",
+        "task_card",
+        "execution_summary",
+        "presentation_result",
+        "confirmed_pending_confirmation_id",
+        "reason",
+    }
+    return {key: meta[key] for key in allowed if key in meta}
+
+
+@app.get("/api/chat/events/replay")
+def replay_chat_events(
+    request: Request,
+    user_id: str = Query(default=""),
+    session_id: str = Query(default=""),
+    after_version: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    def run():
+        authorized_user_id = _require_request_user_if_present(request, user_id)
+        service = _scoped_workspace_service(authorized_user_id, session_id)
+        return {
+            "schema_version": "task-progress-event-replay/v1",
+            "events": _public_task_events(
+                service,
+                user_id=authorized_user_id,
+                session_id=session_id or service.current_session_id,
+                after_version=after_version,
+                limit=limit,
+            ),
+        }
+
+    return guard(run)
+
+
+@app.get("/api/chat/events")
+def stream_chat_events(
+    request: Request,
+    user_id: str = Query(default=""),
+    session_id: str = Query(default=""),
+    after_version: int = Query(default=0, ge=0),
+    once: bool = Query(default=False),
+):
+    authorized_user_id = _require_request_user_if_present(request, user_id)
+    service = _scoped_workspace_service(authorized_user_id, session_id)
+    scoped_session_id = session_id or service.current_session_id
+
+    def event_stream():
+        version = max(0, int(after_version or 0))
+        subscription = GLOBAL_REALTIME_EVENT_HUB.subscribe(user_id=authorized_user_id, session_id=scoped_session_id)
+        try:
+            while True:
+                events = _public_task_events(service, user_id=authorized_user_id, session_id=scoped_session_id, after_version=version)
+                for event in events:
+                    version = max(version, int(event.get("version") or 0))
+                    yield _sse_event(event)
+                transient_events: list[dict[str, Any]] = []
+                try:
+                    transient_events.append(subscription.get(timeout=0.8 if not events else 0.01))
+                    while True:
+                        transient_events.append(subscription.get_nowait())
+                except Empty:
+                    pass
+                for event in transient_events:
+                    yield _sse_event(event)
+                if once:
+                    return
+                if not events and not transient_events:
+                    yield ": keepalive\n\n"
+        finally:
+            GLOBAL_REALTIME_EVENT_HUB.unsubscribe(subscription)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/chat/sessions")
 def chat_sessions(request: Request, user_id: str = Query(default="")):
     def run():
         authorized_user_id = _require_request_user_if_present(request, user_id)
         service = _scoped_workspace_service(authorized_user_id)
+        if not service.current_session_id:
+            service.set_request_context(authorized_user_id, create_if_missing=True)
         return _decorate_response_artifacts(service, authorized_user_id, {
             "sessions": service.list_sessions(),
             "current_session_id": service.current_session_id,
@@ -1249,11 +1510,32 @@ def rename_chat_session(body: ChatSessionIn, request: Request):
 @app.post("/api/chat/sessions/delete")
 def delete_chat_session(body: ChatSessionIn, request: Request):
     def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
+        user_id = _require_request_user_if_present(request, body.user_id)
+        _compat_usage_store().record_effective_request(source="POST /api/chat/ask", actor_type=_compat_actor_type(request))
+        service = _scoped_workspace_service(user_id, body.session_id)
+        cancelled_download_jobs = commercial_service.cancel_session_jobs(user_id, body.session_id, reason="Session deleted.")
         current = service.delete_session(body.session_id)
+        hard_deleted_downloads = commercial_service.hard_delete_session_jobs(user_id, body.session_id)
         return {
             "current_session_id": current,
             "sessions": service.list_sessions(),
+            "messages": service.current_messages(),
+            "cancelled_download_jobs": cancelled_download_jobs,
+            "hard_deleted_downloads": hard_deleted_downloads,
+        }
+
+    return guard(run)
+
+
+@app.post("/api/chat/sessions/mode")
+def set_chat_interaction_mode(body: ChatSessionIn, request: Request):
+    def run():
+        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
+        mode = service.set_interaction_mode(body.interaction_mode or "chat_only", body.session_id or service.current_session_id)
+        return {
+            "interaction_mode": mode,
+            "sessions": service.list_sessions(),
+            "current_session_id": service.current_session_id,
             "messages": service.current_messages(),
         }
 
@@ -1306,7 +1588,21 @@ def select_chat_model(body: ChatModelIn, request: Request):
 def cancel_chat(body: ChatCancelIn, request: Request):
     def run():
         user_id = _require_request_user_if_present(request, body.user_id)
-        return cancel_chat_task(body.task_id, user_id=user_id, reason=body.reason)
+        result = cancel_chat_task(body.task_id, user_id=user_id, reason=body.reason)
+        cancelled_durable_jobs: list[str] = []
+        for service in list(_workspace_services.values()):
+            try:
+                store = DurableJobStore(service.manager.workdir / "durable_jobs.db")
+                jobs = store.list_jobs(user_id=user_id, statuses=["queued", "running"], job_type="validated_task_plan", limit=100)
+                for job in jobs:
+                    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
+                    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+                    if str(context.get("chat_task_id") or "") == body.task_id:
+                        store.cancel_job(str(job.get("job_id") or ""), user_id=user_id, reason=body.reason or "用户取消任务。")
+                        cancelled_durable_jobs.append(str(job.get("job_id") or ""))
+            except Exception:
+                continue
+        return {**result, "cancelled_durable_jobs": cancelled_durable_jobs}
 
     return guard(run)
 
@@ -1362,20 +1658,6 @@ def _extract_gscloud_dem_dataset_id_from_prompt(prompt: str) -> str:
     return "310"
 
 
-def _extract_output_name_from_prompt(prompt: str, region: str, resource_type: str) -> str:
-    text = prompt or ""
-    for pat in [r"输出(?:为|名为)\s*([A-Za-z0-9_\-\u4e00-\u9fff]+)", r"保存为\s*([A-Za-z0-9_\-\u4e00-\u9fff]+)", r"命名为\s*([A-Za-z0-9_\-\u4e00-\u9fff]+)"]:
-        m = re.search(pat, text)
-        if m:
-            return m.group(1)
-    if "成都" in region:
-        return f"chengdu_{resource_type}"
-    if "四川" in region:
-        return f"sichuan_{resource_type}"
-    if "闪电河" in region:
-        return f"shandianhe_{resource_type}"
-    safe_region = re.sub(r"[^A-Za-z0-9_\-\u4e00-\u9fff]+", "_", region or "region").strip("_")
-    return f"{safe_region}_{resource_type}"
 
 
 def _extract_year_from_prompt(prompt: str) -> str:
@@ -1398,238 +1680,20 @@ def _extract_max_scenes_from_prompt(prompt: str, default: int = 1) -> int:
     return default
 
 
-def _is_gscloud_dem_download_prompt(prompt: str) -> bool:
-    text = (prompt or "").lower()
-    if "dem" not in text and "高程" not in prompt:
-        return False
-    if "下载" not in prompt and "获取" not in prompt and "准备" not in prompt:
-        return False
-    return "地理空间数据云" in prompt or "平台账号" in prompt or "自己的账号" in prompt or "账号" in prompt
 
 
-def _is_gscloud_landsat_download_prompt(prompt: str) -> bool:
-    text = prompt or ""
-    product = match_gscloud_product(text)
-    if product is None or product.key != LANDSAT8_OLI_TIRS.key:
-        return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
-        return False
-    return "地理空间数据云" in text or "平台账号" in text or "自己的账号" in text or "账号" in text or "Landsat" in text or "landsat" in text
 
 
-def _is_gscloud_modnd1d_download_prompt(prompt: str) -> bool:
-    text = prompt or ""
-    product = match_gscloud_product(text)
-    if product is None or product.key != MODND1D_CHINA_500M_NDVI_DAILY.key:
-        return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
-        return False
-    upper = text.upper()
-    return "地理空间数据云" in text or "平台账号" in text or "自己的账号" in text or "账号" in text or "MODND1T" in upper or "MODND1D" in upper or "NDVI" in upper
 
 
-def _is_gscloud_modl1d_download_prompt(prompt: str) -> bool:
-    text = prompt or ""
-    product = match_gscloud_product(text)
-    if product is None or product.key != MODL1D_CHINA_1KM_LST_DAILY.key:
-        return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
-        return False
-    upper = text.upper()
-    return "地理空间数据云" in text or "平台账号" in text or "自己的账号" in text or "账号" in text or "MODLT1T" in upper or "MODL1T" in upper or "MODL1D" in upper or "LST" in upper or "地表温度" in text
 
 
-def _is_gscloud_modev1f_download_prompt(prompt: str) -> bool:
-    text = prompt or ""
-    product = match_gscloud_product(text)
-    if product is None or product.key != MODEV1F_CHINA_250M_EVI_5DAY.key:
-        return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
-        return False
-    upper = text.upper()
-    return (
-        "地理空间数据云" in text
-        or "平台账号" in text
-        or "自己的账号" in text
-        or "账号" in text
-        or "MODEV1T" in upper
-        or "MODEV1F" in upper
-        or "EVI" in upper
-        or "旬合成" in text
-    )
 
 
-def _submit_direct_gscloud_modev1f_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交 MODEV1T EVI 旬合成下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    if start_gscloud_modev1f_process is None:
-        return {
-            "reply": "MODEV1T 后台下载模块未正确加载，请检查 scene_jobs.py 与 gscloud_scene_worker.py。",
-            "model": "direct-router",
-            "reason": "modev1f_worker_unavailable",
-        }
-
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "modev1t_evi")
-    year = _extract_year_from_prompt(prompt)
-    max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type=MODEV1F_CHINA_250M_EVI_5DAY.resource_type,
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    scene_job = None
-    if state_path and Path(state_path).exists():
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_modev1t_scene_worker")
-        scene_job = start_gscloud_modev1f_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            year=year,
-            max_scenes=max_scenes,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MODEV1T 中国 250M EVI 旬合成产品下载任务，并启动地理空间数据云自动检索下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MODEV1F_CHINA_250M_EVI_5DAY.name}\n"
-            f"区域：{region}\n"
-            f"年份：{year or '未指定'}\n"
-            f"数据筛选：强制只下载“数据=有”的记录\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台场景任务：{(scene_job or {}).get('scene_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MODEV1T EVI 旬合成下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MODEV1F_CHINA_250M_EVI_5DAY.name}\n"
-            f"区域：{region}\n"
-            f"数据筛选：后续启动时会强制只下载“数据=有”的记录\n"
-            f"当前状态：waiting_login\n\n"
-            f"登录态配置完成后，请重新提交 MODEV1T EVI 旬合成下载任务。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_modev1f_download", "job": job, "scene_job": scene_job}
 
 
-def _is_gscloud_mod021km_download_prompt(prompt: str) -> bool:
-    text = prompt or ""
-    product = match_gscloud_product(text)
-    if product is None or product.key != MOD021KM_1KM_SURFACE_REFLECTANCE.key:
-        return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
-        return False
-    upper = text.upper()
-    return (
-        "地理空间数据云" in text
-        or "平台账号" in text
-        or "自己的账号" in text
-        or "账号" in text
-        or "MOD021KM" in upper
-        or "MODISL1B" in upper
-        or "反射率" in text
-    )
 
 
-def _submit_direct_gscloud_mod021km_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交 MOD021KM 地表反射率下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    if start_gscloud_mod021km_process is None:
-        return {
-            "reply": "MOD021KM 后台下载模块未正确加载，请检查 scene_jobs.py 与 gscloud_scene_worker.py。",
-            "model": "direct-router",
-            "reason": "mod021km_worker_unavailable",
-        }
-
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "mod021km_reflectance")
-    year = _extract_year_from_prompt(prompt)
-    max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type=MOD021KM_1KM_SURFACE_REFLECTANCE.resource_type,
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    scene_job = None
-    if state_path and Path(state_path).exists():
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_mod021km_scene_worker")
-        scene_job = start_gscloud_mod021km_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            year=year,
-            max_scenes=max_scenes,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MOD021KM 1KM 地表反射率下载任务，并启动地理空间数据云自动检索下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MOD021KM_1KM_SURFACE_REFLECTANCE.name}\n"
-            f"区域：{region}\n"
-            f"年份：{year or '未指定'}\n"
-            f"数据筛选：强制只下载“数据=有”的记录\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台场景任务：{(scene_job or {}).get('scene_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MOD021KM 地表反射率下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MOD021KM_1KM_SURFACE_REFLECTANCE.name}\n"
-            f"区域：{region}\n"
-            f"数据筛选：后续启动时会强制只下载“数据=有”的记录\n"
-            f"当前状态：waiting_login\n\n"
-            f"登录态配置完成后，请重新提交 MOD021KM 地表反射率下载任务。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_mod021km_download", "job": job, "scene_job": scene_job}
 
 
 def _sentinel2_processing_level_from_prompt(prompt: str) -> str:
@@ -1641,433 +1705,18 @@ def _sentinel2_processing_level_from_prompt(prompt: str) -> str:
     return ""
 
 
-def _is_gscloud_sentinel2_download_prompt(prompt: str) -> bool:
-    text = prompt or ""
-    product = match_gscloud_product(text)
-    if product is None or product.key != SENTINEL2_MSI.key:
-        return False
-    if not any(word in text for word in ("下载", "获取", "准备", "检索")):
-        return False
-    upper = text.upper()
-    return (
-        "地理空间数据云" in text
-        or "平台账号" in text
-        or "自己的账号" in text
-        or "账号" in text
-        or "SENTINEL" in upper
-        or "S2" in upper
-        or "哨兵" in text
-    )
 
 
-def _submit_direct_gscloud_sentinel2_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交 Sentinel-2 下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    if start_gscloud_sentinel2_process is None:
-        return {
-            "reply": "Sentinel-2 后台下载模块未正确加载，请检查 scene_jobs.py 与 gscloud_scene_worker.py。",
-            "model": "direct-router",
-            "reason": "sentinel2_worker_unavailable",
-        }
-
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "sentinel2_msi")
-    year = _extract_year_from_prompt(prompt)
-    max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
-    processing_level = _sentinel2_processing_level_from_prompt(prompt)
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type=SENTINEL2_MSI.resource_type,
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    scene_job = None
-    if state_path and Path(state_path).exists():
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_sentinel2_scene_worker")
-        scene_job = start_gscloud_sentinel2_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            year=year,
-            processing_level=processing_level,
-            max_scenes=max_scenes,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 Sentinel-2 下载任务，并启动地理空间数据云自动检索下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{SENTINEL2_MSI.name}\n"
-            f"区域：{region}\n"
-            f"年份：{year or '未指定'}\n"
-            f"处理级别：{processing_level or '未限定'}\n"
-            f"数据筛选：强制只下载“数据=有”的记录\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台场景任务：{(scene_job or {}).get('scene_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 Sentinel-2 下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{SENTINEL2_MSI.name}\n"
-            f"区域：{region}\n"
-            f"数据筛选：后续启动时会强制只下载“数据=有”的记录\n"
-            f"当前状态：waiting_login\n\n"
-            f"登录态配置完成后，请重新提交 Sentinel-2 下载任务。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_sentinel2_download", "job": job, "scene_job": scene_job}
 
 
-def _submit_direct_gscloud_modl1d_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交 MODLT1T 地表温度旬合成下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    if start_gscloud_modl1d_process is None:
-        return {
-            "reply": "MODLT1T 后台下载模块未正确加载，请检查 scene_jobs.py 与 gscloud_scene_worker.py。",
-            "model": "direct-router",
-            "reason": "modl1d_worker_unavailable",
-        }
-
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "modl1t_lst")
-    year = _extract_year_from_prompt(prompt)
-    max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
-    include_quality = "qc" in prompt.lower() or "质量" in prompt or "qcd" in prompt.lower() or "qcn" in prompt.lower()
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type=MODL1D_CHINA_1KM_LST_DAILY.resource_type,
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    scene_job = None
-    if state_path and Path(state_path).exists():
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_modl1t_scene_worker")
-        scene_job = start_gscloud_modl1d_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            year=year,
-            include_quality=include_quality,
-            max_scenes=max_scenes,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MODLT1T 中国 1KM 地表温度旬合成产品下载任务，并启动地理空间数据云自动检索下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MODL1D_CHINA_1KM_LST_DAILY.name}\n"
-            f"区域：{region}\n"
-            f"年份：{year or '未指定'}\n"
-            f"数据筛选：强制只下载“数据=有”的记录\n"
-            f"产品筛选：{'LTD/LTN + QCD/QCN' if include_quality else 'LTD/LTN 主产品，默认跳过质量控制'}\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台场景任务：{(scene_job or {}).get('scene_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MODLT1T 地表温度旬合成下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MODL1D_CHINA_1KM_LST_DAILY.name}\n"
-            f"区域：{region}\n"
-            f"数据筛选：后续启动时会强制只下载“数据=有”的记录\n"
-            f"当前状态：waiting_login\n\n"
-            f"登录态配置完成后，请重新提交 MODLT1T 地表温度旬合成下载任务。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_modl1d_download", "job": job, "scene_job": scene_job}
 
 
-def _submit_direct_gscloud_modnd1d_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交 MODND1T NDVI 旬合成下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    if start_gscloud_modnd1d_process is None:
-        return {
-            "reply": "MODND1T 后台下载模块未正确加载，请检查 scene_jobs.py 与 gscloud_scene_worker.py。",
-            "model": "direct-router",
-            "reason": "modnd1d_worker_unavailable",
-        }
-
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "modnd1t_ndvi")
-    year = _extract_year_from_prompt(prompt)
-    max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
-    include_qc = "qc" in prompt.lower() or "质量" in prompt
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type=MODND1D_CHINA_500M_NDVI_DAILY.resource_type,
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    scene_job = None
-    if state_path and Path(state_path).exists():
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_modnd1t_scene_worker")
-        scene_job = start_gscloud_modnd1d_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            year=year,
-            include_qc=include_qc,
-            max_scenes=max_scenes,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MODND1T 中国 500M NDVI 旬合成产品下载任务，并启动地理空间数据云自动检索下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MODND1D_CHINA_500M_NDVI_DAILY.name}\n"
-            f"区域：{region}\n"
-            f"年份：{year or '未指定'}\n"
-            f"数据筛选：强制只下载“数据=有”的记录\n"
-            f"产品筛选：{'NDVI/MAX + QC' if include_qc else '仅 NDVI/MAX 主产品，默认跳过 QC'}\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台场景任务：{(scene_job or {}).get('scene_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 MODND1T NDVI 旬合成下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{MODND1D_CHINA_500M_NDVI_DAILY.name}\n"
-            f"区域：{region}\n"
-            f"数据筛选：后续启动时会强制只下载“数据=有”的记录\n"
-            f"当前状态：waiting_login\n\n"
-            f"登录态配置完成后，请重新提交 MODND1T NDVI 旬合成下载任务。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_modnd1d_download", "job": job, "scene_job": scene_job}
 
 
-def _submit_direct_gscloud_landsat8_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交 Landsat 8 下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    if start_gscloud_landsat8_process is None:
-        return {
-            "reply": "Landsat 8 后台下载模块未正确加载，请检查 core/commercial/scene_jobs.py 与 worker 配置。",
-            "model": "direct-router",
-            "reason": "landsat_worker_unavailable",
-        }
-
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "landsat8")
-    year = _extract_year_from_prompt(prompt)
-    cloud_max = _extract_cloud_max_from_prompt(prompt, default=30.0)
-    max_scenes = _extract_max_scenes_from_prompt(prompt, default=1)
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type=LANDSAT8_OLI_TIRS.resource_type,
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    scene_job = None
-    if state_path and Path(state_path).exists():
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_landsat8_scene_worker")
-        scene_job = start_gscloud_landsat8_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            year=year,
-            cloud_max=cloud_max,
-            max_scenes=max_scenes,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 Landsat 8 OLI_TIRS 下载任务，并启动地理空间数据云自动检索下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{LANDSAT8_OLI_TIRS.name}\n"
-            f"区域：{region}\n"
-            f"年份：{year or '未指定'}\n"
-            f"云量阈值：≤ {cloud_max}%\n"
-            f"数据筛选：强制只下载“数据=有”的记录\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台场景任务：{(scene_job or {}).get('scene_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-        reply = (
-            f"已创建 Landsat 8 OLI_TIRS 下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"产品：{LANDSAT8_OLI_TIRS.name}\n"
-            f"区域：{region}\n"
-            f"云量阈值：≤ {cloud_max}%\n"
-            f"数据筛选：后续启动时会强制只下载“数据=有”的记录\n"
-            f"当前状态：waiting_login\n\n"
-            f"登录态配置完成后，请重新提交 Landsat 8 下载任务，或后续扩展为按任务编号启动。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_landsat8_download", "job": job, "scene_job": scene_job}
 
 
-def _submit_direct_gscloud_dem_from_chat(user_id: str, prompt: str, session_id: str = "") -> dict:
-    if not str(user_id or "").strip():
-        return {
-            "reply": "你还没有登录账号。请先登录或注册 BASIC 账号，再提交地理空间数据云 DEM 下载任务。",
-            "model": "direct-router",
-            "reason": "download_requires_login",
-        }
-    region = _extract_region_from_prompt(prompt)
-    account_mode = _resolve_gscloud_prompt_account_mode(user_id, prompt)
-    output_name = _extract_output_name_from_prompt(prompt, region, "dem")
-    dataset_id = _extract_gscloud_dem_dataset_id_from_prompt(prompt)
-    job = commercial_service.submit_job(
-        user_id=user_id,
-        source_key="gscloud",
-        resource_type="dem",
-        region=region,
-        account_mode=account_mode,
-        request_text=prompt,
-        output_name=output_name,
-        session_id=session_id,
-    )
-
-    # Do not let the LLM invent a job id. The real job_id below is the only valid one.
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job["job_id"])
-    except Exception:
-        state_path = ""
-
-    auto_started = False
-    auto_tile_job = None
-    if state_path and Path(state_path).exists() and start_gscloud_tile_process is not None:
-        commercial_service._update_job(job["job_id"], status="running", progress=5, stage="starting_auto_tile_worker")
-        auto_tile_job = start_gscloud_tile_process(
-            workdir=base_settings.workdir,
-            job_id=job["job_id"],
-            region=region,
-            region_dataset="",
-            dataset_id=dataset_id,
-            max_tiles=0,
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        job = commercial_service.get_job(job["job_id"])
-        auto_started = True
-    else:
-        commercial_service._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        job = commercial_service.get_job(job["job_id"])
-
-    if auto_started:
-        reply = (
-            f"已创建真实 DEM 下载任务，并启动地理空间数据云自动分幅下载。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"区域：{region}\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"后台分幅任务：{(auto_tile_job or {}).get('tile_job_id', '')}\n\n"
-            f"你可以继续输入：查看商业下载任务 {job['job_id']} 的状态。"
-        )
-    else:
-        if account_mode == "own":
-            next_step = "请先为你自己的地理空间数据云账号保存 Cookie/storage state，或在前台后续的“我的数据源账号”功能中保存账号凭据。"
-        else:
-            next_step = "请先在服务器后台 .env 中配置平台账号 storage_state，或运行平台账号登录态保存脚本。"
-        reply = (
-            f"已创建真实 DEM 下载任务，但尚未启动下载，因为没有找到可用的地理空间数据云登录态。\n\n"
-            f"任务编号：{job['job_id']}\n"
-            f"区域：{region}\n"
-            f"账号模式：{account_mode}\n"
-            f"输出名：{output_name}\n"
-            f"当前状态：waiting_login\n\n"
-            f"下一步：{next_step}\n"
-            f"登录态配置完成后，再输入：启动这个任务的地理空间数据云 DEM 自动分幅下载，任务编号 {job['job_id']}。"
-        )
-    return {"reply": reply, "model": "direct-router", "reason": "deterministic_gscloud_dem_download", "job": job}
 
 
-def _submit_gscloud_intent_route_from_chat(user_id: str, prompt: str, route: GSCloudIntentRoute, session_id: str = "") -> dict:
-    direct_route = _gscloud_direct_download_route_by_product_key(route.product_key)
-    if direct_route and callable(direct_route.get("submit")):
-        return direct_route["submit"](user_id, prompt, session_id=session_id)
-    return {
-        "reply": "我识别到你可能要下载地理空间数据云数据，但还不能确定具体产品。请补充产品名，例如 Sentinel-2、Landsat 8、NDVI、EVI、LST、MOD021KM 或 DEM。",
-        "model": "direct-router",
-        "reason": "gscloud_intent_unknown_product",
-    }
 
 
 def _maybe_start_gscloud_auto_download(job: dict, region: str = "") -> dict:
@@ -2359,145 +2008,18 @@ def _format_download_job_log_text(job: dict, scene_jobs: list[dict], tile_jobs: 
 
 def _download_requires_login_result(prompt: str) -> dict:
     return _api_download_requires_login_result(prompt)
-    request = str(prompt or "").strip()
-    return {
-        "reply": (
-            "这个请求涉及平台数据下载或下载任务状态，需先登录账号后才能继续。"
-            "我可以先保留你的下载意图；登录后请重新发送这句话，或在右侧“数据下载”区域选择产品、区域并提交。"
-            f"\n\n当前识别到的请求：{request or '下载数据'}"
-        ),
-        "model": "direct-router",
-        "reason": "download_requires_login",
-    }
 
 
-def _strip_gscloud_confirmation_token(prompt: str) -> str:
-    return re.sub(r"\bconfirmed_action_id\s*=\s*[0-9a-fA-F]{16}\b", " ", str(prompt or "")).strip()
 
 
-def _gscloud_chat_download_confirmation_id(prompt: str, product_key: str) -> str:
-    payload = {
-        "action": "submit_gscloud_chat_download",
-        "product_key": str(product_key or "gscloud").strip(),
-        "prompt": " ".join(_strip_gscloud_confirmation_token(prompt).split()),
-    }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
-def _gscloud_chat_download_confirmation_result(
-    prompt: str,
-    product_key: str,
-    intent_route: GSCloudIntentRoute | None = None,
-) -> dict[str, Any] | None:
-    token = _gscloud_chat_download_confirmation_id(prompt, product_key)
-    if token in str(prompt or ""):
-        return None
-    clean_prompt = _strip_gscloud_confirmation_token(prompt)
-    route_payload = intent_route.__dict__ if intent_route is not None else {"product_key": product_key}
-    action_required = {
-        "type": "confirmation_required",
-        "action": "submit_gscloud_chat_download",
-        "provider": "gscloud",
-        "confirmed_action_id": token,
-        "confirmation_prompt": clean_prompt,
-        "product_key": str(product_key or "gscloud").strip(),
-        "message": "Confirm before starting the GSCloud download job.",
-    }
-    return {
-        "reply": (
-            "This request would start a GSCloud download job. To avoid keyword-triggered downloads, "
-            f"resend the request with confirmed_action_id={token} only after you confirm the product, "
-            "region, account mode, cost, and overwrite risk."
-        ),
-        "model": "direct-router",
-        "reason": "commercial_download_requires_confirmation",
-        "requires_confirmation": True,
-        "confirmed_action_id": token,
-        "download_guard": "llm_first_confirmation",
-        "action_required": action_required,
-        "intent_route": route_payload,
-    }
 
 
-GSCLOUD_CONFIRMATION_META_KEYS = (
-    "model",
-    "reason",
-    "requires_confirmation",
-    "confirmed_action_id",
-    "download_guard",
-    "intent_route",
-    "action_required",
-)
 
 
-def _build_gscloud_confirmation_chat_response(
-    service: GISWorkspaceService,
-    *,
-    user_prompt: str,
-    confirmation: dict[str, Any],
-) -> dict[str, Any]:
-    return build_chat_response(
-        service,
-        user_prompt=user_prompt,
-        result=confirmation,
-        meta_keys=GSCLOUD_CONFIRMATION_META_KEYS,
-    )
 
 
-GSCLOUD_DIRECT_DOWNLOAD_ROUTES: tuple[GSCloudDirectDownloadRoute, ...] = (
-    GSCloudDirectDownloadRoute(
-        product_key=MODL1D_CHINA_1KM_LST_DAILY.key,
-        matches=_is_gscloud_modl1d_download_prompt,
-        submit=_submit_direct_gscloud_modl1d_from_chat,
-        result_meta_keys=("model", "reason", "job", "scene_job"),
-    ),
-    GSCloudDirectDownloadRoute(
-        product_key=MODND1D_CHINA_500M_NDVI_DAILY.key,
-        matches=_is_gscloud_modnd1d_download_prompt,
-        submit=_submit_direct_gscloud_modnd1d_from_chat,
-        result_meta_keys=("model", "reason", "job", "scene_job"),
-    ),
-    GSCloudDirectDownloadRoute(
-        product_key=MODEV1F_CHINA_250M_EVI_5DAY.key,
-        matches=_is_gscloud_modev1f_download_prompt,
-        submit=_submit_direct_gscloud_modev1f_from_chat,
-        result_meta_keys=("model", "reason", "job", "scene_job"),
-    ),
-    GSCloudDirectDownloadRoute(
-        product_key=MOD021KM_1KM_SURFACE_REFLECTANCE.key,
-        matches=_is_gscloud_mod021km_download_prompt,
-        submit=_submit_direct_gscloud_mod021km_from_chat,
-        result_meta_keys=("model", "reason", "job", "scene_job"),
-    ),
-    GSCloudDirectDownloadRoute(
-        product_key=SENTINEL2_MSI.key,
-        matches=_is_gscloud_sentinel2_download_prompt,
-        submit=_submit_direct_gscloud_sentinel2_from_chat,
-        result_meta_keys=("model", "reason", "job", "scene_job"),
-    ),
-    GSCloudDirectDownloadRoute(
-        product_key=LANDSAT8_OLI_TIRS.key,
-        matches=_is_gscloud_landsat_download_prompt,
-        submit=_submit_direct_gscloud_landsat8_from_chat,
-        result_meta_keys=("model", "reason", "job", "scene_job"),
-    ),
-    GSCloudDirectDownloadRoute(
-        product_key="gscloud_dem",
-        matches=_is_gscloud_dem_download_prompt,
-        submit=_submit_direct_gscloud_dem_from_chat,
-        result_meta_keys=("model", "reason", "job"),
-    ),
-)
-validate_unique_product_keys(GSCLOUD_DIRECT_DOWNLOAD_ROUTES)
-
-
-def _match_gscloud_direct_download_route(prompt: str) -> dict[str, Any] | None:
-    return match_direct_download_route(GSCLOUD_DIRECT_DOWNLOAD_ROUTES, prompt)
-
-
-def _gscloud_direct_download_route_by_product_key(product_key: str) -> dict[str, Any] | None:
-    return route_by_product_key(GSCLOUD_DIRECT_DOWNLOAD_ROUTES, product_key)
 
 
 @app.post("/api/chat/ask")
@@ -2540,7 +2062,158 @@ def ask(body: AskIn, request: Request):
                     ),
                 )
             )
-        return finalize(attach_chat_state(service, service.ask(body.prompt, visible_prompt=body.prompt, frontend_context=body.frontend_context)))
+        return finalize(
+            attach_chat_state(
+                service,
+                service.ask(
+                    body.prompt,
+                    visible_prompt=body.prompt,
+                    frontend_context=body.frontend_context,
+                    extra_assistant_meta={"active_task_id": task_id} if task_id else None,
+                ),
+            )
+        )
+
+    return guard(run)
+
+
+@app.post("/api/chat/stream")
+def stream_chat(body: AskIn, request: Request):
+    authorized_user_id = _require_request_user_if_present(request, body.user_id)
+    service = _scoped_workspace_service(authorized_user_id, body.session_id)
+    session_id = body.session_id or service.current_session_id
+    task_id = str(body.task_id or "").strip() or f"chat_{uuid4().hex[:12]}"
+    completed = Event()
+    outcome: dict[str, Any] = {}
+    emitted_deltas: list[str] = []
+
+    def on_delta(delta: str) -> None:
+        emitted_deltas.append(delta)
+        GLOBAL_REALTIME_EVENT_HUB.publish_model_token(
+            user_id=authorized_user_id,
+            session_id=session_id,
+            task_id=task_id,
+            delta=delta,
+        )
+
+    def run_chat() -> None:
+        start_chat_task(task_id, user_id=authorized_user_id, session_id=session_id)
+        event_store = _task_event_store_for_service(service)
+        event_store.append(
+            user_id=authorized_user_id,
+            session_id=session_id,
+            task_id=task_id,
+            kind="task_status",
+            status="planning",
+            message="正在理解请求并准备回答或任务计划。",
+        )
+        try:
+            service.apply_frontend_context(body.frontend_context)
+            result = attach_chat_state(
+                service,
+                service.ask(
+                    body.prompt,
+                    visible_prompt=body.prompt,
+                    frontend_context=body.frontend_context,
+                    extra_assistant_meta={"active_task_id": task_id},
+                    stream_callback=on_delta,
+                ),
+            )
+            result = _attach_result_panel(service, authorized_user_id, result)
+            outcome["result"] = result
+            presentation = result.get("presentation_result") if isinstance(result.get("presentation_result"), dict) else {}
+            task_update = _stream_task_update(result)
+            status = str(
+                presentation.get("status")
+                or task_update.get("status")
+                or ("succeeded" if str(result.get("mode") or "") == "answer_only" else "running")
+            )
+            if status not in {"planning", "awaiting_confirmation", "queued", "running", "waiting_login", "paused", "succeeded", "failed", "cancelled"}:
+                status = "running"
+            GLOBAL_REALTIME_EVENT_HUB.publish(
+                user_id=authorized_user_id,
+                session_id=session_id,
+                kind="model_complete",
+                task_id=task_id,
+                status=status,
+                message="回答已生成。" if str(result.get("mode") or "") == "answer_only" else str(result.get("reply") or "任务状态已更新。")[:1200],
+                delta="" if emitted_deltas else str(result.get("reply") or "")[:2000],
+                management_view=task_update.get("management_view") if isinstance(task_update.get("management_view"), dict) else {},
+                presentation_result=presentation,
+                task_update=task_update,
+            )
+        except Exception:
+            GLOBAL_REALTIME_EVENT_HUB.publish(
+                user_id=authorized_user_id,
+                session_id=session_id,
+                kind="error",
+                task_id=task_id,
+                status="failed",
+                message="请求未能完成，未执行未验证的工具。请稍后重试。",
+            )
+        finally:
+            finish_chat_task(task_id)
+            completed.set()
+
+    def event_stream():
+        channel = GLOBAL_REALTIME_EVENT_HUB.subscribe(user_id=authorized_user_id, session_id=session_id)
+        worker = Thread(target=run_chat, name=f"chat-stream-{task_id}", daemon=True)
+        worker.start()
+        try:
+            while not completed.is_set() or not channel.empty():
+                try:
+                    event = channel.get(timeout=0.75)
+                    if str(event.get("task_id") or "") == task_id:
+                        yield _sse_event(event)
+                except Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            GLOBAL_REALTIME_EVENT_HUB.unsubscribe(channel)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/chat/confirm")
+def confirm_chat_action(body: ChatConfirmIn, request: Request):
+    def run():
+        user_id = _require_request_user_if_present(request, body.user_id)
+        service = _scoped_workspace_service(user_id, body.session_id)
+        task_id = str(body.task_id or "").strip()
+        if task_id:
+            start_chat_task(task_id, user_id=user_id, session_id=body.session_id)
+
+        def finalize(response: dict) -> dict:
+            if task_id:
+                finish_chat_task(task_id)
+            return _attach_result_panel(service, user_id, response)
+
+        service.apply_frontend_context(body.frontend_context)
+        token = str(body.confirmation_id or "").strip()
+        prompt = f"{str(body.confirmation_prompt or '确认执行').strip()} confirmed_action_id={token}".strip()
+        return finalize(
+            attach_chat_state(
+                service,
+                service.ask(
+                    prompt,
+                    frontend_context=body.frontend_context,
+                    record_user_message=False,
+                    extra_assistant_meta={
+                        "active_task_id": task_id,
+                        "confirmed_pending_confirmation_id": token,
+                        "confirmation_submission": "structured",
+                    }
+                    if task_id
+                    else {
+                        "confirmed_pending_confirmation_id": token,
+                        "confirmation_submission": "structured",
+                    },
+                ),
+            )
+        )
 
     return guard(run)
 
@@ -2685,7 +2358,7 @@ async def upload_capability_knowledge(
     applicable_scope: str = Form(""),
     reliability: str = Form("medium"),
     version: str = Form("v1"),
-    status: str = Form("enabled"),
+    status: str = Form("draft"),
 ):
     try:
         _require_capability_admin(request)
@@ -2738,26 +2411,292 @@ def upsert_capability_asset(body: dict[str, Any], request: Request):
 
 
 class CapabilityStatusIn(BaseModel):
-    status: str = "enabled"
+    status: str = "pending_review"
+    actor: str = ""
+    summary: str = ""
 
 
 @app.post("/api/admin/capabilities/{resource_type}/{item_id}/status")
 def update_capability_status(resource_type: Literal["knowledge", "tool_cards", "products", "assets"], item_id: str, body: CapabilityStatusIn, request: Request):
     def run():
         _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().set_status(resource_type, item_id, body.status), "registry_version": CAPABILITY_CONFIG_VERSION}
+        return {"ok": True, "item": _capability_store().set_status(resource_type, item_id, body.status, actor=body.actor, summary=body.summary), "registry_version": CAPABILITY_CONFIG_VERSION}
     return guard(run)
 
 
 class CapabilityRollbackIn(BaseModel):
     version: str
+    actor: str = ""
+    summary: str = ""
 
 
 @app.post("/api/admin/capabilities/{resource_type}/{item_id}/rollback")
 def rollback_capability_resource(resource_type: Literal["knowledge", "tool_cards", "products", "assets"], item_id: str, body: CapabilityRollbackIn, request: Request):
     def run():
         _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().rollback(resource_type, item_id, body.version), "registry_version": CAPABILITY_CONFIG_VERSION}
+        return {"ok": True, "item": _capability_store().rollback(resource_type, item_id, body.version, actor=body.actor, summary=body.summary), "registry_version": CAPABILITY_CONFIG_VERSION}
+    return guard(run)
+
+
+@app.get("/api/admin/capabilities/audit/events")
+def list_capability_audit_events(request: Request, limit: int = 100):
+    def run():
+        _require_capability_admin(request)
+        return {
+            "schema_version": "capability-audit-view/v1",
+            "events": _capability_store().list_audit_events(limit=limit),
+        }
+    return guard(run)
+
+
+@app.get("/api/admin/dataset-availability")
+def list_dataset_availability_profiles(request: Request, include_inactive: bool = False):
+    def run():
+        _require_capability_admin(request)
+        return {
+            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
+            "items": _dataset_availability_store().list_profiles(include_inactive=include_inactive),
+        }
+    return guard(run)
+
+
+@app.post("/api/admin/dataset-availability")
+def upsert_dataset_availability_profile(body: dict[str, Any], request: Request):
+    def run():
+        _require_capability_admin(request)
+        return {
+            "ok": True,
+            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
+            "item": _dataset_availability_store().upsert_profile(body),
+        }
+    return guard(run)
+
+
+@app.post("/api/admin/dataset-availability/{product_id}/status")
+def update_dataset_availability_status(product_id: str, body: CapabilityStatusIn, request: Request):
+    def run():
+        _require_capability_admin(request)
+        return {
+            "ok": True,
+            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
+            "item": _dataset_availability_store().set_status(product_id, body.status, actor=body.actor, summary=body.summary),
+        }
+    return guard(run)
+
+
+class DatasetAvailabilityScanIn(BaseModel):
+    scan_method: str = "catalog_metadata"
+    actor: str = ""
+    summary: str = ""
+
+
+@app.post("/api/admin/dataset-availability/{product_id}/scan")
+def scan_dataset_availability_profile(product_id: str, body: DatasetAvailabilityScanIn, request: Request):
+    def run():
+        _require_capability_admin(request)
+        draft = scan_dataset_availability(product_id, scan_method=body.scan_method, actor=body.actor, summary=body.summary)
+        return {
+            "ok": True,
+            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
+            "item": _dataset_availability_store().upsert_profile(draft),
+        }
+    return guard(run)
+
+
+@app.get("/api/admin/compat-usage/report")
+def compatibility_usage_report(request: Request):
+    def run():
+        _require_capability_admin(request)
+        return _compat_usage_store().report(exclude_actor_types={"automated_test"})
+    return guard(run)
+
+
+@app.get("/api/admin/trial-monitoring/report")
+def trial_monitoring_report(request: Request):
+    def run():
+        _require_capability_admin(request)
+        return _trial_monitoring_store().report(exclude_actor_types={"automated_test"})
+    return guard(run)
+
+
+class AdminSystemResetIn(BaseModel):
+    mode: Literal["keep_accounts", "full_reset"]
+    confirm_text: str = ""
+
+
+@app.post("/api/admin/system-reset")
+def admin_system_reset(body: AdminSystemResetIn, request: Request):
+    def run():
+        global commercial_service
+        _require_capability_admin(request)
+        _workspace_services.clear()
+        result = reset_system_workspace(
+            workdir=base_settings.workdir,
+            commercial_service=commercial_service,
+            mode=body.mode,
+            confirm_text=body.confirm_text,
+        )
+        commercial_service = result.pop("commercial_service")
+        base_settings.ensure_dirs()
+        return result
+    return guard(run)
+
+
+class AdminStorageCleanupIn(BaseModel):
+    candidate_ids: list[str] = []
+    confirm_text: str = ""
+
+
+class AdminPlatformAccountIn(BaseModel):
+    source_key: str = "gscloud"
+    username: str = ""
+    password: str = ""
+    label: str = ""
+    daily_limit: int = 50
+    monthly_limit: int = 1000
+
+
+class AdminPlatformLoginIn(BaseModel):
+    timeout_seconds: int = 300
+    headless: bool = False
+
+
+class AdminPlatformStatusIn(BaseModel):
+    status: Literal["active", "disabled"] = "disabled"
+
+
+def _admin_platform_account_with_health(account: dict[str, Any]) -> dict[str, Any]:
+    account_id = str((account or {}).get("account_id") or "")
+    private: dict[str, Any] = {}
+    try:
+        private = commercial_service.get_platform_account_private(account_id)
+    except Exception:
+        private = {}
+    public = commercial_service._platform_public(private) if private else dict(account or {})
+    health = inspect_storage_state(str(private.get("storage_state_path") or ""))
+    public["login_health"] = health
+    public["has_storage_state"] = bool(private.get("storage_state_path"))
+    public.pop("storage_state_path", None)
+    return public
+
+
+@app.get("/api/admin/platform-accounts")
+def list_admin_platform_accounts(request: Request, source_key: str = Query(default="gscloud"), include_inactive: bool = Query(default=True)):
+    def run():
+        _require_capability_admin(request)
+        accounts = commercial_service.list_platform_accounts(source_key=source_key, include_inactive=include_inactive)
+        return {
+            "schema_version": "platform-account-management/v1",
+            "accounts": [_admin_platform_account_with_health(item) for item in accounts],
+        }
+    return guard(run)
+
+
+@app.post("/api/admin/platform-accounts")
+def upsert_admin_platform_account(body: AdminPlatformAccountIn, request: Request):
+    def run():
+        _require_capability_admin(request)
+        account = commercial_service.upsert_platform_account(
+            source_key=body.source_key,
+            username=body.username,
+            password=body.password,
+            label=body.label,
+            daily_limit=body.daily_limit,
+            monthly_limit=body.monthly_limit,
+        )
+        commercial_service.write_audit_event(
+            action="admin.platform_account.upsert",
+            status="ok",
+            resource_type="platform_account",
+            resource_id=str(account.get("account_id") or ""),
+            detail={"source_key": body.source_key, "label": body.label or body.source_key},
+        )
+        return {"ok": True, "account": _admin_platform_account_with_health(account)}
+    return guard(run)
+
+
+@app.post("/api/admin/platform-accounts/{account_id}/login")
+def start_admin_platform_login(account_id: str, body: AdminPlatformLoginIn, request: Request):
+    def run():
+        _require_capability_admin(request)
+        account = commercial_service.get_platform_account_private(account_id)
+        source_key = str(account.get("source_key") or "gscloud").strip().lower()
+        if source_key != "gscloud":
+            raise ValueError("当前登录窗口只支持 GSCloud 平台账号。")
+        state_path = gscloud_platform_state_path(base_settings.workdir, account_id, source_key)
+        login_job = start_gscloud_login_process(
+            workdir=base_settings.workdir,
+            subject_type="platform_account",
+            subject_id=account_id,
+            state_path=state_path,
+            timeout_seconds=body.timeout_seconds,
+            headless=body.headless,
+        )
+        commercial_service.write_audit_event(
+            action="admin.platform_account.login_started",
+            status="ok",
+            resource_type="platform_account",
+            resource_id=account_id,
+            detail={"source_key": source_key, "login_job_id": login_job.get("login_job_id")},
+        )
+        safe_job = {
+            "login_job_id": login_job.get("login_job_id"),
+            "state": login_job.get("state"),
+            "message": login_job.get("message"),
+            "timeout_seconds": login_job.get("timeout_seconds"),
+            "created_at": login_job.get("created_at"),
+            "updated_at": login_job.get("updated_at"),
+        }
+        return {"ok": True, "login_job": safe_job, "account": _admin_platform_account_with_health(commercial_service.get_platform_account_private(account_id))}
+    return guard(run)
+
+
+@app.get("/api/admin/platform-accounts/{account_id}/health")
+def check_admin_platform_login_health(account_id: str, request: Request):
+    def run():
+        _require_capability_admin(request)
+        account = commercial_service.get_platform_account_private(account_id)
+        health = inspect_storage_state(str(account.get("storage_state_path") or ""))
+        commercial_service.write_audit_event(
+            action="admin.platform_account.login_health",
+            status="ok" if health.get("ok") else "warning",
+            resource_type="platform_account",
+            resource_id=account_id,
+            detail={"source_key": account.get("source_key"), "ok": bool(health.get("ok")), "reason": health.get("reason")},
+        )
+        return {"ok": True, "account_id": account_id, "login_health": health}
+    return guard(run)
+
+
+@app.post("/api/admin/platform-accounts/{account_id}/status")
+def update_admin_platform_account_status(account_id: str, body: AdminPlatformStatusIn, request: Request):
+    def run():
+        _require_capability_admin(request)
+        account = commercial_service.set_platform_account_status(account_id, body.status)
+        commercial_service.write_audit_event(
+            action="admin.platform_account.status",
+            status="ok",
+            resource_type="platform_account",
+            resource_id=account_id,
+            detail={"status": body.status, "source_key": account.get("source_key")},
+        )
+        return {"ok": True, "account": _admin_platform_account_with_health(account)}
+    return guard(run)
+
+
+@app.get("/api/admin/storage-cleanup/scan")
+def admin_storage_cleanup_scan(request: Request):
+    def run():
+        _require_capability_admin(request)
+        return scan_storage_cleanup_candidates(base_settings.workdir)
+    return guard(run)
+
+
+@app.post("/api/admin/storage-cleanup/delete")
+def admin_storage_cleanup_delete(body: AdminStorageCleanupIn, request: Request):
+    def run():
+        _require_capability_admin(request)
+        return cleanup_storage_candidates(base_settings.workdir, candidate_ids=body.candidate_ids, confirm_text=body.confirm_text)
     return guard(run)
 
 
@@ -2883,7 +2822,9 @@ def artifact_download(artifact_id: str, request: Request, user_id: str = Query(d
         if target.suffix.lower() == ".shp":
             target = shapefile_zip_path(service.manager.workdir, target, artifact_id)
         if not target.exists() or not target.is_file():
-            raise FileNotFoundError(f"artifact file not found: {artifact_id}")
+            raise FileNotFoundError("文件已清理、无访问权限或下载链接已失效。")
+        if target.stat().st_size <= 0:
+            raise FileNotFoundError("文件已清理、无访问权限或下载链接已失效。")
         _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="artifact", resource_id=artifact_id)
         return FileResponse(
             str(target),
@@ -2937,6 +2878,8 @@ def submit_download(body: DownloadIn, request: Request):
         payload = _attach_download_tool_result({"job": commercial_service.get_job(job["job_id"]), **auto})
         if body.include_raw:
             payload["deprecated_raw_job_api"] = True
+            _compat_usage_store().record("deprecated_raw_job_api_used", source="POST /api/downloads/submit", caller=str(request.headers.get("user-agent") or ""), request_id=str(job.get("job_id") or ""), actor_type=_compat_actor_type(request))
+            _compat_usage_store().record("include_raw", source="POST /api/downloads/submit", caller=str(request.headers.get("user-agent") or ""), request_id=str(job.get("job_id") or ""), actor_type=_compat_actor_type(request))
             return payload
         return {
             "ok": payload.get("ok", True),
@@ -3063,7 +3006,7 @@ def list_jobs(request: Request, user_id: str = "", session_id: str = "", include
                         break
         for job in jobs:
             if isinstance(job, dict):
-                job["tool_result"] = _download_tool_result_for_job(job)
+                job["tool_result"] = _download_tool_result_for_job(job, user_id=authorized_user_id)
                 job["management_view"] = download_job_to_management_view(job, tool_result=job["tool_result"])
         management_views = [job["management_view"] for job in jobs if isinstance(job, dict) and isinstance(job.get("management_view"), dict)]
         payload = {
@@ -3078,6 +3021,8 @@ def list_jobs(request: Request, user_id: str = "", session_id: str = "", include
             "deprecated_raw_job_api": bool(include_raw),
         }
         if include_raw:
+            _compat_usage_store().record("deprecated_raw_job_api_used", source="GET /api/downloads/jobs", caller=str(request.headers.get("user-agent") or ""), request_id=authorized_user_id, actor_type=_compat_actor_type(request))
+            _compat_usage_store().record("include_raw", source="GET /api/downloads/jobs", caller=str(request.headers.get("user-agent") or ""), request_id=authorized_user_id, actor_type=_compat_actor_type(request))
             payload["jobs"] = jobs
         return payload
     return guard(run)
@@ -3112,6 +3057,8 @@ def download_job_log(request: Request, user_id: str = Query(...), job_id: str = 
                 "deprecated_raw_job_api": False,
             }
         payload["deprecated_raw_job_api"] = True
+        _compat_usage_store().record("deprecated_raw_job_api_used", source="GET /api/downloads/jobs/log", caller=str(request.headers.get("user-agent") or ""), request_id=job_id, actor_type=_compat_actor_type(request))
+        _compat_usage_store().record("include_raw", source="GET /api/downloads/jobs/log", caller=str(request.headers.get("user-agent") or ""), request_id=job_id, actor_type=_compat_actor_type(request))
         return payload
 
     return guard(run)

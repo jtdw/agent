@@ -19,6 +19,7 @@ function ChartSkeleton() {
 export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextChange }: { userId?: string; resultPanel?: ResultPanel | null; onChatContextChange?: (patch: Partial<ChatContextPayload>) => void }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [downloadingArtifactId, setDownloadingArtifactId] = useState('');
   const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
   const [error, setError] = useState('');
   const view = useMemo(() => buildAnalysisPanelView(dashboard || {}, resultPanel), [dashboard, resultPanel]);
@@ -43,6 +44,19 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
   const show = () => {
     setOpen(true);
     refresh();
+  };
+
+  const downloadArtifact = async (artifactId: string, label: string) => {
+    if (!artifactId || downloadingArtifactId) return;
+    setDownloadingArtifactId(artifactId);
+    setError('');
+    try {
+      await api.downloadArtifactById(artifactId, label || 'artifact', userId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '文件已清理、无访问权限或下载链接已失效。');
+    } finally {
+      setDownloadingArtifactId('');
+    }
   };
 
   return (
@@ -151,23 +165,24 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                       {view.downloads.length > 0 && (
                         <div className="space-y-2">
                           {view.downloads.map((item) => (
-                            <a
+                            <button
                               data-testid="analysis-artifact-item"
-                              key={item.url}
-                              href={item.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              onClick={() => onChatContextChange?.({
-                                selected_artifact_id: item.artifactId || item.label || item.url,
-                                selected_artifact_type: item.kind,
-                                selected_artifact_path: item.url,
-                                last_visible_panel: 'analysis',
-                                user_focus_hint: `selected artifact ${item.label}`
-                              })}
+                              key={item.artifactId}
+                              type="button"
+                              disabled={!item.artifactId || downloadingArtifactId === item.artifactId}
+                              onClick={() => {
+                                onChatContextChange?.({
+                                  selected_artifact_id: item.artifactId || item.label,
+                                  selected_artifact_type: item.kind,
+                                  last_visible_panel: 'analysis',
+                                  user_focus_hint: `selected artifact ${item.label}`
+                                });
+                                downloadArtifact(item.artifactId, item.label);
+                              }}
                               className="flex w-full items-center justify-between rounded-[18px] border border-white/30 bg-white/35 px-4 py-3 text-left text-sm font-bold transition hover:bg-white/60 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                             >
                               <span className="flex min-w-0 items-center gap-2"><Download size={16} className="shrink-0" /> <span className="truncate">{item.label}</span></span><ChevronRight size={16} className="shrink-0" />
-                            </a>
+                            </button>
                           ))}
                         </div>
                       )}

@@ -249,6 +249,62 @@ def _seed_resolved_fields_from_slots(plan: dict[str, Any], slots: dict[str, Any]
         plan.setdefault("resolved_fields", {})["feature_fields"] = [str(field) for field in feature_fields]
 
 
+def _modeling_profile_from_context(context: dict[str, Any]) -> dict[str, Any]:
+    profile = context.get("modeling_profile")
+    if isinstance(profile, dict):
+        return profile
+    active = context.get("active_dataset")
+    if isinstance(active, dict):
+        meta = active.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("modeling_profile"), dict):
+            return meta["modeling_profile"]
+    return {}
+
+
+def _seed_modeling_fields_from_profile(plan: dict[str, Any], slots: dict[str, Any], context: dict[str, Any]) -> None:
+    if str(slots.get("task_type") or plan.get("task_type") or "") != "modeling":
+        return
+    profile = _modeling_profile_from_context(context)
+    if not profile:
+        return
+    available = {str(field) for field in context.get("available_fields", []) if str(field or "").strip()}
+    target_candidates = [item for item in profile.get("target_candidates", []) if isinstance(item, dict)]
+    target = str(slots.get("target_variable") or plan.get("resolved_fields", {}).get("target_col") or "")
+    if not target and target_candidates:
+        candidate = str(target_candidates[0].get("field") or "")
+        if candidate and (not available or candidate in available):
+            target = candidate
+            slots["target_variable"] = candidate
+            plan.setdefault("resolved_fields", {})["target_col"] = candidate
+            hint = str(target_candidates[0].get("task_hint") or "")
+            if hint in {"regression", "classification"}:
+                slots["task_type_hint"] = hint
+    features = [str(field) for field in slots.get("feature_fields", []) if str(field or "").strip()]
+    if not features:
+        for field in profile.get("feature_candidates", []):
+            name = str(field or "")
+            if not name or name == target:
+                continue
+            if available and name not in available:
+                continue
+            features.append(name)
+    if features:
+        slots["feature_fields"] = list(dict.fromkeys(features))
+        plan.setdefault("resolved_fields", {})["feature_fields"] = slots["feature_fields"]
+    if target:
+        slots["missing_inputs"] = [item for item in slots.get("missing_inputs", []) if item != "target column"]
+    if features:
+        slots["missing_inputs"] = [item for item in slots.get("missing_inputs", []) if item != "feature columns"]
+    spatial = profile.get("spatial") if isinstance(profile.get("spatial"), dict) else {}
+    lon_col = str(spatial.get("lon_col") or "")
+    lat_col = str(spatial.get("lat_col") or "")
+    if lon_col and lat_col:
+        slots["spatial_columns"] = [lon_col, lat_col]
+    temporal = profile.get("temporal") if isinstance(profile.get("temporal"), dict) else {}
+    if not slots.get("time_column") and temporal.get("time_col"):
+        slots["time_column"] = str(temporal["time_col"])
+
+
 def _resolve_objects_for_plan(prompt: str, context: dict[str, Any], manager: Any | None = None) -> dict[str, Any]:
     resolved: dict[str, Any] = {}
     for object_type in ("dataset", "layer", "field", "clip_boundary", "artifact", "model_result"):
@@ -305,7 +361,7 @@ def _manager_precondition_errors(manager: Any | None, tool_name: str, args: dict
         errors.extend(validate_dataset_exists(manager, dataset_name))
     if tool_name == "plot_dataset" and args.get("column"):
         errors.extend(validate_required_fields(manager, dataset_name, [str(args["column"])]))
-    elif tool_name in {"train_xgboost_fusion_model", "train_rf_fusion_model"}:
+    elif tool_name in {"generic_xgboost_workflow", "train_xgboost_fusion_model", "train_rf_fusion_model"}:
         target = str(args.get("target_col") or "")
         features = [field.strip() for field in str(args.get("feature_cols") or "").split(",") if field.strip()]
         errors.extend(validate_model_target(manager, dataset_name, target))
@@ -382,10 +438,10 @@ def _build_validated_tool_args(plan: dict[str, Any], slots: dict[str, Any], cont
             return
         if slots.get("model_type") == "random_forest":
             model_tool = "train_rf_fusion_model"
-        elif slots.get("model_type") == "generic_xgboost":
-            model_tool = "generic_xgboost_workflow"
-        else:
+        elif slots.get("model_type") == "xgboost":
             model_tool = "train_xgboost_fusion_model"
+        else:
+            model_tool = "generic_xgboost_workflow"
         output_name = str(slots.get("output_name") or "") or _safe_output_prefix(dataset, "model")
         args = {
             "dataset_name": dataset,
@@ -393,12 +449,18 @@ def _build_validated_tool_args(plan: dict[str, Any], slots: dict[str, Any], cont
             "feature_cols": ",".join(features),
             "output_name": output_name,
         }
+        if model_tool == "generic_xgboost_workflow":
+            args["task_type"] = str(slots.get("task_type_hint") or "auto")
+            args["split_method"] = str(slots.get("validation_method") or "auto")
         if slots.get("time_column"):
             args["date_col"] = str(slots["time_column"])
+        spatial_columns = [str(item) for item in slots.get("spatial_columns", []) if str(item or "").strip()]
+        if model_tool == "generic_xgboost_workflow" and len(spatial_columns) >= 2:
+            args["lon_col"] = spatial_columns[0]
+            args["lat_col"] = spatial_columns[1]
         if slots.get("validation_method") == "spatial_block":
             args["spatial_validation"] = True
             args["validation_method"] = "spatial_block"
-            spatial_columns = [str(item) for item in slots.get("spatial_columns", []) if str(item or "").strip()]
             if len(spatial_columns) >= 2:
                 args["lon_col"] = spatial_columns[0]
                 args["lat_col"] = spatial_columns[1]
@@ -497,13 +559,13 @@ def _prompt_requests_gcp(prompt: str) -> bool:
         "coverage",
         "geoconformal prediction",
         "spatial conformal prediction",
-        "????",
-        "??????",
-        "????",
-        "????",
-        "?????",
-        "???",
-        "????",
+        "不确定性",
+        "不确定性分析",
+        "预测区间",
+        "区间宽度",
+        "覆盖率",
+        "共形预测",
+        "空间共形预测",
     )
     return any(token in text for token in tokens)
 
@@ -1540,6 +1602,7 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
         slots["missing_inputs"] = [item for item in slots.get("missing_inputs", []) if item != "clip layer"]
     plan["slots"] = slots
     _seed_resolved_fields_from_slots(plan, slots)
+    _seed_modeling_fields_from_profile(plan, slots, context)
 
     if referenced_object:
         plan["required_inputs"].append("referenced object")
@@ -1610,9 +1673,9 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
                 "请指定要制图的字段或主题；如果不确定，我可以先预览字段并推荐适合制图的列。",
             )
     elif task_type == "modeling":
-        modeling_tools = ["profile_missing_values", "train_xgboost_fusion_model", "train_rf_fusion_model"]
-        if slots.get("model_type") == "generic_xgboost":
-            modeling_tools = ["profile_missing_values", "generic_xgboost_workflow", "train_xgboost_fusion_model", "train_rf_fusion_model"]
+        modeling_tools = ["profile_missing_values", "generic_xgboost_workflow", "train_xgboost_fusion_model", "train_rf_fusion_model"]
+        if slots.get("model_type") == "xgboost":
+            modeling_tools = ["profile_missing_values", "train_xgboost_fusion_model", "generic_xgboost_workflow", "train_rf_fusion_model"]
         plan.update(
             required_inputs=["dataset", "target column", "feature columns"],
             recommended_tools=modeling_tools,

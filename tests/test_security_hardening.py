@@ -9,6 +9,11 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import geopandas as gpd
+import numpy as np
+import rasterio
+from rasterio.transform import from_origin
+from shapely.geometry import Point
 from starlette.exceptions import StarletteDeprecationWarning
 
 with warnings.catch_warnings():
@@ -224,6 +229,58 @@ class SecurityHardeningTests(unittest.TestCase):
             dataset_name = manager.load_path(str(inside))
 
             self.assertIn(dataset_name, manager.datasets)
+
+    def test_raster_algebra_rejects_unsafe_expression_calls(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp) / "workspace")
+            raster_path = Path(tmp) / "source.tif"
+            arr = np.ones((3, 3), dtype="float32")
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=3,
+                width=3,
+                count=1,
+                dtype="float32",
+                crs="EPSG:3857",
+                transform=from_origin(0, 90, 30, 30),
+            ) as dst:
+                dst.write(arr, 1)
+            manager.put_raster_path("r", raster_path, meta={"crs": "EPSG:3857"})
+            tools = {tool.name: tool for tool in build_tools(manager)}
+
+            result = parse_tool_result(
+                tools["raster_algebra"].invoke(
+                    {"expression": "__import__('os').system('echo bad')", "input_rasters": "r=r", "output_name": "bad"}
+                )
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], "failed")
+            self.assertEqual(result["tool_name"], "raster_algebra")
+
+    def test_vector_filter_rejects_unsafe_expression_and_returns_tool_result(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp) / "workspace")
+            manager.put_vector(
+                "points",
+                gpd.GeoDataFrame({"value": [1, 3]}, geometry=[Point(0, 0), Point(1, 1)], crs="EPSG:4326"),
+            )
+            tools = {tool.name: tool for tool in build_tools(manager)}
+
+            ok = parse_tool_result(tools["vector_filter"].invoke({"dataset_name": "points", "expression": "value > 1", "output_name": "points_gt1"}))
+            blocked = parse_tool_result(
+                tools["vector_filter"].invoke(
+                    {"dataset_name": "points", "expression": "__import__('os').system('echo bad')", "output_name": "bad"}
+                )
+            )
+
+            self.assertTrue(ok["ok"])
+            self.assertEqual(ok["status"], "succeeded")
+            self.assertEqual(ok["outputs"]["feature_count"], 1)
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["error_code"], "VECTOR_FILTER_EXPRESSION_INVALID")
 
     def test_zip_import_rejects_symlink_entries(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

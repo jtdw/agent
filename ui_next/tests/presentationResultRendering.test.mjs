@@ -14,7 +14,8 @@ assert.match(renderer, /presentation-result-card/, 'ChatMessageRenderer must ren
 assert.match(renderer, /presentationResult \|\| userResult/, 'presentation_result must be preferred before user_facing_result fallback');
 assert.doesNotMatch(renderer, /execution_trace/, 'ChatMessageRenderer must not render raw execution_trace');
 
-assert.match(chatPanel, /presentation_result: r\.presentation_result/, 'ChatPanel must preserve presentation_result from chat responses');
-assert.match(chatPanel, /execution_summary: r\.execution_summary/, 'ChatPanel must preserve execution_summary from chat responses');
+assert.match(chatPanel, /function responseAssistantMessage/, 'ChatPanel must normalize backend chat responses through one assistant message adapter');
+assert.match(chatPanel, /presentation_result: response\.presentation_result/, 'ChatPanel adapter must preserve presentation_result from chat responses');
+assert.match(chatPanel, /execution_summary: response\.execution_summary/, 'ChatPanel adapter must preserve execution_summary from chat responses');
 
 console.log('presentationResultRendering.test.mjs passed');

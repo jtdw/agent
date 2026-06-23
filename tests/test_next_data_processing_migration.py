@@ -47,6 +47,22 @@ class NextDataProcessingMigrationTests(unittest.TestCase):
             dst.write(values.astype("int16"), 1)
         return path
 
+    def write_projected_tile(self, path: Path, *, values: np.ndarray) -> Path:
+        with rasterio.open(
+            path,
+            "w",
+            driver="GTiff",
+            height=values.shape[0],
+            width=values.shape[1],
+            count=1,
+            dtype="float32",
+            crs="EPSG:3857",
+            transform=from_origin(0.0, float(values.shape[0]) * 30.0, 30.0, 30.0),
+            nodata=-9999.0,
+        ) as dst:
+            dst.write(values.astype("float32"), 1)
+        return path
+
     def raster_context(self, *datasets: tuple[str, str]) -> dict:
         active_name = datasets[0][0]
         return {
@@ -220,7 +236,7 @@ class NextDataProcessingMigrationTests(unittest.TestCase):
             self.assertEqual(gcp_step["tool_result"]["tool_name"], "geographical_conformal_prediction")
             self.assertEqual(gcp_step["tool_result"]["outputs"]["metrics_dataset"], "xgb_sm_demo_gcp_gcp_metrics")
 
-    def test_dem_derivative_prompt_builds_and_executes_workflow(self) -> None:
+    def test_dem_derivative_prompt_blocks_geographic_crs(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
             dem_path = self.write_tile(Path(tmp) / "dem.tif", west=0.0, values=np.array([[10, 12], [14, 18]]))
@@ -232,6 +248,22 @@ class NextDataProcessingMigrationTests(unittest.TestCase):
 
             self.assertFalse(plan["should_ask_clarification"])
             self.assertIn("dem_terrain_derivatives", plan["validated_tool_args"])
+            execution = execute_workflow_plan(service.manager, plan)
+            result = parse_workflow_result(execution["raw_reply"])
+
+            self.assertFalse(execution["ok"])
+            step = next(item for item in result["steps"] if item["tool_name"] == "dem_terrain_derivatives")
+            self.assertEqual(step["tool_result"]["error_code"], "DEM_PROJECTED_CRS_REQUIRED")
+
+    def test_dem_derivative_projected_raster_executes_workflow(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            dem_path = self.write_projected_tile(Path(tmp) / "dem_3857.tif", values=np.array([[10, 12], [14, 18]], dtype="float32"))
+            dem_name = service.manager.put_raster_path("county_dem", dem_path, meta={"crs": "EPSG:3857"})
+            context = self.raster_context((dem_name, str(dem_path)))
+            intent = {"intent": "data_processing", "confidence": 0.9, "secondary_intents": []}
+
+            plan = build_task_plan("计算这个 DEM 的坡度和坡向", intent, context, manager=service.manager)
             execution = execute_workflow_plan(service.manager, plan)
             result = parse_workflow_result(execution["raw_reply"])
 

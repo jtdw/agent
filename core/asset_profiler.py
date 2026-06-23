@@ -7,6 +7,8 @@ from typing import Any
 
 import pandas as pd
 
+from core.ml.modeling_profile import build_modeling_profile
+
 
 def _safe_stat(path: Path) -> dict[str, Any]:
     try:
@@ -82,6 +84,7 @@ def _profile_table(record: Any) -> dict[str, Any]:
         "sample_rows": [{key: _jsonable(value) for key, value in row.items()} for row in sample],
         "time_range": _time_range(df),
         "role_inference": _role_inference_from_fields(fields),
+        "modeling_profile": build_modeling_profile(df, dataset_name=str(getattr(record, "name", "")), data_type="table"),
     }
 
 
@@ -96,6 +99,7 @@ def _profile_vector(record: Any) -> dict[str, Any]:
         "crs": meta.get("crs"),
         "bounds": meta.get("bounds"),
         "role_inference": _role_inference_from_fields(fields),
+        "modeling_profile": build_modeling_profile(pd.DataFrame(gdf.drop(columns=["geometry"], errors="ignore")), dataset_name=str(getattr(record, "name", "")), data_type="vector"),
     }
 
 

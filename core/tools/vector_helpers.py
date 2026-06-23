@@ -4,6 +4,7 @@ from core.tools.common_helpers import (
     Any,
     ArtifactInfo,
     CRS,
+    _build_mask_from_query,
     _align_crs,
     _estimate_projected_gdf,
     _prepare_join_frame,

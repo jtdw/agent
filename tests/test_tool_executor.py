@@ -63,7 +63,9 @@ class ToolExecutorTests(unittest.TestCase):
     def make_service(self, root: Path) -> GISWorkspaceService:
         settings = Settings(api_key="", workdir=root / "workspace")
         settings.ensure_dirs()
-        return GISWorkspaceService(settings)
+        service = GISWorkspaceService(settings)
+        service.set_interaction_mode("tool_enabled")
+        return service
 
     def test_data_upload_analysis_plan_executes_describe_dataset(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

@@ -29,6 +29,7 @@ import {
   XCircle
 } from 'lucide-react';
 import { AuthPanel } from './AuthPanel';
+import { CapabilityManagementPanel } from './CapabilityManagementPanel';
 import { ChatWorkspace, type ExternalPromptCommand } from './ChatPanel';
 import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
@@ -558,7 +559,7 @@ export function ProductConsole({
       const result = await api.exportWorkspace(userId, sessionId, 'all');
       setNotice(`已打包 ${result.file_count} 个成果文件。`);
       await refresh();
-      if (result.download_url) await api.downloadAuthenticated(result.download_url, 'workspace-export.zip');
+      if (result.download_url) await downloadUrl(result.download_url, 'workspace-export.zip');
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '导出失败');
     } finally {
@@ -566,11 +567,24 @@ export function ProductConsole({
     }
   };
 
-  const downloadArtifact = async (url: string, name: string) => {
+  const downloadUrl = async (url: string, name: string) => {
     try {
       await api.downloadAuthenticated(url, name);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '下载失败');
+    }
+  };
+
+  const downloadArtifact = async (artifactId: string, name: string) => {
+    if (!artifactId) {
+      setNotice('该结果缺少 artifact_id，无法通过安全下载解析器下载。');
+      return;
+    }
+    try {
+      const metadata = await api.artifactMetadata(artifactId, userId, sessionId);
+      await api.downloadArtifactById(artifactId, metadata.filename || metadata.title || name || 'artifact', userId, sessionId);
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : '文件已清理、无访问权限或下载链接已失效。');
     }
   };
 
@@ -594,7 +608,7 @@ export function ProductConsole({
     const ref = jobView(job)?.artifact_refs?.[0];
     if (ref?.artifact_id) {
       const metadata = await api.artifactMetadata(ref.artifact_id, userId, sessionId);
-      await downloadArtifact(metadata.download_url || '', metadata.filename || metadata.title || ref.title || getJobName(job));
+      await downloadArtifact(ref.artifact_id, metadata.filename || metadata.title || ref.title || getJobName(job));
       return;
     }
     setNotice('该任务没有可解析的 artifact_id，暂不能提供下载入口。');
@@ -941,7 +955,7 @@ export function ProductConsole({
   );
 
   const renderResults = () => {
-    const panelFiles = resultPanel?.files?.filter((file) => file.download_url) || [];
+    const panelFiles = resultPanel?.files?.filter((file) => file.artifact_id) || [];
     return (
       <div className="space-y-6">
         <Panel className="p-5">
@@ -981,7 +995,7 @@ export function ProductConsole({
               {panelFiles.length > 0 && (
                 <div className="space-y-2">
                   {panelFiles.map((file) => (
-                    <button key={file.download_url} onClick={() => downloadArtifact(file.download_url || '', file.label || 'result')} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
+                    <button key={file.artifact_id || file.label} onClick={() => downloadArtifact(file.artifact_id || '', file.label || 'result')} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
                       <span className="min-w-0 truncate font-semibold">{file.label || file.path || '结果文件'}</span>
                       <Download className="shrink-0 text-slate-400" size={16} />
                     </button>
@@ -1056,6 +1070,11 @@ export function ProductConsole({
           </button>
           <button data-testid="open-map-workspace" className="console-primary-button" onClick={onOpenMap}><Map size={15} /> 打开地图工作台登录入口</button>
         </div>
+      </Panel>
+
+      <Panel className="p-5">
+        <SectionHeader title="知识与能力管理" description="上传知识库文档，完成检索测试后提交审核并激活。" />
+        <CapabilityManagementPanel />
       </Panel>
     </div>
   );
@@ -1230,7 +1249,7 @@ function InfoItem({ label, value }: { label: string; value: ReactNode }) {
   );
 }
 
-function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleArtifact[]; onDownload: (url: string, name: string) => void; onDelete: (artifact: ConsoleArtifact) => void }) {
+function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleArtifact[]; onDownload: (artifactId: string, name: string) => void; onDelete: (artifact: ConsoleArtifact) => void }) {
   return (
     <div className="space-y-2">
       {artifacts.map((artifact) => {
@@ -1238,7 +1257,7 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
         return (
           <div key={artifact.artifactId || artifact.path || artifact.url} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
             <span className="flex min-w-0 items-center gap-3">
-              {artifact.kind === 'visual' ? (
+              {artifact.kind === 'visual' && artifact.url ? (
                 <img data-testid="console-artifact-image-preview" src={artifact.url} alt={artifact.label} loading="lazy" className="h-12 w-16 shrink-0 rounded-lg border border-slate-200 bg-slate-50 object-cover dark:border-slate-800 dark:bg-slate-950" />
               ) : (
                 <Icon className="shrink-0 text-slate-400" size={17} />
@@ -1246,7 +1265,7 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
               <span className="min-w-0 truncate font-semibold">{artifact.label}</span>
             </span>
             <span className="flex shrink-0 items-center gap-2">
-              <button type="button" onClick={() => onDownload(artifact.url, artifact.label)} className="console-icon-button" title="下载结果文件">
+              <button type="button" onClick={() => onDownload(artifact.artifactId, artifact.label)} className="console-icon-button" title="下载结果文件">
                 <Download className="shrink-0 text-slate-400" size={16} />
               </button>
               <button type="button" onClick={() => onDelete(artifact)} className="console-icon-button text-rose-600 dark:text-rose-300" title="删除结果文件">

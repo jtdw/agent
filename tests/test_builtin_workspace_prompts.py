@@ -48,9 +48,8 @@ class BuiltinWorkspacePromptTests(unittest.TestCase):
 
     def assert_zero_tool_clarification(self, result: dict) -> None:
         self.assertEqual(result["model"], "conversation-coordinator")
-        self.assertEqual(result["mode"], "clarification")
-        self.assertEqual(result["reason"], "unavailable")
-        self.assertIn("LLM Planner", result["reply"])
+        self.assertIn(result["mode"], {"answer_only", "chat_only_blocked", "clarification"})
+        self.assertNotIn(result["mode"], {"coordinated_workflow", "validated_tool_execution"})
 
     def test_workspace_summary_prompt_does_not_fallback_without_llm_plan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

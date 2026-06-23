@@ -45,7 +45,17 @@ class WorkflowCoordinatorSchemaTests(unittest.TestCase):
         plan = {"workflow_plan": [{"step_id": "describe", "tool_name": "describe_dataset", "validated_tool_args": {"dataset_name": "points"}}]}
         trace = {"results": [], "remaining_step_ids": ["describe"], "executed_step_ids": []}
 
-        unavailable = build_coordinator_decision(plan, current_step=None, remaining_steps=plan["workflow_plan"], execution_trace=trace, user_request="describe points")
+        def unavailable_client(_payload):
+            raise RuntimeError("coordinator unavailable")
+
+        unavailable = build_coordinator_decision(
+            plan,
+            current_step=None,
+            remaining_steps=plan["workflow_plan"],
+            execution_trace=trace,
+            user_request="describe points",
+            client=unavailable_client,
+        )
         self.assertEqual(unavailable["status"], "unavailable")
         self.assertEqual(unavailable["decision"].decision, "stop_failure")
 

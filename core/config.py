@@ -34,6 +34,13 @@ def _parse_supported_models() -> tuple[str, ...]:
     return models or DEFAULT_SUPPORTED_MODELS
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name, "")
+    if not raw:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_vision_model(model_name: str) -> bool:
     lowered = model_name.lower()
     return any(hint in lowered for hint in VISION_MODEL_HINTS)
@@ -63,6 +70,7 @@ class Settings:
     timeout: float = _llm.timeout
     max_retries: int = _llm.max_retries
     desktop_theme: str = os.getenv("GIS_AGENT_THEME", "dark")
+    enable_modeling_advisor: bool = field(default_factory=lambda: _env_flag("GIS_AGENT_ENABLE_MODELING_ADVISOR"))
 
     def ensure_dirs(self) -> None:
         self.workdir.mkdir(parents=True, exist_ok=True)

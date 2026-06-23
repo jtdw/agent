@@ -115,12 +115,13 @@ def interpret_result(
 
     normalized_results = _as_list(plan.get("normalized_results"))
     if normalized_results:
+        summary = _plan_summary(plan, intent)
+        summary["response_language"] = response_language
         bundle = interpret_canonical_result(
             task_goal=_clean_text(plan.get("primary_goal") or plan.get("task_type") or prompt, 160),
-            task_plan_summary=_plan_summary(plan, intent),
+            task_plan_summary=summary,
             coordinator_status=str(plan.get("coordinator_status") or plan.get("status") or ""),
             normalized_results=normalized_results,
-            response_language=response_language,
         )
         return format_presentation_reply(_as_dict(bundle.get("presentation_result")))
 

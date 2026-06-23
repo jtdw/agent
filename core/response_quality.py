@@ -36,7 +36,7 @@ RAW_DEBUG_KEYS = {
     "validated_tool_args",
     "plan",
 }
-MOJIBAKE_MARKERS = ("�", "锟斤拷", "Ã", "å", "æ", "ä")
+MOJIBAKE_MARKERS = ("\ufffd", "\u951f\u65a4\u62f7", "\u00c3", "\u00e5", "\u00e6", "\u00e4")
 WORKSPACE_PATH_RE = re.compile(
     r"(?:[A-Za-z]:[\\/][^\s`'\"，。；;]+|workspace[\\/](?:users|sessions)[^\s`'\"，。；;]*)",
     re.IGNORECASE,

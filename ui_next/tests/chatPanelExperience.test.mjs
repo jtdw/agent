@@ -19,9 +19,9 @@ const sendPromptSource = source.match(/const sendPrompt = async[\s\S]*?\n  const
 const refreshSessionsSource = source.match(/const refreshSessions = async[\s\S]*?\n  useEffect/)?.[0] || '';
 assert.match(refreshSessionsSource, /if \(!userId\) \{[\s\S]*?setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?setMessages\(\[\]\);[\s\S]*?return;/, 'ChatPanel must not load anonymous chat history before login');
 assert.match(sendPromptSource, /if \(!userId\) \{[\s\S]*?return;/, 'ChatPanel must not create anonymous chat records before login');
-assert.equal(sendPromptSource.includes('mergeStableClientMessageIds(current, normalizeChatMessages(r.messages))'), true);
-assert.equal(sendPromptSource.includes('const nextSessionId = r.current_session_id || currentSessionId'), true);
-assert.equal(sendPromptSource.includes('setCurrentSessionId(nextSessionId)'), true);
+assert.equal(sendPromptSource.includes('await api.streamChat('), true, 'ChatPanel must send through the streaming chat endpoint');
+assert.equal(sendPromptSource.includes('{ ...chatContext, session_id: currentSessionId }'), true, 'Streaming chat must retain session-scoped frontend context');
+assert.equal(sendPromptSource.includes('refreshSessions().catch(() => {})'), true, 'Completed streams must reconcile persisted messages without replacing optimistic history');
 assert.equal(source.includes("meta: { reason: 'download_failed' }"), false, 'ChatPanel should not append a duplicate assistant error when a watched download job fails');
 assert.equal(layerPanelSource.includes('failure_diagnostic'), false, 'LayerPanel should not render raw failure_diagnostic in the management view path');
 assert.equal(layerPanelSource.includes('error_message'), false, 'LayerPanel should not render raw error_message in the management view path');

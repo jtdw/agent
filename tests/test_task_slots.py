@@ -108,8 +108,57 @@ class TaskSlotsTests(unittest.TestCase):
         plan = build_task_plan("use rainfall and elevation to predict NDVI", _intent("modeling"), context)
 
         self.assertFalse(plan["should_ask_clarification"])
-        self.assertEqual(plan["validated_tool_args"]["train_xgboost_fusion_model"]["target_col"], "ndvi")
-        self.assertEqual(plan["validated_tool_args"]["train_xgboost_fusion_model"]["feature_cols"], "rainfall,elevation")
+        self.assertEqual(plan["slots"]["model_type"], "generic_xgboost")
+        self.assertEqual(plan["validated_tool_args"]["generic_xgboost_workflow"]["target_col"], "ndvi")
+        self.assertEqual(plan["validated_tool_args"]["generic_xgboost_workflow"]["feature_cols"], "rainfall,elevation")
+
+    def test_explicit_soil_moisture_fusion_keeps_specialized_xgboost_tool(self) -> None:
+        context = {
+            "workspace": {"dataset_count": 1},
+            "active_dataset": {"name": "soil_training", "type": "table"},
+            "available_fields": ["soil_moisture", "ndvi", "lst", "lon", "lat"],
+            "numeric_fields": ["soil_moisture", "ndvi", "lst", "lon", "lat"],
+        }
+
+        plan = build_task_plan(
+            "train soil moisture fusion XGBoost target soil_moisture features ndvi,lst,lon,lat",
+            _intent("modeling"),
+            context,
+        )
+
+        self.assertFalse(plan["should_ask_clarification"])
+        self.assertEqual(plan["slots"]["model_type"], "xgboost")
+        self.assertIn("train_xgboost_fusion_model", plan["validated_tool_args"])
+
+    def test_planner_uses_modeling_profile_to_autofill_generic_xgboost_fields(self) -> None:
+        context = {
+            "workspace": {"dataset_count": 1},
+            "active_dataset": {
+                "name": "crop_table",
+                "type": "table",
+                "meta": {
+                    "modeling_profile": {
+                        "target_candidates": [{"field": "crop_yield", "score": 0.95, "task_hint": "regression"}],
+                        "feature_candidates": ["ndvi", "rainfall", "lon", "lat"],
+                        "spatial": {"is_spatial": True, "lon_col": "lon", "lat_col": "lat"},
+                        "temporal": {"is_temporal": False, "time_col": ""},
+                    }
+                },
+            },
+            "available_fields": ["crop_yield", "ndvi", "rainfall", "lon", "lat"],
+            "numeric_fields": ["crop_yield", "ndvi", "rainfall", "lon", "lat"],
+        }
+
+        plan = build_task_plan("run xgboost analysis", _intent("modeling"), context)
+
+        self.assertFalse(plan["should_ask_clarification"])
+        args = plan["validated_tool_args"]["generic_xgboost_workflow"]
+        self.assertEqual(args["target_col"], "crop_yield")
+        self.assertEqual(args["feature_cols"], "ndvi,rainfall,lon,lat")
+        self.assertEqual(args["task_type"], "regression")
+        self.assertEqual(args["split_method"], "auto")
+        self.assertEqual(args["lon_col"], "lon")
+        self.assertEqual(args["lat_col"], "lat")
 
     def test_planner_clarifies_regression_request_without_target_or_features(self) -> None:
         context = {

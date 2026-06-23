@@ -20,6 +20,7 @@ const appSource = await readFile('src/App.tsx', 'utf8');
 
 assert.match(consoleSource, /openMap/, 'ProductConsole sidebar nav must expose a map workbench action');
 assert.match(consoleSource, /地理空间数据云登录/, 'ProductConsole settings must expose the GSCloud login module');
+assert.match(consoleSource, /CapabilityManagementPanel/, 'ProductConsole settings must expose knowledge and capability management');
 assert.match(consoleSource, /checkGscloudLoginHealth/, 'ProductConsole settings must let users check GSCloud login health');
 assert.match(consoleSource, /api\.loginHealth\(userId,\s*'gscloud',\s*'platform'\)/, 'GSCloud module must check platform account login state');
 assert.match(consoleSource, /api\.loginHealth\(userId,\s*'gscloud',\s*'own'\)/, 'GSCloud module must check own account login state');
@@ -62,17 +63,18 @@ assert.deepEqual(data.summarizeJobs(jobs), {
 });
 
 const artifacts = [
-  { artifact_id: 'artifact_metrics', name: 'model_metrics.csv', path: 'derived/model_metrics.csv', download_url: '/metrics.csv' },
-  { artifact_id: 'artifact_map', name: 'soil_map.png', path: 'plots/soil_map.png', download_url: '/soil.png' },
-  { artifact_id: 'artifact_zip', name: 'workspace.zip', path: 'exports/workspace.zip', download_url: '/workspace.zip' }
+  { artifact_id: 'artifact_metrics', name: 'model_metrics.csv', path: 'derived/model_metrics.csv' },
+  { artifact_id: 'artifact_map', name: 'soil_map.png', path: 'plots/soil_map.png', download_url: '/legacy-map.png' },
+  { artifact_id: 'artifact_zip', name: 'workspace.zip', path: 'exports/workspace.zip' },
+  { name: 'legacy_orphan.csv', path: 'derived/legacy_orphan.csv', download_url: '/api/files/artifact?path=derived/legacy_orphan.csv' }
 ];
 
 assert.deepEqual(
-  data.groupArtifacts(artifacts).map((item) => [item.artifactId, item.label, item.path, item.kind]),
+  data.groupArtifacts(artifacts).map((item) => [item.artifactId, item.label, item.path, item.kind, item.url]),
   [
-    ['artifact_metrics', 'model_metrics.csv', 'derived/model_metrics.csv', 'report'],
-    ['artifact_map', 'soil_map.png', 'plots/soil_map.png', 'visual'],
-    ['artifact_zip', 'workspace.zip', 'exports/workspace.zip', 'archive']
+    ['artifact_metrics', 'model_metrics.csv', 'derived/model_metrics.csv', 'report', ''],
+    ['artifact_map', 'soil_map.png', 'plots/soil_map.png', 'visual', ''],
+    ['artifact_zip', 'workspace.zip', 'exports/workspace.zip', 'archive', '']
   ]
 );
 

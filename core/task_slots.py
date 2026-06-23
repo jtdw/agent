@@ -207,9 +207,40 @@ def _target_after_predict(prompt: str, fields: list[str]) -> str:
     return ""
 
 
+def _wants_specialized_soil_moisture_xgboost(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    if not ("xgboost" in text or "xgb" in text):
+        return False
+    if any(token in text for token in ("generic", "general", "universal", "\u901a\u7528")):
+        return False
+    compact = re.sub(r"[\s_\-]+", "", text)
+    explicit_soil = any(token in text for token in ("soil moisture", "soil_moisture", "\u571f\u58e4\u6c34\u5206"))
+    explicit_fusion = any(token in text for token in ("fusion", "fuse", "\u878d\u5408", "stm", "smap", "era5"))
+    explicit_soil_model_context = explicit_soil and any(
+        token in text
+        for token in (
+            "precip_7d",
+            "ndvi",
+            "lst",
+            "xgb_sm",
+            "spatial",
+            "lon,lat",
+        )
+    )
+    return (explicit_soil and explicit_fusion) or explicit_soil_model_context or "soilmoisturefusion" in compact
+
+
 def _model_type(prompt: str) -> str:
     text = str(prompt or "").lower()
     wants_xgb = "xgboost" in text or "xgb" in text
+    if _wants_specialized_soil_moisture_xgboost(prompt):
+        return "xgboost"
+    if "random forest" in text or re.search(r"\brf\b", text):
+        return "random_forest"
+    if wants_xgb:
+        return "generic_xgboost"
+    if "regression" in text or "predict" in text or "forecast" in text:
+        return "generic_xgboost"
     if wants_xgb and any(token in text for token in ("generic", "general", "universal", "通用", "分类", "classification", "classifier")):
         return "generic_xgboost"
     if "xgboost" in text or "xgb" in text:

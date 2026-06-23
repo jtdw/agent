@@ -106,7 +106,7 @@ class ConversationStateContextTests(unittest.TestCase):
         state.referenced_object = {"type": "model_result", "data": manager.model_results[0], "source": "frontend_context"}
         dashboard = {"summary": manager.workspace_summary(), "artifacts": manager.artifacts, "model_results": manager.model_results}
 
-        context = build_conversation_context("模型效果怎么样", {"intent": "result_analysis"}, state.to_dict(), manager, dashboard)
+        context = build_conversation_context("上次模型效果怎么样", {"intent": "result_analysis"}, state.to_dict(), manager, dashboard)
 
         self.assertEqual(context["recent_model_result"]["model_result_id"], "model_xgb_001")
         self.assertEqual(len(context["recent_artifacts"]), 3)

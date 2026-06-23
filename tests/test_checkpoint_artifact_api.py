@@ -69,6 +69,21 @@ class CheckpointArtifactApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
 
+    def test_artifact_download_reports_cleaned_or_empty_file_in_chinese(self) -> None:
+        empty = self.service.manager.derived_dir / "empty.csv"
+        empty.write_text("", encoding="utf-8")
+        artifact = self.service.manager.register_artifact(
+            artifact_id="artifact_empty",
+            path=str(empty),
+            type="csv",
+            title="empty.csv",
+        )
+
+        response = self.client.get(f"/api/artifacts/{artifact['artifact_id']}/download")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("文件已清理、无访问权限或下载链接已失效", str(response.json()))
+
     def test_delete_artifact_removes_registered_file(self) -> None:
         path = self.service.manager.derived_dir / "delete_me.csv"
         path.write_text("a,b\n1,2\n", encoding="utf-8")
