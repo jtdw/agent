@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.admin_boundary import extract_local_admin_boundary
+from core.admin_boundary import _cache_dir, extract_local_admin_boundary
 from core.data_manager import DataManager
 
 
@@ -51,6 +51,20 @@ class AdminBoundaryCountyTests(unittest.TestCase):
             self.assertIsNotNone(gdf)
             self.assertEqual(len(gdf), 3)
             self.assertEqual(set(gdf["\u5730\u7ea7"].astype(str)), {"\u8d44\u9633\u5e02"})
+
+    def test_builtin_admin_archive_cache_is_shared_across_sessions(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            base = Path(tmp) / "workspace"
+            archive = base / "local_library" / "data" / "administrative" / "china_admin_county_2023.zip"
+            archive.parent.mkdir(parents=True, exist_ok=True)
+            archive.write_bytes(b"zip")
+            first = DataManager(base / "users" / "u1")
+            second = DataManager(base / "users" / "u1")
+            first.set_runtime_scope("u1", "s1")
+            second.set_runtime_scope("u1", "s2")
+
+            self.assertEqual(_cache_dir(first, archive), _cache_dir(second, archive))
+            self.assertNotIn("sessions", _cache_dir(first, archive).parts)
 
 
 if __name__ == "__main__":

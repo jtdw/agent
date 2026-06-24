@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
+import re
 
 from .gscloud_download_recovery import recover_gscloud_download_from_error_page
 
@@ -28,6 +29,57 @@ DOWNLOAD_BUTTON_SELECTORS = [
     "td:last-child button",
     "td:last-child a",
 ]
+
+
+def normalize_scene_date(value: Any) -> str:
+    """Normalize common GSCloud scene date values to YYYY-MM-DD."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    match = re.search(r"(?<!\d)(\d{4})(\d{2})(\d{2})(?!\d)", text)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    match = re.search(r"A(\d{4})(\d{3})", text, flags=re.IGNORECASE)
+    if match:
+        try:
+            return datetime.strptime(f"{match.group(1)}{match.group(2)}", "%Y%j").strftime("%Y-%m-%d")
+        except ValueError:
+            return ""
+    return ""
+
+
+def find_scene_date_cell(cells: list[Any], scene_id: str = "") -> tuple[str, int]:
+    for idx, cell in enumerate(cells):
+        text = str(cell or "")
+        if re.search(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", text):
+            date = normalize_scene_date(text)
+            if date:
+                return date, idx
+    for idx, cell in enumerate(cells):
+        date = normalize_scene_date(cell)
+        if date:
+            return date, idx
+    date = normalize_scene_date(scene_id)
+    return (date, -1) if date else ("", -1)
+
+
+def scene_data_available(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {AVAILABLE, "1", "true", "yes", "available"}
+
+
+def scene_data_unavailable(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text in {UNAVAILABLE, "0", "false", "no", "unavailable"}
 
 
 @dataclass(frozen=True)

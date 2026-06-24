@@ -12,7 +12,20 @@ from core.storage_cleanup import cleanup_storage_candidates, scan_storage_cleanu
 from core.workspace_db import WorkspaceDatabase
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
 class StorageCleanupTests(unittest.TestCase):
+    def test_frontend_artifact_cleanup_script_is_scoped_to_generated_outputs(self) -> None:
+        script = PROJECT_ROOT / "scripts" / "cleanup_frontend_artifacts.ps1"
+
+        text = script.read_text(encoding="utf-8")
+
+        self.assertIn("ui_next\\test-results", text)
+        self.assertIn("ui_next\\dist", text)
+        self.assertNotIn("workspace", text)
+        self.assertIn("Remove-Item", text)
+
     def test_scan_finds_safe_cache_and_unreferenced_duplicates_without_flagging_referenced_files(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp) / "workspace"

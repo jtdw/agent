@@ -10,7 +10,18 @@ from .gscloud_adapter import _ensure_playwright, _postprocess_gscloud_files
 from .gscloud_modnd1d import _click_row_download, _row_cells, _safe_float, _try_select_data_available
 from .gscloud_products import SENTINEL2_MSI
 from .gscloud_reliability import find_existing_scene_download, validate_download_artifact
-from .gscloud_scene_table import find_scene_row_by_id, get_scene_table_rows, goto_scene_page, scan_scene_table_pages, search_scene_row_by_id, select_scene_records, update_scene_status
+from .gscloud_scene_table import (
+    find_scene_date_cell,
+    find_scene_row_by_id,
+    get_scene_table_rows,
+    goto_scene_page,
+    scan_scene_table_pages,
+    scene_data_available,
+    scene_data_unavailable,
+    search_scene_row_by_id,
+    select_scene_records,
+    update_scene_status,
+)
 from .registry import get_source
 
 
@@ -30,17 +41,16 @@ def parse_sentinel2_cells(cells: list[str], row_index: int) -> dict[str, Any] | 
     scene_id = next((c for c in cells if re.match(r"S2[A-Z]_MSIL[12][AC]_", c.upper())), "")
     if not scene_id:
         return None
-    date = next((c for c in cells if re.match(r"\d{4}-\d{2}-\d{2}", c)), "")
+    date, date_idx = find_scene_date_cell(cells, scene_id)
     lon = None
     lat = None
-    if date:
+    if date and date_idx >= 0:
         try:
-            idx = cells.index(date)
-            lon = _safe_float(cells[idx + 1])
-            lat = _safe_float(cells[idx + 2])
+            lon = _safe_float(cells[date_idx + 1])
+            lat = _safe_float(cells[date_idx + 2])
         except Exception:
             pass
-    data_available = "\u6709" if any(c == "\u6709" for c in cells) else ("\u65e0" if any(c == "\u65e0" for c in cells) else "")
+    data_available = "\u6709" if any(scene_data_available(c) for c in cells) else ("\u65e0" if any(scene_data_unavailable(c) for c in cells) else "")
     return {
         "scene_id": scene_id,
         "date": date,

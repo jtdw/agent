@@ -660,7 +660,8 @@ def _save_markdown_artifact(manager: DataManager, stem: str, text: str) -> Path:
     path = manager.derived_dir / f"{_artifact_safe_name(stem)}.md"
     path.write_text(text, encoding="utf-8")
     try:
-        manager.put_text_document(stem, text, filename=path.name)
+        if not manager.find_dataset_by_path(path):
+            manager.put_text_document(stem, text, filename=path.name)
     except Exception:
         pass
     return path

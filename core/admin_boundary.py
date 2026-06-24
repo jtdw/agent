@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -83,7 +84,9 @@ def _candidate_admin_archives(manager: DataManager) -> list[Path]:
 
 def _cache_dir(manager: DataManager, archive: Path) -> Path:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", archive.stem).strip("._-") or "admin_boundary"
-    return manager.temp_dir / "local_admin_boundaries" / safe
+    shared = _shared_workdir(Path(getattr(manager, "workdir", manager.temp_dir)))
+    cache_key = hashlib.sha1(str(archive.resolve(strict=False)).encode("utf-8", errors="ignore")).hexdigest()[:12]
+    return shared / "temp" / "local_admin_boundaries" / f"{safe}_{cache_key}"
 
 
 def _aliases(region: str) -> list[str]:

@@ -15,10 +15,13 @@ from .gscloud_scene_table import (
     DOWNLOAD_BUTTON_SELECTORS,
     UNAVAILABLE,
     find_scene_row_by_id,
+    find_scene_date_cell,
     get_scene_table_rows,
     goto_scene_page,
     scan_scene_table_pages,
     search_scene_row_by_id,
+    scene_data_available,
+    scene_data_unavailable,
     select_scene_records,
     update_scene_status,
 )
@@ -73,17 +76,16 @@ def parse_modnd1d_cells(cells: list[str], row_index: int) -> dict[str, Any] | No
     scene_id = next((c for c in cells if c.upper().startswith(("MODND1T.", "MODND1D."))), "")
     if not scene_id:
         return None
-    date = next((c for c in cells if re.match(r"\d{4}-\d{2}-\d{2}", c)), "")
+    date, date_idx = find_scene_date_cell(cells, scene_id)
     lon = None
     lat = None
-    if date:
+    if date and date_idx >= 0:
         try:
-            idx = cells.index(date)
-            lon = _safe_float(cells[idx + 1])
-            lat = _safe_float(cells[idx + 2])
+            lon = _safe_float(cells[date_idx + 1])
+            lat = _safe_float(cells[date_idx + 2])
         except Exception:
             pass
-    data_available = AVAILABLE if any(c == AVAILABLE for c in cells) else (UNAVAILABLE if any(c == UNAVAILABLE for c in cells) else "")
+    data_available = AVAILABLE if any(scene_data_available(c) for c in cells) else (UNAVAILABLE if any(scene_data_unavailable(c) for c in cells) else "")
     scene_upper = scene_id.upper()
     product_tag = "NDVI" if ".NDVI." in scene_upper or scene_upper.endswith(".NDVI.V2") else ("QC" if ".QC." in scene_upper else "")
     return {

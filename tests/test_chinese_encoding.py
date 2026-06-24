@@ -107,6 +107,61 @@ class ChineseEncodingTests(unittest.TestCase):
 
         self.assertEqual([], hits)
 
+    def test_rule_intent_classifier_recognizes_common_chinese_gis_processing_terms(self) -> None:
+        from core.conversation_intent import classify_user_intent_rule_based
+
+        prompts = [
+            "\u8bf7\u88c1\u526a\u5f53\u524d\u56fe\u5c42",
+            "\u63d0\u53d6\u6805\u683c\u503c",
+            "\u7f13\u51b2\u533a\u5206\u6790",
+            "\u91cd\u6295\u5f71\u5230 EPSG:4326",
+            "\u7a7a\u95f4\u53e0\u52a0\u5206\u6790",
+        ]
+
+        for prompt in prompts:
+            result = classify_user_intent_rule_based(prompt, {}, {"dataset_count": 1})
+            self.assertEqual("data_processing", result["intent"], prompt)
+
+    def test_task_planner_has_single_canonical_raster_prompt_helpers(self) -> None:
+        text = (PROJECT_ROOT / "core/task_planner.py").read_text(encoding="utf-8")
+
+        for name in (
+            "_prompt_requests_dem_derivatives",
+            "_prompt_requests_raster_reproject",
+            "_prompt_requests_raster_algebra",
+            "_target_crs_from_prompt",
+            "_dem_derivatives_from_prompt",
+        ):
+            self.assertEqual(1, text.count(f"def {name}("), name)
+
+    def test_key_runtime_files_do_not_contain_mojibake_markers(self) -> None:
+        files = [
+            "api_server.py",
+            "core/conversation_intent.py",
+            "core/task_planner.py",
+            "core/admin_boundary.py",
+            "core/data_manager.py",
+            "core/map_layers.py",
+        ]
+        markers = [
+            "\u6fb6",
+            "\u7460",
+            "\u93bb",
+            "\u9359",
+            "\u95c2",
+            "\u74a7",
+            "\u7f02",
+            "\u95c1",
+        ]
+        hits: list[str] = []
+        for rel in files:
+            text = (PROJECT_ROOT / rel).read_text(encoding="utf-8")
+            for marker in markers:
+                if marker in text:
+                    hits.append(f"{rel}: {marker.encode('unicode_escape').decode('ascii')}")
+
+        self.assertEqual([], hits)
+
     def test_data_manager_csv_roundtrip_preserves_chinese_headers_values_and_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="资阳路径_", ignore_cleanup_errors=True) as tmp:
             manager = DataManager(Path(tmp))

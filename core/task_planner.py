@@ -827,40 +827,6 @@ def _active_or_first_raster(context: dict[str, Any]) -> str:
     return _first_dataset_by_type(context, "raster")
 
 
-def _prompt_requests_dem_derivatives(prompt: str) -> bool:
-    text = str(prompt or "").lower()
-    return any(token in text for token in ("slope", "aspect", "terrain", "坡度", "坡向", "地形因子", "地形"))
-
-
-def _prompt_requests_raster_reproject(prompt: str) -> bool:
-    text = str(prompt or "").lower()
-    return any(token in text for token in ("reproject", "projection", "crs", "epsg", "重投影", "投影转换", "坐标系转换"))
-
-
-def _prompt_requests_raster_algebra(prompt: str) -> bool:
-    text = str(prompt or "").lower()
-    return any(token in text for token in ("ndvi", "raster algebra", "map algebra", "栅格代数", "波段计算", "归一化植被指数"))
-
-
-def _target_crs_from_prompt(prompt: str) -> str:
-    match = re.search(r"epsg\s*[:：]?\s*(\d{3,6})", str(prompt or ""), flags=re.IGNORECASE)
-    return f"EPSG:{match.group(1)}" if match else ""
-
-
-def _dem_derivatives_from_prompt(prompt: str) -> str:
-    text = str(prompt or "").lower()
-    derivatives: list[str] = []
-    if "slope" in text or "坡度" in text:
-        derivatives.append("slope")
-    if "aspect" in text or "坡向" in text:
-        derivatives.append("aspect")
-    if "terrain" in text or "地形" in text:
-        for item in ("slope", "aspect", "terrain"):
-            if item not in derivatives:
-                derivatives.append(item)
-    return ",".join(derivatives or ["slope", "aspect"])
-
-
 def _raster_dataset_for_variable(variable: str, raster_names: list[str]) -> str:
     key = re.sub(r"[^0-9a-z]+", "", str(variable or "").lower())
     for name in raster_names:

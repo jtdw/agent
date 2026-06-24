@@ -15,11 +15,14 @@ from .gscloud_scene_table import (
     AVAILABLE,
     DOWNLOAD_BUTTON_SELECTORS,
     UNAVAILABLE,
+    find_scene_date_cell,
     find_scene_row_by_id,
     get_scene_table_rows,
     goto_scene_page,
     scan_scene_table_pages,
     search_scene_row_by_id,
+    scene_data_available,
+    scene_data_unavailable,
     update_scene_status,
 )
 from .registry import get_source
@@ -125,20 +128,19 @@ def parse_landsat_cells(cells: list[str], row_index: int, page_index: int = 0) -
                 row_no = int(value)
                 break
 
-    date = next((c for c in cells if re.match(r"\d{4}-\d{2}-\d{2}", c)), "")
+    date, date_idx = find_scene_date_cell(cells, scene_id)
     cloud = None
     lon = None
     lat = None
-    if date:
+    if date and date_idx >= 0:
         try:
-            date_idx = cells.index(date)
             cloud = _safe_float(cells[date_idx + 1])
             lon = _safe_float(cells[date_idx + 2])
             lat = _safe_float(cells[date_idx + 3])
         except Exception:
             pass
 
-    data_available = AVAILABLE if any(c == AVAILABLE for c in cells) else (UNAVAILABLE if any(c == UNAVAILABLE for c in cells) else "")
+    data_available = AVAILABLE if any(scene_data_available(c) for c in cells) else (UNAVAILABLE if any(scene_data_unavailable(c) for c in cells) else "")
     return {
         "scene_id": scene_id,
         "path": path,

@@ -466,8 +466,6 @@ def classify_user_intent_rule_based(prompt: str, conversation_state: Any, worksp
             "转点",
             "缺失值",
             "字段检查",
-            "缂撳啿",
-            "閲嶆姇",
         ),
     )
     if processing_hits:

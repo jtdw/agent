@@ -3,10 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from typing import Any
+from http.cookiejar import CookieJar
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS
+from core.domestic_sources.gscloud_scene_table import normalize_scene_date, scene_data_available
 from core.product_catalog import product_by_id
 
 
@@ -19,24 +22,60 @@ def _query_gscloud_boundary(product, *, direction: str) -> str:
     dataset_id = str(getattr(product, "dataset_id", "") or "").strip()
     if not dataset_id:
         return ""
-    table_info = {
-        "pageSize": 1,
-        "pageNumber": 1,
-        "sortSet": [{"id": "datadate", "sort": direction}],
-        "filterSet": {"dataexists": "1"},
+    access_url = str(getattr(product, "access_url", "") or "https://www.gscloud.cn/")
+    opener = build_opener(HTTPCookieProcessor(CookieJar()))
+    headers = {
+        "User-Agent": "GIS-Agent-Availability-Scanner/1.0 Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": access_url,
+        "X-Requested-With": "XMLHttpRequest",
     }
-    query = urlencode({"pid": dataset_id, "tableInfo": json.dumps(table_info, separators=(",", ":"))})
-    request = Request(
-        f"https://www.gscloud.cn/wsd/gscloud_wsd/dataset/query_data?{query}",
-        headers={"User-Agent": "GIS-Agent-Availability-Scanner/1.0", "Accept": "application/json"},
-    )
-    with urlopen(request, timeout=8) as response:  # nosec B310: fixed GSCloud endpoint above
-        payload = json.loads(response.read().decode("utf-8"))
-    rows = payload.get("data") if isinstance(payload, dict) else []
-    if not isinstance(rows, list) or not rows:
-        return ""
-    value = rows[0].get("datadate") if isinstance(rows[0], dict) else ""
-    return str(value or "").strip().split(" ", 1)[0]
+    try:
+        opener.open(Request(access_url, headers={"User-Agent": headers["User-Agent"]}), timeout=8).read()
+    except Exception:
+        pass
+
+    page_size = 20
+    max_pages = 25
+    for page_number in range(1, max_pages + 1):
+        table_info = {
+            "pageSize": page_size,
+            "pageNumber": page_number,
+            "sortSet": [{"id": "dataexists", "sort": "desc"}, {"id": "datadate", "sort": direction}],
+            "multiSort": True,
+            "filterSet": {},
+        }
+        query = urlencode({"pid": dataset_id, "tableInfo": json.dumps(table_info, separators=(",", ":"))})
+        request = Request(
+            f"https://www.gscloud.cn/wsd/gscloud_wsd/dataset/query_data?{query}",
+            headers=headers,
+        )
+        try:
+            try:
+                response_context = opener.open(request, timeout=8)
+            except AttributeError:
+                response_context = urlopen(request, timeout=8)  # nosec B310: fixed GSCloud endpoint above
+            with response_context as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
+            continue
+        rows = payload.get("data") if isinstance(payload, dict) else []
+        if not isinstance(rows, list) or not rows:
+            break
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not scene_data_available(row.get("dataexists", "")):
+                continue
+            value = (
+                normalize_scene_date(row.get("datadate"))
+                or normalize_scene_date(row.get("dataid"))
+                or normalize_scene_date(row.get("identifications"))
+                or normalize_scene_date(row.get("landsat_product_identifier_l2"))
+            )
+            if value:
+                return value
+    return ""
 
 
 def _source_temporal_coverage(product, gscloud_product) -> tuple[dict[str, str], str, list[str]]:
