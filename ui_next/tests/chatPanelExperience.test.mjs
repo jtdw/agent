@@ -20,6 +20,7 @@ const promptStreamActionHookSource = await readFile('src/components/chat/useChat
 const confirmationActionHookSource = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
 const conversationHeaderSource = await readFile('src/components/chat/ChatConversationHeader.tsx', 'utf8');
 const sessionSidebarSource = await readFile('src/components/chat/ChatSessionSidebar.tsx', 'utf8');
+const messageListSource = await readFile('src/components/chat/ChatMessageList.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -130,9 +131,15 @@ assert.match(sessionSidebarSource, /export function ChatSessionSidebar/, 'ChatSe
 assert.match(sessionSidebarSource, /data-testid="chat-session-list"/, 'ChatSessionSidebar should preserve the session list test id');
 assert.match(sessionSidebarSource, /data-testid="chat-new-session"/, 'ChatSessionSidebar should preserve the new session test id');
 assert.match(sessionSidebarSource, /sessionDate\(session\)/, 'ChatSessionSidebar should preserve session date labels');
-assert.equal(source.includes('MessageSourceBadge'), true);
+assert.match(source, /<ChatMessageList/, 'ChatPanel should render messages through an isolated message list component');
+assert.doesNotMatch(source, /data-testid="chat-empty-state"/, 'ChatPanel should not own the empty-state message list JSX inline');
+assert.match(messageListSource, /export function ChatMessageList/, 'ChatMessageList should be exported');
+assert.match(messageListSource, /data-testid="chat-empty-state"/, 'ChatMessageList should preserve the empty-state test id');
+assert.match(messageListSource, /<ChatMessageRenderer/, 'ChatMessageList should preserve message rendering');
+assert.match(messageListSource, /function ThinkingStatusCard/, 'ChatMessageList should preserve the working-status card');
+assert.match(messageListSource, /function MessageSourceBadge/, 'ChatMessageList should preserve message source badges');
 assert.equal(source.includes('lastFailedPrompt'), true);
-assert.equal(source.includes('重试'), true);
+assert.equal(messageListSource.includes('重试'), true);
 assert.equal(source.includes('检查工作区数据'), true);
 assert.equal(source.includes('准备下载数据'), true);
 assert.equal(layerPanelSource.includes('if (!user) {'), true);

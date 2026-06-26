@@ -5,6 +5,7 @@ const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
 const renderer = await readFile('src/components/ChatMessageRenderer.tsx', 'utf8');
 const chatPanel = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const sessionSidebar = await readFile('src/components/chat/ChatSessionSidebar.tsx', 'utf8');
+const messageList = await readFile('src/components/chat/ChatMessageList.tsx', 'utf8');
 const chatUploadsHook = await readFile('src/components/chat/useChatUploads.ts', 'utf8');
 const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const confirmationActionHook = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
@@ -41,7 +42,8 @@ assert.match(artifactCard, /status.*missing|missing.*status|文件失效|鏂囦�
 
 assert.match(chatPanel, /export function ChatWorkspace/, 'ChatPanel must expose page and floating chat workspace');
 assert.match(chatPanel, /<ChatComposer/, 'ChatPanel must use ChatComposer');
-assert.match(chatPanel, /<ChatMessageRenderer/, 'ChatPanel must use ChatMessageRenderer');
+assert.match(chatPanel, /<ChatMessageList/, 'ChatPanel must use ChatMessageList');
+assert.match(messageList, /<ChatMessageRenderer/, 'ChatMessageList must use ChatMessageRenderer');
 assert.match(chatPanel, /chatModels/, 'ChatPanel must load and render model selection');
 assert.match(chatPanel, /workspaceMentions/, 'ChatPanel must load workspace @ mentions');
 assert.match(chatPanel, /useChatUploads/, 'ChatPanel should delegate upload control to a focused hook');

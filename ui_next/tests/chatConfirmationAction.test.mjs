@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const renderer = await readFile('src/components/ChatMessageRenderer.tsx', 'utf8');
 const panel = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const messageList = await readFile('src/components/chat/ChatMessageList.tsx', 'utf8');
 const api = await readFile('src/lib/api.ts', 'utf8');
 
 assert.match(renderer, /confirmation_required/, 'ChatMessageRenderer must render confirmation-required actions');
@@ -12,7 +13,7 @@ assert.match(renderer, /data-testid="download-confirmation-required"/, 'Confirma
 assert.match(panel, /confirmAction/, 'ChatPanel must implement a confirmAction handler');
 assert.match(panel, /api\.confirmChatAction/, 'ChatPanel must confirm actions through the structured confirmation API');
 assert.doesNotMatch(panel, /confirmed_action_id=\$\{/, 'ChatPanel must not append confirmation tokens to a visible user message');
-assert.match(panel, /onConfirmAction=\{confirmAction\}/, 'ChatPanel must wire confirmation callback into the message renderer');
+assert.match(messageList, /onConfirmAction=\{confirmAction\}/, 'ChatMessageList must wire confirmation callback into the message renderer');
 assert.match(api, /confirmation_required/, 'ChatActionRequired type must explicitly include confirmation_required');
 assert.match(api, /confirmed_action_id\?: string/, 'ChatActionRequired type must expose confirmed_action_id');
 assert.match(api, /confirmation_prompt\?: string/, 'ChatActionRequired type must expose confirmation_prompt');
