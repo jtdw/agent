@@ -6,6 +6,7 @@ const chatSessionsHookSource = await readFile('src/components/chat/useChatSessio
 const workspaceMentionsHookSource = await readFile('src/components/chat/useChatWorkspaceMentions.ts', 'utf8');
 const resizeHookSource = await readFile('src/components/chat/useChatPanelResize.ts', 'utf8');
 const autoScrollHookSource = await readFile('src/components/chat/useChatAutoScroll.ts', 'utf8');
+const externalPromptHookSource = await readFile('src/components/chat/useChatExternalPrompt.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -26,6 +27,13 @@ assert.doesNotMatch(source, /stickToBottomRef/, 'ChatPanel should not own sticky
 assert.match(autoScrollHookSource, /export function useChatAutoScroll/, 'useChatAutoScroll hook should be exported');
 assert.match(autoScrollHookSource, /scrollHeight - target\.scrollTop - target\.clientHeight < 96/, 'auto-scroll hook should preserve the existing sticky threshold');
 assert.match(autoScrollHookSource, /scrollTo\(\{ top: listRef\.current\.scrollHeight, behavior: 'smooth' \}\)/, 'auto-scroll hook should keep smooth scroll-to-bottom behavior');
+assert.match(source, /useChatExternalPrompt/, 'ChatPanel should delegate external prompt dispatch to a focused hook');
+assert.doesNotMatch(source, /if \(externalPrompt\?\.prompt\) sendPrompt\(externalPrompt\.prompt\)/, 'ChatPanel should not own external prompt effect inline');
+assert.match(externalPromptHookSource, /export function useChatExternalPrompt/, 'useChatExternalPrompt hook should be exported');
+assert.match(externalPromptHookSource, /externalPrompt\?\.prompt/, 'external prompt hook should preserve prompt presence guard');
+assert.match(externalPromptHookSource, /sendPromptRef\.current\(externalPrompt\.prompt\)/, 'external prompt hook should send the provided prompt through the current sender');
+assert.match(externalPromptHookSource, /sendPromptRef\.current = sendPrompt/, 'external prompt hook should keep the latest sender without widening dispatch triggers');
+assert.match(externalPromptHookSource, /\[externalPrompt\?\.id\]/, 'external prompt hook should retain id-scoped triggering');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);

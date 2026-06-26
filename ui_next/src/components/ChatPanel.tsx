@@ -28,6 +28,7 @@ import { useChatUploads } from './chat/useChatUploads';
 import { useChatVoiceInput } from './chat/useChatVoiceInput';
 import { useChatPanelResize } from './chat/useChatPanelResize';
 import { useChatAutoScroll } from './chat/useChatAutoScroll';
+import { useChatExternalPrompt } from './chat/useChatExternalPrompt';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -545,10 +546,7 @@ export function ChatWorkspace({
 
   const send = () => sendPrompt(input);
 
-  useEffect(() => {
-    if (externalPrompt?.prompt) sendPrompt(externalPrompt.prompt);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [externalPrompt?.id]);
+  useChatExternalPrompt({ externalPrompt, sendPrompt });
 
   const newSession = async () => {
     if (thinking) return;
