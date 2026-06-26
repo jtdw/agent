@@ -33,6 +33,7 @@ secrets/
 *cookies*.json
 
 # IDE and OS files
+.superpowers/
 .vscode/
 .idea/
 .streamlit/secrets.toml
