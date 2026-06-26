@@ -18,6 +18,7 @@ import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
+import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
 import { useChatSessions } from './chat/useChatSessions';
 
@@ -309,10 +310,12 @@ export function ChatWorkspace({
   mentionDatasets = EMPTY_MENTION_DATASETS,
   mode = 'floating'
 }: ChatWorkspaceProps) {
+  const userId = user?.user_id || '';
+  const streamLifecycle = useChatStreamLifecycle({ userId });
+  const { thinking } = streamLifecycle;
   const [width, setWidth] = useState(430);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [thinking, setThinking] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -332,8 +335,6 @@ export function ChatWorkspace({
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<unknown>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const activeTaskIdRef = useRef<string>('');
   const stickToBottomRef = useRef(true);
   const handledLoginMessageRef = useRef('');
   const announcedDownloadJobsRef = useRef<Set<string>>(new Set());
@@ -341,7 +342,6 @@ export function ChatWorkspace({
   const realtimeEventSourceRef = useRef<EventSource | null>(null);
   const realtimeEventIdsRef = useRef<Set<string>>(new Set());
   const realtimeTaskVersionRef = useRef(0);
-  const userId = user?.user_id || '';
   const handleSessionMessagesRefreshed = useCallback((incoming: ChatMessage[]) => {
     setMessages((current) => mergeServerMessages(current, normalizeChatMessages(incoming)));
   }, []);
@@ -800,12 +800,10 @@ export function ChatWorkspace({
       return;
     }
     const draft = buildSendPromptDraft({ text, realtimeSyncState });
-    setThinking(true);
     const controller = new AbortController();
     const { taskId, optimisticUserMessage, streamingAssistantMessage } = draft;
     setMessages((v) => [...v, optimisticUserMessage, streamingAssistantMessage]);
-    abortRef.current = controller;
-    activeTaskIdRef.current = taskId;
+    streamLifecycle.startTask(taskId, controller);
     try {
       await api.streamChat(
         text,
@@ -829,9 +827,7 @@ export function ChatWorkspace({
       setLastFailedPrompt(text);
       setError('');
     } finally {
-      setThinking(false);
-      if (abortRef.current === controller) abortRef.current = null;
-      if (activeTaskIdRef.current === taskId) activeTaskIdRef.current = '';
+      streamLifecycle.finishTask(taskId, controller);
     }
   };
 
@@ -844,11 +840,9 @@ export function ChatWorkspace({
       return;
     }
     setError('');
-    setThinking(true);
     const controller = new AbortController();
     const taskId = `chat_confirm_${Date.now()}_${hashString(token)}`;
-    abortRef.current = controller;
-    activeTaskIdRef.current = taskId;
+    streamLifecycle.startTask(taskId, controller);
     try {
       const r = await api.confirmChatAction(token, prompt || '确认执行', userId, currentSessionId, { ...chatContext, session_id: currentSessionId }, controller.signal, taskId);
       if (r.messages) {
@@ -874,21 +868,11 @@ export function ChatWorkspace({
       setMessages((v) => [...v, { role: 'assistant', content, meta: { reason: 'error' } }]);
       setError('');
     } finally {
-      setThinking(false);
-      if (abortRef.current === controller) abortRef.current = null;
-      if (activeTaskIdRef.current === taskId) activeTaskIdRef.current = '';
+      streamLifecycle.finishTask(taskId, controller);
     }
   };
 
   const send = () => sendPrompt(input);
-  const stopCurrentRequest = () => {
-    const taskId = activeTaskIdRef.current;
-    if (taskId) api.cancelChatTask(taskId, userId, '用户点击停止。').catch(() => {});
-    abortRef.current?.abort();
-    abortRef.current = null;
-    activeTaskIdRef.current = '';
-    setThinking(false);
-  };
 
   useEffect(() => {
     if (externalPrompt?.prompt) sendPrompt(externalPrompt.prompt);
@@ -1010,7 +994,7 @@ export function ChatWorkspace({
       setError('请先登录账号，再重新生成回答。');
       return;
     }
-    setThinking(true);
+    streamLifecycle.startBusy();
     setError('');
     try {
       const r = await api.retryMessage(editingId, text, userId, currentSessionId);
@@ -1024,7 +1008,7 @@ export function ChatWorkspace({
     } catch (e) {
       setError(e instanceof Error ? e.message : '重新生成失败');
     } finally {
-      setThinking(false);
+      streamLifecycle.finishBusy();
     }
   };
 
@@ -1063,7 +1047,7 @@ export function ChatWorkspace({
       setError('请先登录账号，再运行论文流程。');
       return;
     }
-    setThinking(true);
+    streamLifecycle.startBusy();
     setError('');
     const prompt = '一键检查并运行闪电河流域土壤水分融合论文流程。';
     setMessages((v) => [...v, { role: 'user', content: prompt }]);
@@ -1077,7 +1061,7 @@ export function ChatWorkspace({
       setLastFailedPrompt(prompt);
       setError('');
     } finally {
-      setThinking(false);
+      streamLifecycle.finishBusy();
     }
   };
 
@@ -1363,7 +1347,7 @@ export function ChatWorkspace({
                 onChange={setInput}
                 onSend={send}
                 onUpload={uploadFiles}
-                onStop={stopCurrentRequest}
+                onStop={streamLifecycle.stopCurrentRequest}
                 sending={thinking}
                 uploading={uploading}
                 disabled={!userId}
