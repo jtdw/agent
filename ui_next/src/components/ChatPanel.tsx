@@ -35,6 +35,7 @@ import { useChatNewSessionAction } from './chat/useChatNewSessionAction';
 import { useChatSwitchSessionAction } from './chat/useChatSwitchSessionAction';
 import { useChatDeleteSessionAction } from './chat/useChatDeleteSessionAction';
 import { useChatMapCommandAction } from './chat/useChatMapCommandAction';
+import { useChatPromptPreparation } from './chat/useChatPromptPreparation';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -538,6 +539,12 @@ export function ChatWorkspace({
     onMapTextCommand,
     setMessages,
   });
+  const { preparePrompt } = useChatPromptPreparation({
+    thinking,
+    userId,
+    setInput,
+    setError,
+  });
 
   const chooseClarification = (value: string, label: string) => {
     if (value === 'upload_boundary') {
@@ -555,14 +562,8 @@ export function ChatWorkspace({
   const appendSystem = (content: string) => setMessages((v) => [...v, { role: 'system', content }]);
 
   const sendPrompt = async (prompt: string) => {
-    const text = prompt.trim();
-    if (!text || thinking) return;
-    if (!userId) {
-      setError('请先登录账号，再使用智能助手对话。');
-      return;
-    }
-    setInput('');
-    setError('');
+    const text = preparePrompt(prompt);
+    if (!text) return;
     if (handleMapCommand(text)) return;
     const draft = buildSendPromptDraft({ text, realtimeSyncState });
     const controller = new AbortController();
