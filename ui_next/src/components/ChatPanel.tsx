@@ -5,7 +5,6 @@ import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSqua
 import { api, ChatMessage, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
-import { isLocalSecureContext } from './mapLayerPolicy';
 import { parseMapTextCommand, type ParsedMapTextCommand } from './mapTextCommands';
 import { assistantErrorContent, assistantReplyContent, normalizeChatMessages } from './chatMessageContent';
 import type { ChatContextPayload } from '@/lib/chatContext';
@@ -27,6 +26,7 @@ import { useChatRealtimeEvents } from './chat/useChatRealtimeEvents';
 import { useChatDownloads } from './chat/useChatDownloads';
 import { useChatWorkspaceMentions } from './chat/useChatWorkspaceMentions';
 import { useChatUploads } from './chat/useChatUploads';
+import { useChatVoiceInput } from './chat/useChatVoiceInput';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -305,14 +305,10 @@ export function ChatWorkspace({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [lastFailedPrompt, setLastFailedPrompt] = useState('');
-  const [listening, setListening] = useState(false);
-  const [voiceSupported, setVoiceSupported] = useState(true);
-  const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
   const { renderMessages, taskSummaryItems } = useChatTaskWorkbench(messages);
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<unknown>(null);
   const stickToBottomRef = useRef(true);
   const mountedRef = useRef(true);
   const handleSessionMessagesRefreshed = useCallback((incoming: ChatMessage[]) => {
@@ -417,6 +413,12 @@ export function ChatWorkspace({
     setMessages,
     setWorkspaceMentions,
   });
+  const {
+    listening,
+    voiceSupported,
+    voiceUnavailableReason,
+    toggleVoice,
+  } = useChatVoiceInput({ setInput, setError });
 
   const {
     gscloudLoginOpen,
@@ -456,49 +458,6 @@ export function ChatWorkspace({
     if (!stickToBottomRef.current) return;
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, thinking]);
-
-  useEffect(() => {
-    if (!isLocalSecureContext(window.location.protocol, window.location.hostname)) {
-      setVoiceSupported(false);
-      setVoiceUnavailableReason('浏览器只允许 HTTPS、localhost 或 127.0.0.1 页面使用麦克风。请用 http://127.0.0.1:5173 打开，或部署 HTTPS。');
-      return;
-    }
-    const SpeechRecognition = (window as unknown as { SpeechRecognition?: new () => unknown; webkitSpeechRecognition?: new () => unknown }).SpeechRecognition
-      || (window as unknown as { webkitSpeechRecognition?: new () => unknown }).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      setVoiceSupported(false);
-      setVoiceUnavailableReason('当前浏览器不支持语音识别。请使用 Chrome 或 Edge，并允许麦克风权限。');
-      return;
-    }
-    const recognition = new SpeechRecognition() as {
-      lang: string;
-      continuous: boolean;
-      interimResults: boolean;
-      start: () => void;
-      stop: () => void;
-      onresult: ((event: { results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
-      onerror: (() => void) | null;
-      onend: (() => void) | null;
-    };
-    recognition.lang = 'zh-CN';
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.onresult = (event) => {
-      let finalText = '';
-      let interimText = '';
-      for (let i = 0; i < event.results.length; i += 1) {
-        const text = event.results[i][0]?.transcript || '';
-        if (event.results[i].isFinal) finalText += text;
-        else interimText += text;
-      }
-      const text = (finalText || interimText).trim();
-      if (text) setInput(text);
-    };
-    recognition.onerror = () => setListening(false);
-    recognition.onend = () => setListening(false);
-    recognitionRef.current = recognition;
-    return () => recognition.stop();
-  }, []);
 
   const appendSystem = (content: string) => setMessages((v) => [...v, { role: 'system', content }]);
 
@@ -596,27 +555,6 @@ export function ChatWorkspace({
     if (externalPrompt?.prompt) sendPrompt(externalPrompt.prompt);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [externalPrompt?.id]);
-
-  const toggleVoice = () => {
-    if (!voiceSupported) {
-      setError(voiceUnavailableReason || '当前浏览器不支持语音识别。请使用 Chrome 或 Edge，并允许麦克风权限。');
-      return;
-    }
-    const recognition = recognitionRef.current as { start: () => void; stop: () => void } | null;
-    if (!recognition) return;
-    try {
-      if (listening) {
-        recognition.stop();
-        setListening(false);
-      } else {
-        setError('');
-        recognition.start();
-        setListening(true);
-      }
-    } catch {
-      setListening(false);
-    }
-  };
 
   const newSession = async () => {
     if (thinking) return;

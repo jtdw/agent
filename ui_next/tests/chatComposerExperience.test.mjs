@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
+const chatPanel = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const voiceHook = await readFile('src/components/chat/useChatVoiceInput.ts', 'utf8');
 const css = await readFile('src/index.css', 'utf8');
 
 assert.match(composer, /data-testid="chat-composer"/, 'ChatComposer must keep its root test id');
@@ -9,6 +11,11 @@ assert.match(composer, /data-testid="chat-input"/, 'ChatComposer must keep its t
 assert.match(composer, /data-testid="chat-send"/, 'ChatComposer must keep its send action test id');
 assert.match(composer, /data-testid="chat-stop"/, 'ChatComposer must keep its stop action test id');
 assert.match(composer, /data-testid="chat-voice"/, 'ChatComposer must keep its voice action test id');
+assert.match(chatPanel, /useChatVoiceInput/, 'ChatPanel should delegate browser voice input to a focused hook');
+assert.doesNotMatch(chatPanel, /SpeechRecognition|recognitionRef|setVoiceSupported|setVoiceUnavailableReason/, 'ChatPanel should not own browser speech recognition state after hook extraction');
+assert.match(voiceHook, /export function useChatVoiceInput/, 'useChatVoiceInput hook should be exported');
+assert.match(voiceHook, /SpeechRecognition|webkitSpeechRecognition/, 'Voice hook should own browser speech recognition setup');
+assert.match(voiceHook, /isLocalSecureContext/, 'Voice hook should keep secure-context gating for microphone access');
 assert.match(composer, /data-testid="chat-mention-trigger"/, 'ChatComposer must keep the workspace mention action test id');
 assert.match(composer, /className="chat-composer-input-frame"/, 'Composer controls should be wrapped in a stable command-frame');
 assert.match(composer, /className="chat-composer-tool-group"/, 'Secondary tools should be grouped for stable spacing');
