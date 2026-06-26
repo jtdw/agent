@@ -19,11 +19,13 @@ async function loadTs(path) {
 
 const panelSource = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const editingHookSource = await readFile('src/components/chat/useChatEditing.ts', 'utf8');
+const thesisWorkflowHookSource = await readFile('src/components/chat/useChatThesisWorkflow.ts', 'utf8');
 const { source: modelSource, module: model } = await loadTs('src/components/chat/chatActionModel.ts');
 
 assert.match(editingHookSource, /buildRetryEditedMessageDraft/, 'useChatEditing should delegate edited-message retry draft construction');
 assert.doesNotMatch(panelSource, /buildRetryEditedMessageDraft/, 'ChatPanel should not own edited-message retry draft construction after hook extraction');
-assert.match(panelSource, /THESIS_WORKFLOW_PROMPT/, 'ChatPanel should use the shared thesis workflow prompt');
+assert.match(thesisWorkflowHookSource, /THESIS_WORKFLOW_PROMPT/, 'useChatThesisWorkflow should use the shared thesis workflow prompt');
+assert.doesNotMatch(panelSource, /THESIS_WORKFLOW_PROMPT/, 'ChatPanel should not own thesis workflow prompt after hook extraction');
 assert.doesNotMatch(panelSource, /const text = editText\.trim\(\)/, 'ChatPanel should not inline retry edit text normalization');
 assert.doesNotMatch(panelSource, /const prompt = '一键检查并运行闪电河流域土壤水分融合论文流程。'/, 'ChatPanel should not inline the thesis workflow prompt');
 

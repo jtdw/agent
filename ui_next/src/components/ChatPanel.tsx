@@ -14,7 +14,6 @@ import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
-import { THESIS_WORKFLOW_PROMPT } from './chat/chatActionModel';
 import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
@@ -30,6 +29,7 @@ import { useChatPanelResize } from './chat/useChatPanelResize';
 import { useChatAutoScroll } from './chat/useChatAutoScroll';
 import { useChatExternalPrompt } from './chat/useChatExternalPrompt';
 import { useChatEditing } from './chat/useChatEditing';
+import { useChatThesisWorkflow } from './chat/useChatThesisWorkflow';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -372,6 +372,15 @@ export function ChatWorkspace({
     setError,
     onRetryComplete: handleEditedRetryComplete,
   });
+  const { runThesisWorkflow } = useChatThesisWorkflow({
+    thinking,
+    userId,
+    currentSessionId,
+    streamLifecycle,
+    setError,
+    setMessages,
+    setLastFailedPrompt,
+  });
 
   const mergeRealtimeEvent = useCallback((event: RealtimeChatEvent, syncState: 'connecting' | 'live' | 'polling') => {
     const taskUpdate = event.task_update && typeof event.task_update === 'object' ? event.task_update : {};
@@ -646,30 +655,6 @@ export function ChatWorkspace({
       cancelEdit();
     } catch (e) {
       setError(e instanceof Error ? e.message : '删除对话失败');
-    }
-  };
-
-  const runThesisWorkflow = async () => {
-    if (thinking) return;
-    if (!userId) {
-      setError('请先登录账号，再运行论文流程。');
-      return;
-    }
-    streamLifecycle.startBusy();
-    setError('');
-    const prompt = THESIS_WORKFLOW_PROMPT;
-    setMessages((v) => [...v, { role: 'user', content: prompt }]);
-    try {
-      const r = await api.runSoilMoistureWorkflow(userId, currentSessionId);
-      setMessages((v) => [...v, { role: 'assistant', content: assistantReplyContent(r.reply), meta: { model: r.model, reason: r.reason } }]);
-      setLastFailedPrompt('');
-    } catch (e) {
-      const content = assistantErrorContent(e);
-      setMessages((v) => [...v, { role: 'assistant', content, meta: { reason: 'error' } }]);
-      setLastFailedPrompt(prompt);
-      setError('');
-    } finally {
-      streamLifecycle.finishBusy();
     }
   };
 

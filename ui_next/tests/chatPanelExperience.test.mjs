@@ -8,6 +8,7 @@ const resizeHookSource = await readFile('src/components/chat/useChatPanelResize.
 const autoScrollHookSource = await readFile('src/components/chat/useChatAutoScroll.ts', 'utf8');
 const externalPromptHookSource = await readFile('src/components/chat/useChatExternalPrompt.ts', 'utf8');
 const editingHookSource = await readFile('src/components/chat/useChatEditing.ts', 'utf8');
+const thesisWorkflowHookSource = await readFile('src/components/chat/useChatThesisWorkflow.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -43,6 +44,14 @@ assert.match(editingHookSource, /buildRetryEditedMessageDraft/, 'useChatEditing 
 assert.match(editingHookSource, /api\.retryMessage\(draft\.messageId, draft\.text, userId, currentSessionId\)/, 'useChatEditing should preserve session-scoped retry API call');
 assert.match(editingHookSource, /onRetryComplete\(response\)/, 'useChatEditing should hand retry responses back to ChatPanel for existing merge/session reconciliation');
 assert.match(source, /mergeServerMessages\(current, normalizeChatMessages\(response\.messages\)\)/, 'ChatPanel should keep stable message merging after edited-message retry');
+assert.match(source, /useChatThesisWorkflow/, 'ChatPanel should delegate thesis workflow execution to a focused hook');
+assert.doesNotMatch(source, /const runThesisWorkflow = async/, 'ChatPanel should not own thesis workflow execution inline');
+assert.match(thesisWorkflowHookSource, /export function useChatThesisWorkflow/, 'useChatThesisWorkflow hook should be exported');
+assert.match(thesisWorkflowHookSource, /THESIS_WORKFLOW_PROMPT/, 'thesis workflow hook should preserve the shared workflow prompt');
+assert.match(thesisWorkflowHookSource, /api\.runSoilMoistureWorkflow\(userId, currentSessionId\)/, 'thesis workflow hook should preserve the session-scoped workflow API call');
+assert.match(thesisWorkflowHookSource, /assistantReplyContent\(response\.reply\)/, 'thesis workflow hook should preserve assistant reply normalization');
+assert.match(thesisWorkflowHookSource, /assistantErrorContent\(error\)/, 'thesis workflow hook should preserve assistant error normalization');
+assert.match(thesisWorkflowHookSource, /setLastFailedPrompt\(prompt\)/, 'thesis workflow hook should preserve retry prompt on failure');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
