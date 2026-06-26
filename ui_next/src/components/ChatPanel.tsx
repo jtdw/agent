@@ -23,6 +23,7 @@ import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
 import { useChatSessions } from './chat/useChatSessions';
 import { useChatTaskWorkbench } from './chat/useChatTaskWorkbench';
+import { useChatRealtimeEvents } from './chat/useChatRealtimeEvents';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -331,7 +332,6 @@ export function ChatWorkspace({
   const [gscloudLoginOpen, setGSCloudLoginOpen] = useState(false);
   const [pendingLoginJobId, setPendingLoginJobId] = useState('');
   const [resumeReadyJobIds, setResumeReadyJobIds] = useState<Set<string>>(() => new Set());
-  const [realtimeSyncState, setRealtimeSyncState] = useState<'connecting' | 'live' | 'polling'>('polling');
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -340,9 +340,6 @@ export function ChatWorkspace({
   const handledLoginMessageRef = useRef('');
   const announcedDownloadJobsRef = useRef<Set<string>>(new Set());
   const mountedRef = useRef(true);
-  const realtimeEventSourceRef = useRef<EventSource | null>(null);
-  const realtimeEventIdsRef = useRef<Set<string>>(new Set());
-  const realtimeTaskVersionRef = useRef(0);
   const handleSessionMessagesRefreshed = useCallback((incoming: ChatMessage[]) => {
     setMessages((current) => mergeServerMessages(current, normalizeChatMessages(incoming)));
   }, []);
@@ -379,18 +376,7 @@ export function ChatWorkspace({
     changeChatModel,
   } = useChatModels({ userId, sessionId: currentSessionId });
 
-  function applyRealtimeEvent(event: RealtimeChatEvent) {
-    const eventId = String(event.event_id || '').trim();
-    if (!eventId || realtimeEventIdsRef.current.has(eventId)) return;
-    realtimeEventIdsRef.current.add(eventId);
-    if (realtimeEventIdsRef.current.size > 800) {
-      realtimeEventIdsRef.current = new Set(Array.from(realtimeEventIdsRef.current).slice(-400));
-    }
-    const version = Number(event.version || 0);
-    if (version > 0 && version < 1_000_000_000) {
-      if (version <= realtimeTaskVersionRef.current) return;
-      realtimeTaskVersionRef.current = version;
-    }
+  const mergeRealtimeEvent = useCallback((event: RealtimeChatEvent, syncState: 'connecting' | 'live' | 'polling') => {
     const taskUpdate = event.task_update && typeof event.task_update === 'object' ? event.task_update : {};
     const meta: Record<string, unknown> = {
       task_id: event.task_id || '',
@@ -403,7 +389,7 @@ export function ChatWorkspace({
       started_at: event.started_at,
       elapsed_ms: event.elapsed_ms,
       timeout_reason: event.timeout_reason,
-      realtime_sync: realtimeSyncState,
+      realtime_sync: syncState,
       streaming: event.kind === 'model_token',
       ...taskUpdate,
     };
@@ -428,7 +414,13 @@ export function ChatWorkspace({
       }
       return current;
     });
-  }
+  }, []);
+
+  const { realtimeSyncState, applyRealtimeEvent } = useChatRealtimeEvents({
+    userId,
+    sessionId: currentSessionId,
+    onEvent: mergeRealtimeEvent,
+  });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -436,48 +428,6 @@ export function ChatWorkspace({
       mountedRef.current = false;
     };
   }, []);
-
-  useEffect(() => {
-    realtimeEventSourceRef.current?.close();
-    realtimeEventSourceRef.current = null;
-    realtimeEventIdsRef.current = new Set();
-    realtimeTaskVersionRef.current = 0;
-    if (!userId || !currentSessionId) {
-      setRealtimeSyncState('polling');
-      return;
-    }
-    let disposed = false;
-    setRealtimeSyncState('connecting');
-    const receive = (event: RealtimeChatEvent) => {
-      if (!disposed) applyRealtimeEvent(event);
-    };
-    api.replayChatEvents(userId, currentSessionId, 0)
-      .then((result) => result.events.forEach(receive))
-      .catch(() => {
-        if (!disposed) setRealtimeSyncState('polling');
-      });
-    const source = api.openChatEventStream(userId, currentSessionId, 0);
-    realtimeEventSourceRef.current = source;
-    const eventTypes: RealtimeChatEvent['kind'][] = ['task_status', 'task_progress', 'task_result', 'model_token', 'model_complete', 'warning', 'error'];
-    const handle = (raw: MessageEvent<string>) => {
-      try {
-        receive(JSON.parse(raw.data) as RealtimeChatEvent);
-      } catch {}
-    };
-    eventTypes.forEach((type) => source.addEventListener(type, handle as EventListener));
-    source.onopen = () => {
-      if (!disposed) setRealtimeSyncState('live');
-    };
-    source.onerror = () => {
-      if (!disposed) setRealtimeSyncState('polling');
-    };
-    return () => {
-      disposed = true;
-      eventTypes.forEach((type) => source.removeEventListener(type, handle as EventListener));
-      source.close();
-      if (realtimeEventSourceRef.current === source) realtimeEventSourceRef.current = null;
-    };
-  }, [userId, currentSessionId]);
 
   useEffect(() => {
     const message = [...messages].reverse().find((item) => item.meta?.action_required?.type === 'login_required');
