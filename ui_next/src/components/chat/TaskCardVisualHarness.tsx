@@ -23,6 +23,19 @@ const harnessMessage: ChatMessage = {
     execution_summary: {
       summary: '读取当前工作区上下文，校验输入数据，再准备工具调用与成果注册。'
     },
+    presentation_result: {
+      artifact_refs: [
+        { artifact_id: 'artifact_harness_report', title: 'boundary_check_report.md', type: 'document' },
+        { artifact_id: 'artifact_harness_grid', title: 'target_grid_preview.tif', type: 'raster' }
+      ],
+      map_layer_refs: [
+        { layer_id: 'layer_harness_boundary', name: 'Boundary validation preview' }
+      ],
+      next_action_suggestions: [
+        'Review boundary check report',
+        'Add validation preview to map'
+      ]
+    },
     management_view: {
       status: 'running',
       user_message: '正在检查字段、坐标系和空间范围。',
@@ -50,13 +63,13 @@ export function TaskCardVisualHarness() {
   return (
     <main data-testid="task-card-visual-harness" className="min-h-screen bg-slate-100 p-4 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
       <section className="mx-auto grid h-[calc(100vh-2rem)] max-w-6xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,.16)] dark:border-slate-800 dark:bg-slate-900 lg:grid-cols-[minmax(0,1fr)_280px]">
-        <div className="flex min-h-0 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-col">
           <header className="border-b border-slate-200/80 px-5 py-4 dark:border-slate-800">
             <div className="text-xs font-black uppercase tracking-[0.12em] text-blue-600 dark:text-cyan-300">GIS Agent Visual Harness</div>
             <h1 className="mt-1 text-lg font-black">实时任务卡与公开过程</h1>
           </header>
-          <div className="min-h-0 flex-1 overflow-y-auto bg-gradient-to-b from-slate-50 to-white p-5 dark:from-slate-950/30 dark:to-slate-900/30">
-            <div className="task-card-harness-frame mx-auto w-full max-w-3xl">
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-gradient-to-b from-slate-50 to-white p-5 dark:from-slate-950/30 dark:to-slate-900/30">
+            <div className="task-card-harness-frame mx-auto min-w-0 w-full max-w-3xl">
             <ChatMessageRenderer
               message={harnessMessage}
               content=""

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSquare, Pencil, PlayCircle, Plus, RefreshCcw, SearchCheck, Sparkles, Trash2, UploadCloud, Wrench, X } from 'lucide-react';
-import { api, ChatMessage, ChatModelState, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
+import { api, ChatMessage, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
 import { isLocalSecureContext } from './mapLayerPolicy';
@@ -17,6 +17,7 @@ import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
+import { useChatModels } from './chat/useChatModels';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -320,8 +321,6 @@ export function ChatWorkspace({
   const [listening, setListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
-  const [chatModels, setChatModels] = useState<ChatModelState | null>(null);
-  const [modelLoading, setModelLoading] = useState(false);
   const visibleSessions = useMemo(() => {
     const byId = new Map<string, ChatSession>();
     sessions.forEach((session) => {
@@ -330,14 +329,6 @@ export function ChatWorkspace({
     });
     return Array.from(byId.values());
   }, [sessions]);
-  const visibleModels = useMemo(() => {
-    const byId = new Map<string, NonNullable<ChatModelState['models']>[number]>();
-    (chatModels?.models || []).forEach((model) => {
-      const id = String(model.id || '').trim();
-      if (id) byId.set(id, model);
-    });
-    return Array.from(byId.values());
-  }, [chatModels?.models]);
   const currentInteractionMode = useMemo<'chat_only' | 'tool_enabled'>(() => {
     const session = visibleSessions.find((item) => item.session_id === currentSessionId);
     return session?.interaction_mode === 'tool_enabled' ? 'tool_enabled' : 'chat_only';
@@ -347,8 +338,6 @@ export function ChatWorkspace({
     : '聊天模式：只回答问题，不会操作数据或创建任务。';
   const renderMessages = useMemo(() => buildRenderMessages(messages), [messages]);
   const taskSummaryItems = useMemo(() => buildChatTaskSummary(messages), [messages]);
-  const [modelNotice, setModelNotice] = useState('');
-  const [modelError, setModelError] = useState('');
   const [workspaceMentions, setWorkspaceMentions] = useState<WorkspaceMention[]>(() => normalizeWorkspaceMentions(mentionDatasets));
   const [gscloudLoginOpen, setGSCloudLoginOpen] = useState(false);
   const [pendingLoginJobId, setPendingLoginJobId] = useState('');
@@ -372,6 +361,14 @@ export function ChatWorkspace({
   const realtimeEventIdsRef = useRef<Set<string>>(new Set());
   const realtimeTaskVersionRef = useRef(0);
   const userId = user?.user_id || '';
+  const {
+    chatModels,
+    visibleModels,
+    modelLoading,
+    modelNotice,
+    modelError,
+    changeChatModel,
+  } = useChatModels({ userId, sessionId: currentSessionId });
   latestUserIdRef.current = userId;
 
   function applyRealtimeEvent(event: RealtimeChatEvent) {
@@ -777,22 +774,6 @@ export function ChatWorkspace({
   }, [userId, currentSessionId]);
 
   useEffect(() => {
-    setModelNotice('');
-    setModelError('');
-    if (!userId || !currentSessionId) {
-      setChatModels(null);
-      return;
-    }
-    let active = true;
-    setModelLoading(true);
-    api.chatModels(userId, currentSessionId)
-      .then((result) => { if (active) setChatModels(result); })
-      .catch((cause) => { if (active) setModelError(cause instanceof Error ? cause.message : '模型列表加载失败'); })
-      .finally(() => { if (active) setModelLoading(false); });
-    return () => { active = false; };
-  }, [userId, currentSessionId]);
-
-  useEffect(() => {
     if (!stickToBottomRef.current) return;
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, thinking]);
@@ -841,25 +822,6 @@ export function ChatWorkspace({
   }, []);
 
   const appendSystem = (content: string) => setMessages((v) => [...v, { role: 'system', content }]);
-
-  const changeChatModel = async (model: string) => {
-    if (!userId || !currentSessionId || modelLoading) return;
-    const previous = chatModels;
-    setModelLoading(true);
-    setModelNotice('');
-    setModelError('');
-    try {
-      const result = await api.selectChatModel(model, userId, currentSessionId);
-      setChatModels(result);
-      setModelNotice('已切换');
-      window.setTimeout(() => setModelNotice(''), 1800);
-    } catch (cause) {
-      setChatModels(previous);
-      setModelError(cause instanceof Error ? cause.message : '模型切换失败');
-    } finally {
-      setModelLoading(false);
-    }
-  };
 
   const sendPrompt = async (prompt: string) => {
     const text = prompt.trim();

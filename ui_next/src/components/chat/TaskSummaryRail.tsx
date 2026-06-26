@@ -1,4 +1,4 @@
-import { Activity, CheckCircle2, CircleDashed, Clock3, ListChecks, PauseCircle, ShieldQuestion, TriangleAlert, XCircle } from 'lucide-react';
+import { Activity, ArrowRight, CheckCircle2, CircleDashed, Clock3, FileText, Layers3, ListChecks, PauseCircle, ShieldQuestion, TriangleAlert, XCircle } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import type { ChatTaskSummaryItem, TaskSummaryStatus } from './chatWorkspaceModel';
 
@@ -102,6 +102,37 @@ export function TaskSummaryRail({ taskSummaryItems, realtimeState, messageCount 
                       <div className="h-full rounded-full bg-gradient-to-r from-blue-600 to-cyan-500" style={{ width: `${item.progress}%` }} />
                     </div>
                   )}
+                </div>
+              )}
+              {(item.artifactCount > 0 || item.mapLayerCount > 0 || item.primaryResultLabel) && (
+                <div data-testid="chat-task-summary-artifacts" className="mt-3 flex flex-wrap items-center gap-1.5">
+                  {item.artifactCount > 0 && (
+                    <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-black text-slate-600 dark:border-slate-800 dark:bg-slate-950/48 dark:text-slate-300">
+                      <FileText size={11} />
+                      {item.artifactCount} 成果
+                    </span>
+                  )}
+                  {item.mapLayerCount > 0 && (
+                    <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-cyan-100 bg-cyan-50 px-2 py-1 text-[10px] font-black text-cyan-700 dark:border-cyan-950/70 dark:bg-cyan-950/24 dark:text-cyan-200">
+                      <Layers3 size={11} />
+                      {item.mapLayerCount} 图层
+                    </span>
+                  )}
+                  {item.primaryResultLabel && (
+                    <span title={item.primaryResultLabel} className="min-w-0 max-w-full truncate rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold text-slate-500 dark:bg-slate-800/70 dark:text-slate-300">
+                      {item.primaryResultLabel}
+                    </span>
+                  )}
+                </div>
+              )}
+              {item.nextActions.length > 0 && (
+                <div data-testid="chat-task-summary-next-actions" className="mt-2 space-y-1 border-t border-slate-100 pt-2 dark:border-slate-800/80">
+                  {item.nextActions.map((action) => (
+                    <div key={action} className="flex min-w-0 items-start gap-1.5 text-[10px] font-bold leading-4 text-slate-500 dark:text-slate-400">
+                      <ArrowRight size={11} className="mt-0.5 shrink-0 text-blue-500 dark:text-cyan-300" />
+                      <span className="line-clamp-2">{action}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </article>

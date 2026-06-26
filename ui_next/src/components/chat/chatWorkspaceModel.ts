@@ -11,6 +11,10 @@ export type ChatTaskSummaryItem = {
   currentStep: string;
   syncState: string;
   updatedAt: string;
+  artifactCount: number;
+  mapLayerCount: number;
+  nextActions: string[];
+  primaryResultLabel: string;
 };
 
 const SENSITIVE_PATTERNS = [
@@ -107,6 +111,50 @@ function numberFrom(value: unknown): number | null {
   return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
+function recordArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(record).filter((item) => Object.keys(item).length > 0) : [];
+}
+
+function textArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  return value
+    .map((item) => sanitizeText(item, ''))
+    .filter((item) => {
+      if (!item || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    })
+    .slice(0, 3);
+}
+
+function firstLabel(items: Record<string, unknown>[], fields: string[]) {
+  for (const item of items) {
+    for (const field of fields) {
+      const label = sanitizeText(item[field], '');
+      if (label) return label;
+    }
+  }
+  return '';
+}
+
+function presentationSummaryFrom(meta: Record<string, unknown>) {
+  const presentation = record(meta.presentation_result);
+  const artifacts = recordArray(presentation.artifact_refs);
+  const mapLayers = recordArray(presentation.map_layer_refs);
+  const nextActions = textArray(presentation.next_action_suggestions);
+  const primaryResultLabel = firstLabel(artifacts, ['title', 'name', 'filename', 'original_filename', 'artifact_id'])
+    || firstLabel(mapLayers, ['name', 'title', 'layer_name', 'layer_id'])
+    || nextActions[0]
+    || '';
+  return {
+    artifactCount: artifacts.length,
+    mapLayerCount: mapLayers.length,
+    nextActions,
+    primaryResultLabel,
+  };
+}
+
 function taskIdFromMessage(message: ChatMessage) {
   const meta = message.meta || {};
   const action = record(meta.action_required);
@@ -142,6 +190,7 @@ export function buildChatTaskSummary(messages: ChatMessage[]): ChatTaskSummaryIt
         meta.current_step || card.current_step || management.current_step || management.action_state || '',
         ''
       );
+      const presentation = presentationSummaryFrom(meta);
       const summary = sanitizeText(
         execution.summary || management.user_message || card.summary || currentStep || message.content || title,
         title
@@ -156,6 +205,10 @@ export function buildChatTaskSummary(messages: ChatMessage[]): ChatTaskSummaryIt
         currentStep,
         syncState: String(meta.realtime_sync || ''),
         updatedAt: String(meta.heartbeat_at || meta.updated_at || meta.started_at || message.created_at || ''),
+        artifactCount: presentation.artifactCount,
+        mapLayerCount: presentation.mapLayerCount,
+        nextActions: presentation.nextActions,
+        primaryResultLabel: presentation.primaryResultLabel,
       };
     })
     .slice(-6)

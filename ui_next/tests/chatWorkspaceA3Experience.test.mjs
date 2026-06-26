@@ -16,6 +16,7 @@ async function loadTs(path) {
 
 const panel = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const rail = await readFile('src/components/chat/TaskSummaryRail.tsx', 'utf8');
+const useChatModelsSource = await readFile('src/components/chat/useChatModels.ts', 'utf8');
 const harness = await readFile('src/components/chat/TaskCardVisualHarness.tsx', 'utf8');
 const harnessEntry = await readFile('src/components/chat/taskCardVisualHarnessEntry.tsx', 'utf8');
 const harnessHtml = await readFile('task-card-harness.html', 'utf8');
@@ -31,6 +32,15 @@ assert.doesNotMatch(harness, /\.env|token=|cookie|storage_state|Traceback|C:\\\\
 
 assert.match(panel, /buildRenderMessages/, 'ChatPanel should delegate render-message de-duplication to chatWorkspaceModel');
 assert.match(panel, /buildChatTaskSummary/, 'ChatPanel should derive task rail items through chatWorkspaceModel');
+assert.match(panel, /useChatModels/, 'ChatPanel should delegate chat model state to useChatModels');
+assert.doesNotMatch(panel, /api\.chatModels|api\.selectChatModel/, 'ChatPanel should not own chat model API calls after hook extraction');
+assert.doesNotMatch(panel, /setChatModels/, 'ChatPanel should not directly mutate chat model state after hook extraction');
+assert.match(useChatModelsSource, /export function useChatModels/, 'useChatModels hook should be exported');
+assert.match(useChatModelsSource, /api\.chatModels/, 'useChatModels should load available chat models');
+assert.match(useChatModelsSource, /api\.selectChatModel/, 'useChatModels should own model switching');
+assert.match(useChatModelsSource, /visibleModels/, 'useChatModels should return de-duplicated visibleModels');
+assert.match(useChatModelsSource, /modelNotice/, 'useChatModels should own transient model success notice');
+assert.match(useChatModelsSource, /modelError/, 'useChatModels should own model switching errors');
 assert.match(panel, /<TaskSummaryRail/, 'ChatPanel should render the task summary rail');
 assert.match(panel, /lg:grid-cols-\[240px_minmax\(0,1fr\)_280px\]/, 'Page chat layout should reserve a right rail on desktop');
 assert.match(rail, /export function TaskSummaryRail/, 'TaskSummaryRail should be an isolated component');
@@ -38,6 +48,9 @@ assert.match(rail, /taskSummaryItems/, 'TaskSummaryRail should render derived ta
 assert.match(rail, /data-testid="chat-task-summary-rail"/, 'TaskSummaryRail should keep a stable task rail test id');
 assert.match(rail, /lg:col-start-3/, 'Right rail should live in the third desktop column');
 assert.match(rail, /data-testid="chat-task-summary-item"/, 'TaskSummaryRail should expose stable item test ids');
+assert.match(rail, /artifactCount|mapLayerCount|nextActions/, 'TaskSummaryRail should surface artifacts, map layers, and next actions');
+assert.match(rail, /data-testid="chat-task-summary-artifacts"/, 'TaskSummaryRail should expose artifact summary test id');
+assert.match(rail, /data-testid="chat-task-summary-next-actions"/, 'TaskSummaryRail should expose next-action summary test id');
 
 const messages = [
   { id: 'u1', role: 'user', content: 'run analysis' },
@@ -58,6 +71,16 @@ const messages = [
       },
       execution_summary: {
         summary: 'Read workspace context, validate inputs, then register outputs.'
+      },
+      presentation_result: {
+        artifact_refs: [
+          { artifact_id: 'artifact_1', title: 'model_report.md', type: 'document' },
+          { artifact_id: 'artifact_2', title: 'prediction.tif', type: 'raster' }
+        ],
+        map_layer_refs: [
+          { layer_id: 'layer_1', name: 'Prediction map' }
+        ],
+        next_action_suggestions: ['Review model report', 'Add prediction layer to map']
       }
     }
   },
@@ -88,6 +111,10 @@ assert.ok(runningItem, 'task rail should include the running synthetic task');
 assert.equal(runningItem.status, 'running');
 assert.equal(runningItem.progress, 42);
 assert.match(runningItem.summary, /Workspace validation|Validating uploaded vector boundary|Read workspace context/);
+assert.equal(runningItem.artifactCount, 2, 'task rail should count registered artifacts');
+assert.equal(runningItem.mapLayerCount, 1, 'task rail should count generated map layers');
+assert.deepEqual(runningItem.nextActions, ['Review model report', 'Add prediction layer to map']);
+assert.match(runningItem.primaryResultLabel, /model_report\.md|prediction\.tif|Prediction map/, 'task rail should expose a human-readable primary result label');
 
 const serialized = JSON.stringify(taskSummaryItems);
 assert.doesNotMatch(serialized, /C:\\|\.env|token=|cookie|storage_state|Traceback/i, 'task rail summaries must redact sensitive details');
