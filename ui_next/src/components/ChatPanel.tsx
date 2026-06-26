@@ -30,6 +30,7 @@ import { useChatAutoScroll } from './chat/useChatAutoScroll';
 import { useChatExternalPrompt } from './chat/useChatExternalPrompt';
 import { useChatEditing } from './chat/useChatEditing';
 import { useChatThesisWorkflow } from './chat/useChatThesisWorkflow';
+import { useChatInteractionModeAction } from './chat/useChatInteractionModeAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -350,6 +351,19 @@ export function ChatWorkspace({
     modelError,
     changeChatModel,
   } = useChatModels({ userId, sessionId: currentSessionId });
+  const handleInteractionModeChanged = useCallback((response: Awaited<ReturnType<typeof api.setChatInteractionMode>>) => {
+    setSessions(response.sessions || []);
+    if (response.current_session_id) setCurrentSessionId(response.current_session_id);
+    if (response.messages) setMessages((current) => mergeServerMessages(current, normalizeChatMessages(response.messages)));
+  }, [setCurrentSessionId, setSessions]);
+  const { setInteractionMode } = useChatInteractionModeAction({
+    thinking,
+    userId,
+    currentSessionId,
+    currentInteractionMode,
+    setError,
+    onModeChanged: handleInteractionModeChanged,
+  });
   const handleEditedRetryComplete = useCallback((response: Awaited<ReturnType<typeof api.retryMessage>>) => {
     setMessages((current) => mergeServerMessages(current, normalizeChatMessages(response.messages)));
     setSessions(response.sessions || []);
@@ -615,23 +629,6 @@ export function ChatWorkspace({
       cancelEdit();
     } catch (e) {
       setError(e instanceof Error ? e.message : '切换对话失败');
-    }
-  };
-
-  const setInteractionMode = async (mode: 'chat_only' | 'tool_enabled') => {
-    if (!currentSessionId || mode === currentInteractionMode || thinking) return;
-    if (!userId) {
-      setError('请先登录账号，再切换会话模式。');
-      return;
-    }
-    setError('');
-    try {
-      const r = await api.setChatInteractionMode(currentSessionId, mode, userId);
-      setSessions(r.sessions || []);
-      if (r.current_session_id) setCurrentSessionId(r.current_session_id);
-      if (r.messages) setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '切换会话模式失败');
     }
   };
 
