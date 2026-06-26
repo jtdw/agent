@@ -32,6 +32,7 @@ import { useChatEditing } from './chat/useChatEditing';
 import { useChatThesisWorkflow } from './chat/useChatThesisWorkflow';
 import { useChatInteractionModeAction } from './chat/useChatInteractionModeAction';
 import { useChatNewSessionAction } from './chat/useChatNewSessionAction';
+import { useChatSwitchSessionAction } from './chat/useChatSwitchSessionAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -401,6 +402,22 @@ export function ChatWorkspace({
     setError,
     onRetryComplete: handleEditedRetryComplete,
   });
+  const handleSessionSwitched = useCallback((sessionId: string, response: Awaited<ReturnType<typeof api.switchChatSession>>) => {
+    setSessions(response.sessions || []);
+    const nextSessionId = response.current_session_id || sessionId;
+    setCurrentSessionId(nextSessionId);
+    onSessionChange?.(nextSessionId);
+    setMessages(normalizeChatMessages(response.messages));
+    cancelEdit();
+  }, [cancelEdit, onSessionChange, setCurrentSessionId, setSessions]);
+  const { switchSession } = useChatSwitchSessionAction({
+    thinking,
+    modelLoading,
+    userId,
+    currentSessionId,
+    setError,
+    onSessionSwitched: handleSessionSwitched,
+  });
   const { runThesisWorkflow } = useChatThesisWorkflow({
     thinking,
     userId,
@@ -606,26 +623,6 @@ export function ChatWorkspace({
   const send = () => sendPrompt(input);
 
   useChatExternalPrompt({ externalPrompt, sendPrompt });
-
-  const switchSession = async (sessionId: string) => {
-    if (!sessionId || sessionId === currentSessionId || thinking || modelLoading) return;
-    setError('');
-    if (!userId) {
-      setError('请先登录账号，再切换对话。');
-      return;
-    }
-    try {
-      const r = await api.switchChatSession(sessionId, userId);
-      setSessions(r.sessions || []);
-      const nextSessionId = r.current_session_id || sessionId;
-      setCurrentSessionId(nextSessionId);
-      onSessionChange?.(nextSessionId);
-      setMessages(normalizeChatMessages(r.messages));
-      cancelEdit();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '切换对话失败');
-    }
-  };
 
   const deleteSession = async () => {
     if (!currentSessionId || thinking) return;
