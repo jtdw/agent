@@ -17,6 +17,7 @@ import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
+import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
 import { useChatModels } from './chat/useChatModels';
 import { useChatSessions } from './chat/useChatSessions';
 
@@ -798,21 +799,10 @@ export function ChatWorkspace({
       setMessages((v) => [...v, { role: 'user', content: text }, { role: 'assistant', content: reply || '地图操作已完成。' }]);
       return;
     }
-    const optimisticUserMessage: ChatMessage = { id: `pending-${Date.now()}-${hashString(text)}`, role: 'user', content: text };
+    const draft = buildSendPromptDraft({ text, realtimeSyncState });
     setThinking(true);
     const controller = new AbortController();
-    const taskId = `chat_${Date.now()}_${hashString(text)}`;
-    const streamingAssistantMessage: ChatMessage = {
-      id: `stream-${taskId}`,
-      role: 'assistant',
-      content: '',
-      meta: {
-        task_id: taskId,
-        status: 'planning',
-        streaming: true,
-        realtime_sync: realtimeSyncState,
-      }
-    };
+    const { taskId, optimisticUserMessage, streamingAssistantMessage } = draft;
     setMessages((v) => [...v, optimisticUserMessage, streamingAssistantMessage]);
     abortRef.current = controller;
     activeTaskIdRef.current = taskId;
@@ -821,7 +811,7 @@ export function ChatWorkspace({
         text,
         userId,
         currentSessionId,
-        { ...chatContext, session_id: currentSessionId },
+        buildStreamChatContext(chatContext, currentSessionId),
         { onEvent: applyRealtimeEvent },
         controller.signal,
         taskId,

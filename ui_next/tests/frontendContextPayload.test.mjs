@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
-async function loadTs(path) {
+async function loadTs(path, transform = (value) => value) {
   const source = await readFile(path, 'utf8');
   const result = ts.transpileModule(source, {
     compilerOptions: {
@@ -11,10 +11,19 @@ async function loadTs(path) {
       isolatedModules: true
     }
   });
-  return import(`data:text/javascript;base64,${Buffer.from(result.outputText).toString('base64')}`);
+  return import(`data:text/javascript;base64,${Buffer.from(transform(result.outputText)).toString('base64')}`);
 }
 
 const chatContext = await loadTs('src/lib/chatContext.ts');
+const workspaceModel = await loadTs('src/components/chat/chatWorkspaceModel.ts');
+globalThis.__frontendContextHashString = workspaceModel.hashString;
+const chatSendModel = await loadTs(
+  'src/components/chat/chatSendModel.ts',
+  (source) => source.replace(
+    "import { hashString } from './chatWorkspaceModel';",
+    'const hashString = globalThis.__frontendContextHashString;'
+  )
+);
 const apiSource = await readFile('src/lib/api.ts', 'utf8');
 const appSource = await readFile('src/App.tsx', 'utf8');
 const chatPanelSource = await readFile('src/components/ChatPanel.tsx', 'utf8');
@@ -46,7 +55,8 @@ assert.equal('html' in payload.selected_feature_properties, false);
 assert.match(apiSource, /frontend_context/, 'api.ask must send frontend_context');
 assert.match(apiSource, /ChatContextPayload/, 'api.ask should type frontend context payload');
 assert.match(chatPanelSource, /chatContext/, 'ChatPanel must accept chatContext');
-assert.match(chatPanelSource, /api\.streamChat\([\s\S]*?text,\s*userId,\s*currentSessionId,\s*\{\s*\.\.\.chatContext,\s*session_id:\s*currentSessionId\s*\}/, 'ChatPanel must pass session-scoped context to streaming chat');
+assert.match(chatPanelSource, /buildStreamChatContext\(chatContext,\s*currentSessionId\)/, 'ChatPanel must pass session-scoped context to streaming chat');
+assert.deepEqual(chatSendModel.buildStreamChatContext({ session_id: 'stale', selected_artifact_id: 'a1' }, 'session_2'), { session_id: 'session_2', selected_artifact_id: 'a1' });
 assert.match(appSource, /chatContext/, 'App must own chat context state');
 assert.match(appSource, /setChatContext/, 'App must update chat context');
 assert.match(mapStageSource, /onChatContextChange/, 'MapStage must report selected map context');
