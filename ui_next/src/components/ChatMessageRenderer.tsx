@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { type ChatArtifact, type ChatMessage, type PresentationResult, type UserFacingResult } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { ArtifactDownloadCard } from './ArtifactDownloadCard';
+import { buildTaskCardPresentation, type TaskThinkingPresentation } from './chat/taskCardModel';
 
 function useCopyToast() {
   const [copied, setCopied] = useState(false);
@@ -422,6 +423,50 @@ function AgentProcessTimeline({ steps, overallStatus }: { steps: AgentProcessSte
   );
 }
 
+function TaskThinkingSummary({ thinking }: { thinking: TaskThinkingPresentation }) {
+  return (
+    <details
+      data-testid="task-thinking-summary"
+      open={thinking.defaultExpanded}
+      className="task-thinking-summary rounded-[18px] border border-blue-100 bg-blue-50/70 p-3 text-xs dark:border-blue-900/55 dark:bg-blue-950/20"
+    >
+      <summary className="cursor-pointer list-none">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div className="text-sm font-black text-slate-900 dark:text-slate-100">公开过程</div>
+            <div className="mt-1 leading-5 text-slate-600 dark:text-slate-300">{thinking.summary}</div>
+          </div>
+          <span className="rounded-full bg-white/75 px-2 py-1 text-[10px] font-black text-blue-700 dark:bg-white/10 dark:text-cyan-200">可展开</span>
+        </div>
+      </summary>
+      <div className="mt-3 grid gap-2">
+        {thinking.steps.map((step, index) => {
+          const visualStatus = userReadableStatus(step.status || '');
+          const done = visualStatus === 'succeeded';
+          const active = ['running', 'planning', 'queued', 'awaiting_confirmation', 'waiting_login', 'paused'].includes(visualStatus);
+          return (
+            <div key={`${step.id}-${index}`} className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 rounded-2xl border border-white/75 bg-white/78 px-3 py-2 dark:border-white/10 dark:bg-slate-950/30">
+              <span className={cn(
+                'mt-0.5 grid h-5 w-5 place-items-center rounded-full text-[10px] font-black',
+                done && 'bg-emerald-600 text-white',
+                active && !done && 'bg-blue-600 text-white',
+                !done && !active && 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-200',
+              )}>{done ? <Check size={12} /> : index + 1}</span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2 font-black text-slate-800 dark:text-slate-100">
+                  <span>{step.title}</span>
+                  <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-black', statusTone(step.status))}>{statusLabel(step.status)}</span>
+                </div>
+                <div className="mt-1 leading-5 text-slate-600 dark:text-slate-300">{step.detail}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
 function numberFrom(value: unknown) {
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
@@ -578,7 +623,8 @@ function TaskStatusCard({
   const action = message.meta?.action_required;
   const confirmationPrompt = String(action?.confirmation_prompt || '');
   const confirmedActionId = String(action?.confirmed_action_id || '');
-  const status = inferTaskStatus(message, result);
+  const presentation = buildTaskCardPresentation({ message, result });
+  const status = presentation.status;
   const steps = buildAgentProcessSteps(message, result, status);
   const cardMeta = metaRecord(message.meta?.task_card);
   const managementView = metaRecord(message.meta?.management_view || message.meta?.download_management_view);
@@ -587,10 +633,10 @@ function TaskStatusCard({
   const availableActions = Array.isArray(managementView.available_actions) ? managementView.available_actions : [];
   const actionType = String(action?.type || '');
   const realtimeSync = String(message.meta?.realtime_sync || '');
-  const progress = numberFrom(cardMeta.progress ?? managementView.progress ?? message.meta?.progress);
+  const progress = presentation.progress;
   const elapsedMs = numberFrom(cardMeta.elapsed_ms ?? message.meta?.elapsed_ms ?? executionSummary.elapsed_ms);
   const elapsedLabel = elapsedMs !== null && elapsedMs > 0 ? `${Math.max(1, Math.round(elapsedMs / 1000))} 秒` : '';
-  const activeStep = String(cardMeta.current_step || managementView.current_step || message.meta?.current_step || managementView.action_state || '').trim();
+  const activeStep = presentation.currentStep || String(cardMeta.current_step || managementView.current_step || message.meta?.current_step || managementView.action_state || '').trim();
   const highlights = (result?.result_highlights || []).slice(0, 4);
   const dataSources = (result?.data_sources || []).slice(0, 4);
   const diagnostics = {
@@ -644,6 +690,8 @@ function TaskStatusCard({
             </div>
           )}
         </div>
+
+        <TaskThinkingSummary thinking={presentation.thinking} />
 
         <AgentProcessTimeline steps={steps} overallStatus={status} />
 
