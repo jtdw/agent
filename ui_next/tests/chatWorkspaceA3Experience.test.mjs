@@ -51,6 +51,11 @@ assert.match(rail, /data-testid="chat-task-summary-item"/, 'TaskSummaryRail shou
 assert.match(rail, /artifactCount|mapLayerCount|nextActions/, 'TaskSummaryRail should surface artifacts, map layers, and next actions');
 assert.match(rail, /data-testid="chat-task-summary-artifacts"/, 'TaskSummaryRail should expose artifact summary test id');
 assert.match(rail, /data-testid="chat-task-summary-next-actions"/, 'TaskSummaryRail should expose next-action summary test id');
+assert.match(rail, /data-testid="chat-task-workbench-header"/, 'TaskSummaryRail should expose a stable workbench header for screenshot checks');
+assert.match(rail, /data-testid="chat-task-process-lane"/, 'TaskSummaryRail should render a public process lane for each task');
+assert.match(rail, /data-testid="chat-task-result-strip"/, 'TaskSummaryRail should render a compact result strip for artifacts and map layers');
+assert.match(rail, /task-rail-spine/, 'TaskSummaryRail should include a visual status spine for the A3 workbench style');
+assert.match(rail, /GIS/, 'TaskSummaryRail copy should make the GIS workbench purpose visible');
 
 const messages = [
   { id: 'u1', role: 'user', content: 'run analysis' },
