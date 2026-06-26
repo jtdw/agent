@@ -25,7 +25,8 @@ import { useChatSessions } from './chat/useChatSessions';
 import { useChatTaskWorkbench } from './chat/useChatTaskWorkbench';
 import { useChatRealtimeEvents } from './chat/useChatRealtimeEvents';
 import { useChatDownloads } from './chat/useChatDownloads';
-import { normalizeWorkspaceMentions, useChatWorkspaceMentions } from './chat/useChatWorkspaceMentions';
+import { useChatWorkspaceMentions } from './chat/useChatWorkspaceMentions';
+import { useChatUploads } from './chat/useChatUploads';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -300,7 +301,6 @@ export function ChatWorkspace({
   const [width, setWidth] = useState(430);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
@@ -408,6 +408,15 @@ export function ChatWorkspace({
       mountedRef.current = false;
     };
   }, []);
+
+  const { uploading, uploadFiles } = useChatUploads({
+    userId,
+    sessionId: currentSessionId,
+    fileInputRef,
+    setError,
+    setMessages,
+    setWorkspaceMentions,
+  });
 
   const {
     gscloudLoginOpen,
@@ -718,35 +727,6 @@ export function ChatWorkspace({
       setError(e instanceof Error ? e.message : '重新生成失败');
     } finally {
       streamLifecycle.finishBusy();
-    }
-  };
-
-  const uploadFiles = async (files: FileList | File[] | null) => {
-    if (!files || files.length === 0) return;
-    if (!userId) {
-      setError('请先登录账号，再上传数据。');
-      if (fileInputRef.current) fileInputRef.current.value = '';
-      return;
-    }
-    setUploading(true);
-    setError('');
-    try {
-      const r = await api.uploadFiles(files, userId, currentSessionId);
-      setWorkspaceMentions(normalizeWorkspaceMentions(r.dashboard?.datasets || []));
-      const summary = r.outcome_markdown || '';
-      setMessages((v) => [
-        ...v,
-        {
-          role: 'system',
-          content: summary || `已上传 ${r.count} 个文件。`,
-          meta: { upload_summaries: r.upload_summaries || [] }
-        }
-      ]);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '上传失败');
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 

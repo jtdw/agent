@@ -4,6 +4,7 @@ import ts from 'typescript';
 
 const chatPanelSource = readFileSync('src/components/ChatPanel.tsx', 'utf8');
 const chatRendererSource = readFileSync('src/components/ChatMessageRenderer.tsx', 'utf8');
+const chatUploadsHookSource = readFileSync('src/components/chat/useChatUploads.ts', 'utf8');
 const apiSource = readFileSync('src/lib/api.ts', 'utf8');
 
 function loadApiModule() {
@@ -22,7 +23,7 @@ assert.match(apiSource, /task_outcome\?: Record<string, unknown>/, 'upload/impor
 assert.match(apiSource, /outcome_markdown\?: string/, 'upload/import responses must expose outcome_markdown');
 assert.match(apiSource, /result_panel\?: ResultPanel/, 'chat responses must expose result_panel for the right-side result panel');
 assert.match(chatPanelSource, /onResultPanel\?\.\(r\.result_panel\)/, 'ChatPanel must forward chat result_panel to the app shell');
-assert.match(chatPanelSource, /r\.outcome_markdown/, 'ChatPanel upload flow must show backend task outcome guidance');
+assert.match(chatUploadsHookSource, /r\.outcome_markdown/, 'Chat upload hook must show backend task outcome guidance');
 assert.match(chatRendererSource, /buildTaskCardPresentation/, 'task cards should use the shared presentation model');
 assert.match(chatRendererSource, /task-thinking-summary/, 'task cards should expose public thinking summaries');
 assert.match(chatRendererSource, /公开过程|执行过程|思考/, 'task cards should label public thinking without exposing hidden reasoning');
