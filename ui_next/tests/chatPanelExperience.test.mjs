@@ -3,14 +3,18 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const chatSessionsHookSource = await readFile('src/components/chat/useChatSessions.ts', 'utf8');
+const workspaceMentionsHookSource = await readFile('src/components/chat/useChatWorkspaceMentions.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
-assert.equal(source.includes('normalizeWorkspaceMentions'), true);
+assert.match(source, /useChatWorkspaceMentions/, 'ChatPanel should delegate workspace mentions to a focused hook');
+assert.doesNotMatch(source, /api\.workspaceMentions/, 'ChatPanel should not own workspace mention API loading after hook extraction');
+assert.match(workspaceMentionsHookSource, /export function useChatWorkspaceMentions/, 'useChatWorkspaceMentions hook should be exported');
+assert.match(workspaceMentionsHookSource, /export function normalizeWorkspaceMentions/, 'workspace mention normalization should move with the hook');
+assert.match(workspaceMentionsHookSource, /api\.workspaceMentions/, 'workspace mention hook should own API loading');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
-assert.equal(source.includes('api.workspaceMentions'), true);
 assert.equal(source.includes('检查工作区数据'), true);
 assert.equal(source.includes('准备下载数据'), true);
 assert.equal(layerPanelSource.includes('if (!user) {'), true);

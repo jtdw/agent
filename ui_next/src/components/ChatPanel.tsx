@@ -25,6 +25,7 @@ import { useChatSessions } from './chat/useChatSessions';
 import { useChatTaskWorkbench } from './chat/useChatTaskWorkbench';
 import { useChatRealtimeEvents } from './chat/useChatRealtimeEvents';
 import { useChatDownloads } from './chat/useChatDownloads';
+import { normalizeWorkspaceMentions, useChatWorkspaceMentions } from './chat/useChatWorkspaceMentions';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -42,27 +43,6 @@ export type ChatWorkspaceProps = {
 };
 
 const EMPTY_MENTION_DATASETS: Array<Record<string, unknown> | WorkspaceMention> = [];
-
-function normalizeWorkspaceMentions(items: Array<Record<string, unknown> | WorkspaceMention> = []): WorkspaceMention[] {
-  return items.flatMap((item) => {
-    const raw = item as Record<string, unknown>;
-    const name = String(raw.name || '').trim();
-    if (!name) return [];
-    const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta as Record<string, unknown> : {};
-    const columns = Array.isArray(meta.columns) ? meta.columns : [];
-    const path = String(raw.path || raw.filename || '');
-    return [{
-      id: String(raw.id || name),
-      name,
-      mention: String(raw.mention || `@{${name}}`),
-      type: String(raw.type || raw.data_type || 'file'),
-      filename: String(raw.filename || path.split(/[\\/]/).pop() || name),
-      row_count: Number.isFinite(Number(raw.row_count ?? meta.rows)) ? Number(raw.row_count ?? meta.rows) : null,
-      column_count: Number.isFinite(Number(raw.column_count)) ? Number(raw.column_count) : columns.length || null,
-      crs: String(raw.crs || meta.crs || '')
-    }];
-  });
-}
 
 function ThinkingDots() {
   return (
@@ -329,7 +309,6 @@ export function ChatWorkspace({
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
   const { renderMessages, taskSummaryItems } = useChatTaskWorkbench(messages);
-  const [workspaceMentions, setWorkspaceMentions] = useState<WorkspaceMention[]>(() => normalizeWorkspaceMentions(mentionDatasets));
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -358,6 +337,11 @@ export function ChatWorkspace({
     onMessagesCleared: handleSessionMessagesCleared,
     onMessagesRefreshed: handleSessionMessagesRefreshed,
     onRefreshError: handleSessionRefreshError,
+  });
+  const { workspaceMentions, setWorkspaceMentions } = useChatWorkspaceMentions({
+    mentionDatasets,
+    userId,
+    sessionId: currentSessionId,
   });
   const currentInteractionMode = currentSession?.interaction_mode === 'tool_enabled' ? 'tool_enabled' : 'chat_only';
   const interactionModeLabel = currentInteractionMode === 'tool_enabled'
@@ -458,20 +442,6 @@ export function ChatWorkspace({
     setInput(value === 'admin_region' ? '下载行政区：' : '下载 bbox：');
     setError(`请补充${label}后发送。`);
   };
-
-  useEffect(() => {
-    setWorkspaceMentions(normalizeWorkspaceMentions(mentionDatasets));
-  }, [mentionDatasets]);
-
-  useEffect(() => {
-    if (!userId) {
-      setWorkspaceMentions([]);
-      return;
-    }
-    api.workspaceMentions(userId, currentSessionId)
-      .then((result) => setWorkspaceMentions(normalizeWorkspaceMentions(result.items || [])))
-      .catch(() => {});
-  }, [userId, currentSessionId]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
