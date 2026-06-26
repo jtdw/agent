@@ -20,6 +20,7 @@ ui_next/test-results/
 # Runtime data, downloads, exports, and generated local libraries
 workspace/
 local_library/
+.worktrees/
 logs/
 *.log
 
