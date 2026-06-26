@@ -27,6 +27,7 @@ const chatSendModel = await loadTs(
 const apiSource = await readFile('src/lib/api.ts', 'utf8');
 const appSource = await readFile('src/App.tsx', 'utf8');
 const chatPanelSource = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const promptStreamActionHookSource = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const mapStageSource = await readFile('src/components/MapStage.tsx', 'utf8');
 const analysisPanelSource = await readFile('src/components/AnalysisPanel.tsx', 'utf8');
 
@@ -55,7 +56,7 @@ assert.equal('html' in payload.selected_feature_properties, false);
 assert.match(apiSource, /frontend_context/, 'api.ask must send frontend_context');
 assert.match(apiSource, /ChatContextPayload/, 'api.ask should type frontend context payload');
 assert.match(chatPanelSource, /chatContext/, 'ChatPanel must accept chatContext');
-assert.match(chatPanelSource, /buildStreamChatContext\(chatContext,\s*currentSessionId\)/, 'ChatPanel must pass session-scoped context to streaming chat');
+assert.match(promptStreamActionHookSource, /buildStreamChatContext\(chatContext,\s*currentSessionId\)/, 'Prompt stream hook must pass session-scoped context to streaming chat');
 assert.deepEqual(chatSendModel.buildStreamChatContext({ session_id: 'stale', selected_artifact_id: 'a1' }, 'session_2'), { session_id: 'session_2', selected_artifact_id: 'a1' });
 assert.match(appSource, /chatContext/, 'App must own chat context state');
 assert.match(appSource, /setChatContext/, 'App must update chat context');

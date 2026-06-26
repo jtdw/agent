@@ -16,6 +16,7 @@ const switchSessionActionHookSource = await readFile('src/components/chat/useCha
 const deleteSessionActionHookSource = await readFile('src/components/chat/useChatDeleteSessionAction.ts', 'utf8');
 const mapCommandActionHookSource = await readFile('src/components/chat/useChatMapCommandAction.ts', 'utf8');
 const promptPreparationHookSource = await readFile('src/components/chat/useChatPromptPreparation.ts', 'utf8');
+const promptStreamActionHookSource = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -98,6 +99,13 @@ assert.match(promptPreparationHookSource, /const text = prompt\.trim\(\)/, 'prom
 assert.match(promptPreparationHookSource, /if \(!text \|\| thinking\) return null/, 'prompt preparation hook should preserve empty and thinking guards');
 assert.match(promptPreparationHookSource, /if \(!userId\)/, 'prompt preparation hook should preserve missing-user guard');
 assert.match(promptPreparationHookSource, /setInput\(''\)/, 'prompt preparation hook should preserve input clearing');
+assert.match(source, /useChatPromptStreamAction/, 'ChatPanel should delegate prompt streaming to a focused hook');
+assert.doesNotMatch(sendPromptSource, /await api\.streamChat/, 'sendPrompt should not call the streaming chat API directly after hook extraction');
+assert.match(promptStreamActionHookSource, /export function useChatPromptStreamAction/, 'useChatPromptStreamAction hook should be exported');
+assert.match(promptStreamActionHookSource, /buildSendPromptDraft\(\{ text, realtimeSyncState \}\)/, 'prompt stream hook should preserve optimistic draft creation');
+assert.match(promptStreamActionHookSource, /await api\.streamChat/, 'prompt stream hook should own the streaming chat API call');
+assert.match(promptStreamActionHookSource, /mergeTaskCardUpdate/, 'prompt stream hook should preserve failed task-card updates');
+assert.match(promptStreamActionHookSource, /streamLifecycle\.finishTask\(taskId, controller\)/, 'prompt stream hook should finish the stream lifecycle');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
@@ -119,9 +127,9 @@ assert.match(
   'useChatSessions must keep previous-user cleanup separate from the unconditional missing-user return'
 );
 assert.match(promptPreparationHookSource, /if \(!userId\) \{[\s\S]*?return null;/, 'ChatPanel must not create anonymous chat records before login');
-assert.equal(sendPromptSource.includes('await api.streamChat('), true, 'ChatPanel must send through the streaming chat endpoint');
-assert.equal(sendPromptSource.includes('buildStreamChatContext(chatContext, currentSessionId)'), true, 'Streaming chat must retain session-scoped frontend context');
-assert.equal(sendPromptSource.includes('refreshSessions().catch(() => {})'), true, 'Completed streams must reconcile persisted messages without replacing optimistic history');
+assert.equal(promptStreamActionHookSource.includes('await api.streamChat('), true, 'ChatPanel must send through the streaming chat endpoint');
+assert.equal(promptStreamActionHookSource.includes('buildStreamChatContext(chatContext, currentSessionId)'), true, 'Streaming chat must retain session-scoped frontend context');
+assert.equal(promptStreamActionHookSource.includes('refreshSessions().catch(() => {})'), true, 'Completed streams must reconcile persisted messages without replacing optimistic history');
 assert.equal(source.includes("meta: { reason: 'download_failed' }"), false, 'ChatPanel should not append a duplicate assistant error when a watched download job fails');
 assert.equal(layerPanelSource.includes('failure_diagnostic'), false, 'LayerPanel should not render raw failure_diagnostic in the management view path');
 assert.equal(layerPanelSource.includes('error_message'), false, 'LayerPanel should not render raw error_message in the management view path');

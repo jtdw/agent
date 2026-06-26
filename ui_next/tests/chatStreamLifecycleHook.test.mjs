@@ -3,14 +3,15 @@ import { readFile } from 'node:fs/promises';
 
 const panelSource = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const hookSource = await readFile('src/components/chat/useChatStreamLifecycle.ts', 'utf8');
+const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 
 assert.match(panelSource, /useChatStreamLifecycle/, 'ChatPanel should delegate stream lifecycle state to a focused hook');
 assert.doesNotMatch(panelSource, /const \[thinking,\s*setThinking\] = useState\(false\)/, 'ChatPanel should not own the raw thinking state');
 assert.doesNotMatch(panelSource, /const abortRef = useRef<AbortController \| null>\(null\)/, 'ChatPanel should not own the stream abort ref');
 assert.doesNotMatch(panelSource, /const activeTaskIdRef = useRef<string>\(''\)/, 'ChatPanel should not own the active stream task ref');
-assert.match(panelSource, /await api\.streamChat\(/, 'ChatPanel should still own the streaming API call');
-assert.match(panelSource, /streamLifecycle\.startTask\(taskId,\s*controller\)/, 'ChatPanel should register active stream tasks through the lifecycle hook');
-assert.match(panelSource, /streamLifecycle\.finishTask\(taskId,\s*controller\)/, 'ChatPanel should clear active stream tasks through the lifecycle hook');
+assert.match(promptStreamActionHook, /await api\.streamChat\(/, 'Prompt stream hook should own the streaming API call');
+assert.match(promptStreamActionHook, /streamLifecycle\.startTask\(taskId,\s*controller\)/, 'Prompt stream hook should register active stream tasks through the lifecycle hook');
+assert.match(promptStreamActionHook, /streamLifecycle\.finishTask\(taskId,\s*controller\)/, 'Prompt stream hook should clear active stream tasks through the lifecycle hook');
 assert.match(panelSource, /onStop=\{streamLifecycle\.stopCurrentRequest\}/, 'ChatComposer should stop through the lifecycle hook');
 
 assert.match(hookSource, /export function useChatStreamLifecycle/, 'hook should export useChatStreamLifecycle');

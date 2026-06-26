@@ -15,7 +15,6 @@ import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
-import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
 import { useChatSessions } from './chat/useChatSessions';
@@ -36,6 +35,7 @@ import { useChatSwitchSessionAction } from './chat/useChatSwitchSessionAction';
 import { useChatDeleteSessionAction } from './chat/useChatDeleteSessionAction';
 import { useChatMapCommandAction } from './chat/useChatMapCommandAction';
 import { useChatPromptPreparation } from './chat/useChatPromptPreparation';
+import { useChatPromptStreamAction } from './chat/useChatPromptStreamAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -539,6 +539,20 @@ export function ChatWorkspace({
     onMapTextCommand,
     setMessages,
   });
+  const { streamPrompt } = useChatPromptStreamAction({
+    userId,
+    currentSessionId,
+    chatContext,
+    realtimeSyncState,
+    streamLifecycle,
+    applyRealtimeEvent,
+    setMessages,
+    setLastFailedPrompt,
+    setError,
+    refreshSessions,
+    messageMatchesJob,
+    mergeTaskCardUpdate,
+  });
   const { preparePrompt } = useChatPromptPreparation({
     thinking,
     userId,
@@ -565,36 +579,7 @@ export function ChatWorkspace({
     const text = preparePrompt(prompt);
     if (!text) return;
     if (handleMapCommand(text)) return;
-    const draft = buildSendPromptDraft({ text, realtimeSyncState });
-    const controller = new AbortController();
-    const { taskId, optimisticUserMessage, streamingAssistantMessage } = draft;
-    setMessages((v) => [...v, optimisticUserMessage, streamingAssistantMessage]);
-    streamLifecycle.startTask(taskId, controller);
-    try {
-      await api.streamChat(
-        text,
-        userId,
-        currentSessionId,
-        buildStreamChatContext(chatContext, currentSessionId),
-        { onEvent: applyRealtimeEvent },
-        controller.signal,
-        taskId,
-      );
-      setLastFailedPrompt('');
-      refreshSessions().catch(() => {});
-    } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') return;
-      const content = assistantErrorContent(e);
-      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, taskId), {
-        role: 'assistant',
-        content,
-        meta: { task_id: taskId, reason: 'error', status: 'failed', streaming: false },
-      }));
-      setLastFailedPrompt(text);
-      setError('');
-    } finally {
-      streamLifecycle.finishTask(taskId, controller);
-    }
+    await streamPrompt(text);
   };
 
   const confirmAction = async (confirmationPrompt: string, confirmedActionId: string) => {

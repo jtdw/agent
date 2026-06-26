@@ -7,6 +7,7 @@ const renderer = readFileSync(resolve(root, 'src/components/ChatMessageRenderer.
 const panel = readFileSync(resolve(root, 'src/components/ChatPanel.tsx'), 'utf8');
 const realtimeHook = readFileSync(resolve(root, 'src/components/chat/useChatRealtimeEvents.ts'), 'utf8');
 const downloadsHook = readFileSync(resolve(root, 'src/components/chat/useChatDownloads.ts'), 'utf8');
+const promptStreamActionHook = readFileSync(resolve(root, 'src/components/chat/useChatPromptStreamAction.ts'), 'utf8');
 const api = readFileSync(resolve(root, 'src/lib/api.ts'), 'utf8');
 
 assert.match(renderer, /function TaskStatusCard/, 'ChatMessageRenderer must render tool work through one unified task card');
@@ -60,7 +61,7 @@ assert.match(realtimeHook, /eventIdsRef/, 'Realtime hook must own event de-dupli
 assert.match(realtimeHook, /taskVersionRef/, 'Realtime hook must own stale-version gating');
 assert.match(api, /phase\?: string/, 'RealtimeChatEvent must type backend phase updates');
 assert.match(api, /heartbeat_at\?: string/, 'RealtimeChatEvent must type backend heartbeat updates');
-assert.match(panel, /api\.streamChat/, 'ChatPanel must use the POST SSE chat stream');
+assert.match(promptStreamActionHook, /api\.streamChat/, 'Prompt stream hook must use the POST SSE chat stream');
 assert.match(realtimeHook, /api\.openChatEventStream/, 'Realtime hook must subscribe to session task SSE events');
 assert.match(panel, /messageMatchesRealtimeEvent/, 'Realtime events must target an existing assistant message');
 assert.match(panel, /messageIsToolTask/, 'ChatPanel must identify tool task messages without frontend keyword detection');

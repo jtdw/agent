@@ -18,6 +18,7 @@ async function loadTs(path, transform = (value) => value) {
 }
 
 const panel = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const workspaceModel = await loadTs('src/components/chat/chatWorkspaceModel.ts');
 globalThis.__chatSendModelHashString = workspaceModel.module.hashString;
 const { source: modelSource, module: model } = await loadTs(
@@ -28,11 +29,11 @@ const { source: modelSource, module: model } = await loadTs(
   )
 );
 
-assert.match(panel, /buildSendPromptDraft/, 'ChatPanel should delegate send-message draft construction to chatSendModel');
-assert.match(panel, /buildStreamChatContext/, 'ChatPanel should delegate stream context construction to chatSendModel');
+assert.match(promptStreamActionHook, /buildSendPromptDraft/, 'Prompt stream hook should delegate send-message draft construction to chatSendModel');
+assert.match(promptStreamActionHook, /buildStreamChatContext/, 'Prompt stream hook should delegate stream context construction to chatSendModel');
 assert.doesNotMatch(panel, /const optimisticUserMessage: ChatMessage =/, 'ChatPanel should not inline optimistic user message construction');
 assert.doesNotMatch(panel, /const streamingAssistantMessage: ChatMessage =/, 'ChatPanel should not inline streaming assistant message construction');
-assert.match(panel, /await api\.streamChat\(/, 'ChatPanel should still own the streaming API call in this low-risk extraction');
+assert.match(promptStreamActionHook, /await api\.streamChat\(/, 'Prompt stream hook should own the streaming API call after extraction');
 
 assert.match(modelSource, /export function buildSendPromptDraft/, 'chatSendModel should export buildSendPromptDraft');
 assert.match(modelSource, /export function buildStreamChatContext/, 'chatSendModel should export buildStreamChatContext');
