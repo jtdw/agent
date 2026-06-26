@@ -171,6 +171,15 @@ function statusAccent(status = '') {
   return 'from-blue-600 to-cyan-500';
 }
 
+function statusSpine(status = '') {
+  const normalized = String(status || '').toLowerCase();
+  if (normalized === 'succeeded') return 'bg-emerald-400';
+  if (normalized === 'failed' || normalized === 'blocked') return 'bg-rose-400';
+  if (normalized === 'awaiting_confirmation' || normalized === 'waiting_login') return 'bg-amber-400';
+  if (normalized === 'cancelled' || normalized === 'canceled' || normalized === 'paused') return 'bg-slate-400';
+  return 'bg-cyan-500';
+}
+
 function StatusIcon({ status }: { status: string }) {
   const normalized = String(status || '').toLowerCase();
   if (normalized === 'succeeded') return <Check size={15} />;
@@ -428,15 +437,15 @@ function TaskThinkingSummary({ thinking }: { thinking: TaskThinkingPresentation 
     <details
       data-testid="task-thinking-summary"
       open={thinking.defaultExpanded}
-      className="task-thinking-summary rounded-[18px] border border-blue-100 bg-blue-50/70 p-3 text-xs dark:border-blue-900/55 dark:bg-blue-950/20"
+      className="task-thinking-summary rounded-[18px] border border-cyan-100 bg-cyan-50/55 p-3 text-xs dark:border-cyan-900/55 dark:bg-cyan-950/18"
     >
       <summary className="cursor-pointer list-none">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div data-testid="task-card-public-process" className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="text-sm font-black text-slate-900 dark:text-slate-100">公开过程</div>
             <div className="mt-1 leading-5 text-slate-600 dark:text-slate-300">{thinking.summary}</div>
           </div>
-          <span className="rounded-full bg-white/75 px-2 py-1 text-[10px] font-black text-blue-700 dark:bg-white/10 dark:text-cyan-200">可展开</span>
+          <span className="rounded-full bg-white/80 px-2 py-1 text-[10px] font-black text-cyan-700 ring-1 ring-cyan-100 dark:bg-white/10 dark:text-cyan-200 dark:ring-cyan-900/60">可展开</span>
         </div>
       </summary>
       <div className="mt-3 grid gap-2">
@@ -445,7 +454,7 @@ function TaskThinkingSummary({ thinking }: { thinking: TaskThinkingPresentation 
           const done = visualStatus === 'succeeded';
           const active = ['running', 'planning', 'queued', 'awaiting_confirmation', 'waiting_login', 'paused'].includes(visualStatus);
           return (
-            <div key={`${step.id}-${index}`} className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 rounded-2xl border border-white/75 bg-white/78 px-3 py-2 dark:border-white/10 dark:bg-slate-950/30">
+            <div key={`${step.id}-${index}`} className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 rounded-2xl border border-white/75 bg-white/82 px-3 py-2 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
               <span className={cn(
                 'mt-0.5 grid h-5 w-5 place-items-center rounded-full text-[10px] font-black',
                 done && 'bg-emerald-600 text-white',
@@ -648,16 +657,17 @@ function TaskStatusCard({
   };
   const showTechnicalDetails = technicalDetailsEnabled();
   return (
-    <section data-testid="task-status-card" className="agent-task-card mt-3 overflow-hidden rounded-[24px] border border-slate-200/85 bg-white/90 shadow-[0_22px_54px_rgba(15,23,42,.12)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/72">
+    <section data-testid="task-status-card" className="agent-task-card relative mt-3 overflow-hidden rounded-[24px] border border-slate-200/85 bg-white/92 shadow-[0_22px_54px_rgba(15,23,42,.12)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/72">
       <div className={cn('h-1.5 bg-gradient-to-r', statusAccent(status))} />
+      <div className={cn('task-card-status-spine absolute bottom-4 left-2 top-5 w-1 rounded-full', statusSpine(status))} />
       <div className="space-y-4 p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div data-testid="task-card-a3-header" className="flex flex-wrap items-start justify-between gap-3 rounded-[20px] border border-slate-100 bg-slate-50/72 p-3 pl-4 dark:border-slate-800 dark:bg-slate-900/42">
           <div className="flex min-w-0 flex-1 gap-3">
             <div className={cn('grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-gradient-to-br text-white shadow-lg', statusAccent(status))}>
               <StatusIcon status={status} />
             </div>
             <div className="min-w-0">
-              <div className="text-[11px] font-black uppercase tracking-[0.08em] text-slate-400">GIS 任务</div>
+              <div className="text-[11px] font-black uppercase tracking-[0.12em] text-slate-400">GIS 任务</div>
               <div className="mt-0.5 text-base font-black leading-6 text-slate-950 dark:text-slate-50">{taskTitle(message, result)}</div>
               <div className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">{taskSummary(message, result)}</div>
             </div>
@@ -726,7 +736,12 @@ function TaskStatusCard({
           {!action?.type && status === 'succeeded' && <span className="inline-flex items-center gap-1.5 px-2 py-2 text-xs font-bold text-slate-500 dark:text-slate-400"><Check size={14} />结果已生成</span>}
         </div>
 
-        {result && <ResultGroups result={result} sessionId={sessionId} onDeleted={onDeleted} />}
+        {result && (
+          <div data-testid="task-card-result-dock" className="rounded-[20px] border border-slate-100 bg-white/72 p-2 dark:border-slate-800 dark:bg-slate-950/28">
+            <div className="mb-1 px-1 text-[10px] font-black text-slate-400 dark:text-slate-500">结果产物</div>
+            <ResultGroups result={result} sessionId={sessionId} onDeleted={onDeleted} />
+          </div>
+        )}
         <details className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs dark:border-slate-800 dark:bg-slate-900/60">
           <summary className="cursor-pointer font-bold text-slate-600 dark:text-slate-300">查看详情</summary>
           <div className="mt-2 space-y-1 text-[11px] leading-5 text-slate-500 dark:text-slate-400">
