@@ -17,6 +17,7 @@ const deleteSessionActionHookSource = await readFile('src/components/chat/useCha
 const mapCommandActionHookSource = await readFile('src/components/chat/useChatMapCommandAction.ts', 'utf8');
 const promptPreparationHookSource = await readFile('src/components/chat/useChatPromptPreparation.ts', 'utf8');
 const promptStreamActionHookSource = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
+const confirmationActionHookSource = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -106,6 +107,13 @@ assert.match(promptStreamActionHookSource, /buildSendPromptDraft\(\{ text, realt
 assert.match(promptStreamActionHookSource, /await api\.streamChat/, 'prompt stream hook should own the streaming chat API call');
 assert.match(promptStreamActionHookSource, /mergeTaskCardUpdate/, 'prompt stream hook should preserve failed task-card updates');
 assert.match(promptStreamActionHookSource, /streamLifecycle\.finishTask\(taskId, controller\)/, 'prompt stream hook should finish the stream lifecycle');
+assert.match(source, /useChatConfirmationAction/, 'ChatPanel should delegate confirmation execution to a focused hook');
+assert.doesNotMatch(source, /const confirmAction = async/, 'ChatPanel should not own confirmation execution inline');
+assert.doesNotMatch(source, /await api\.confirmChatAction/, 'ChatPanel should not call the confirmation API directly after hook extraction');
+assert.match(confirmationActionHookSource, /export function useChatConfirmationAction/, 'useChatConfirmationAction hook should be exported');
+assert.match(confirmationActionHookSource, /await api\.confirmChatAction/, 'confirmation hook should preserve the confirmation API call');
+assert.match(confirmationActionHookSource, /onConfirmationComplete\(token, response\)/, 'confirmation hook should hand successful responses back to ChatPanel');
+assert.match(confirmationActionHookSource, /streamLifecycle\.finishTask\(taskId, controller\)/, 'confirmation hook should finish the stream lifecycle');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);

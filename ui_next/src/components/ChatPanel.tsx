@@ -5,7 +5,7 @@ import { api, ChatMessage, ChatSession, CommercialUser, RealtimeChatEvent, Resul
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
 import type { ParsedMapTextCommand } from './mapTextCommands';
-import { assistantErrorContent, assistantReplyContent, normalizeChatMessages } from './chatMessageContent';
+import { assistantReplyContent, normalizeChatMessages } from './chatMessageContent';
 import type { ChatContextPayload } from '@/lib/chatContext';
 import { ChatComposer } from './ChatComposer';
 import { ChatMessageRenderer } from './ChatMessageRenderer';
@@ -36,6 +36,7 @@ import { useChatDeleteSessionAction } from './chat/useChatDeleteSessionAction';
 import { useChatMapCommandAction } from './chat/useChatMapCommandAction';
 import { useChatPromptPreparation } from './chat/useChatPromptPreparation';
 import { useChatPromptStreamAction } from './chat/useChatPromptStreamAction';
+import { useChatConfirmationAction } from './chat/useChatConfirmationAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -559,6 +560,35 @@ export function ChatWorkspace({
     setInput,
     setError,
   });
+  const handleConfirmationComplete = useCallback((token: string, response: Awaited<ReturnType<typeof api.confirmChatAction>>) => {
+    if (response.messages) {
+      const incoming = normalizeChatMessages(response.messages);
+      const updated = incoming.find((message) => message.role === 'assistant' && messageMatchesConfirmation(message, token))
+        || [...incoming].reverse().find((message) => message.role === 'assistant' && messageIsToolTask(message));
+      setMessages((current) => updated
+        ? mergeTaskCardUpdate(current, (message) => messageMatchesConfirmation(message, token), updated, { consumeAction: true })
+        : mergeServerMessages(current, incoming));
+    } else {
+      setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesConfirmation(message, token), responseAssistantMessage(response), { consumeAction: true }));
+    }
+    if (response.sessions) setSessions(response.sessions);
+    if (response.result_panel) onResultPanel?.(response.result_panel);
+    const nextSessionId = response.current_session_id || currentSessionId;
+    setCurrentSessionId(nextSessionId);
+    onSessionChange?.(nextSessionId);
+    setLastFailedPrompt('');
+    refreshSessions().catch(() => {});
+  }, [currentSessionId, onResultPanel, onSessionChange, refreshSessions, setCurrentSessionId, setSessions]);
+  const { confirmAction } = useChatConfirmationAction({
+    thinking,
+    userId,
+    currentSessionId,
+    chatContext,
+    streamLifecycle,
+    setError,
+    setMessages,
+    onConfirmationComplete: handleConfirmationComplete,
+  });
 
   const chooseClarification = (value: string, label: string) => {
     if (value === 'upload_boundary') {
@@ -580,47 +610,6 @@ export function ChatWorkspace({
     if (!text) return;
     if (handleMapCommand(text)) return;
     await streamPrompt(text);
-  };
-
-  const confirmAction = async (confirmationPrompt: string, confirmedActionId: string) => {
-    const prompt = confirmationPrompt.trim();
-    const token = confirmedActionId.trim();
-    if (!token || thinking) return;
-    if (!userId) {
-      setError('请先登录账号，再确认执行。');
-      return;
-    }
-    setError('');
-    const controller = new AbortController();
-    const taskId = `chat_confirm_${Date.now()}_${hashString(token)}`;
-    streamLifecycle.startTask(taskId, controller);
-    try {
-      const r = await api.confirmChatAction(token, prompt || '确认执行', userId, currentSessionId, { ...chatContext, session_id: currentSessionId }, controller.signal, taskId);
-      if (r.messages) {
-        const incoming = normalizeChatMessages(r.messages);
-        const updated = incoming.find((message) => message.role === 'assistant' && messageMatchesConfirmation(message, token))
-          || [...incoming].reverse().find((message) => message.role === 'assistant' && messageIsToolTask(message));
-        setMessages((current) => updated
-          ? mergeTaskCardUpdate(current, (message) => messageMatchesConfirmation(message, token), updated, { consumeAction: true })
-          : mergeServerMessages(current, incoming));
-      } else {
-        setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesConfirmation(message, token), responseAssistantMessage(r), { consumeAction: true }));
-      }
-      if (r.sessions) setSessions(r.sessions);
-      if (r.result_panel) onResultPanel?.(r.result_panel);
-      const nextSessionId = r.current_session_id || currentSessionId;
-      setCurrentSessionId(nextSessionId);
-      onSessionChange?.(nextSessionId);
-      setLastFailedPrompt('');
-      refreshSessions().catch(() => {});
-    } catch (e) {
-      if (e instanceof DOMException && e.name === 'AbortError') return;
-      const content = assistantErrorContent(e);
-      setMessages((v) => [...v, { role: 'assistant', content, meta: { reason: 'error' } }]);
-      setError('');
-    } finally {
-      streamLifecycle.finishTask(taskId, controller);
-    }
   };
 
   const send = () => sendPrompt(input);

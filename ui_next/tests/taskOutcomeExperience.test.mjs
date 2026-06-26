@@ -22,7 +22,7 @@ function loadApiModule() {
 assert.match(apiSource, /task_outcome\?: Record<string, unknown>/, 'upload/import responses must expose task_outcome');
 assert.match(apiSource, /outcome_markdown\?: string/, 'upload/import responses must expose outcome_markdown');
 assert.match(apiSource, /result_panel\?: ResultPanel/, 'chat responses must expose result_panel for the right-side result panel');
-assert.match(chatPanelSource, /onResultPanel\?\.\(r\.result_panel\)/, 'ChatPanel must forward chat result_panel to the app shell');
+assert.match(chatPanelSource, /onResultPanel\?\.\(response\.result_panel\)/, 'ChatPanel must forward chat result_panel to the app shell');
 assert.match(chatUploadsHookSource, /r\.outcome_markdown/, 'Chat upload hook must show backend task outcome guidance');
 assert.match(chatRendererSource, /buildTaskCardPresentation/, 'task cards should use the shared presentation model');
 assert.match(chatRendererSource, /task-thinking-summary/, 'task cards should expose public thinking summaries');

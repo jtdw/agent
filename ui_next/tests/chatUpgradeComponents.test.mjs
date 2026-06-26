@@ -5,6 +5,8 @@ const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
 const renderer = await readFile('src/components/ChatMessageRenderer.tsx', 'utf8');
 const chatPanel = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const chatUploadsHook = await readFile('src/components/chat/useChatUploads.ts', 'utf8');
+const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
+const confirmationActionHook = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
 const api = await readFile('src/lib/api.ts', 'utf8');
 const productConsole = await readFile('src/components/ProductConsole.tsx', 'utf8');
 const analysisPanelData = await readFile('src/components/analysisPanelData.ts', 'utf8');
@@ -48,7 +50,7 @@ assert.match(chatUploadsHook, /api\.uploadFiles\(files, userId, sessionId\)/, 'u
 assert.match(chatUploadsHook, /normalizeWorkspaceMentions/, 'useChatUploads should refresh workspace mentions from upload dashboard datasets');
 assert.match(chatUploadsHook, /upload_summaries/, 'useChatUploads should preserve upload summaries for UploadResultCard');
 assert.match(chatPanel, /data-testid="chat-session-list"/, 'ChatPanel must render session/data partition area');
-assert.match(chatPanel, /AbortController/, 'ChatPanel must support cooperative stop');
+assert.ok(/AbortController/.test(promptStreamActionHook) && /AbortController/.test(confirmationActionHook), 'Prompt and confirmation hooks must support cooperative stop');
 
 assert.match(productConsole, /activeTab === 'chat'/, 'ProductConsole must have a dedicated chat layout branch');
 assert.match(productConsole, /<ChatWorkspace/, 'ProductConsole chat tab must embed ChatWorkspace');

@@ -16,6 +16,8 @@ async function loadTs(path) {
 
 const content = await loadTs('src/components/chatMessageContent.ts');
 const chatPanelSource = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
+const confirmationActionHook = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
 
 assert.equal(content.assistantReplyContent('  已完成分析。  '), '已完成分析。');
 assert.match(content.assistantReplyContent(''), /没有返回可显示内容/);
@@ -30,7 +32,7 @@ assert.match(
 );
 assert.equal(content.normalizeChatMessages([{ role: 'user', content: '' }])[0].content, '');
 assert.equal(chatPanelSource.includes('assistantReplyContent'), true);
-assert.equal(chatPanelSource.includes('assistantErrorContent'), true);
+assert.equal(promptStreamActionHook.includes('assistantErrorContent') || confirmationActionHook.includes('assistantErrorContent'), true);
 assert.equal(chatPanelSource.includes('normalizeChatMessages'), true);
 
 console.log('chat message content tests passed');
