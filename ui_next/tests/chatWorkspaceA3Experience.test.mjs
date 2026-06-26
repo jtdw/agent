@@ -16,6 +16,7 @@ async function loadTs(path) {
 
 const panel = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const rail = await readFile('src/components/chat/TaskSummaryRail.tsx', 'utf8');
+const workbenchHook = await readFile('src/components/chat/useChatTaskWorkbench.ts', 'utf8');
 const useChatModelsSource = await readFile('src/components/chat/useChatModels.ts', 'utf8');
 const harness = await readFile('src/components/chat/TaskCardVisualHarness.tsx', 'utf8');
 const harnessEntry = await readFile('src/components/chat/taskCardVisualHarnessEntry.tsx', 'utf8');
@@ -30,8 +31,11 @@ assert.match(harness, /<ChatMessageRenderer/, 'Harness should render the real ta
 assert.match(harness, /task_harness_running/, 'Harness should use a stable synthetic task id');
 assert.doesNotMatch(harness, /\.env|token=|cookie|storage_state|Traceback|C:\\\\/, 'Harness fixture must not contain sensitive implementation strings');
 
-assert.match(panel, /buildRenderMessages/, 'ChatPanel should delegate render-message de-duplication to chatWorkspaceModel');
-assert.match(panel, /buildChatTaskSummary/, 'ChatPanel should derive task rail items through chatWorkspaceModel');
+assert.match(panel, /useChatTaskWorkbench/, 'ChatPanel should delegate chat task workbench derivation to a focused hook');
+assert.doesNotMatch(panel, /useMemo\(\(\) => buildChatTaskSummary/, 'ChatPanel should not own task rail derivation after hook extraction');
+assert.match(workbenchHook, /export function useChatTaskWorkbench/, 'useChatTaskWorkbench should be exported as a focused hook');
+assert.match(workbenchHook, /buildRenderMessages/, 'useChatTaskWorkbench should own render-message derivation');
+assert.match(workbenchHook, /buildChatTaskSummary/, 'useChatTaskWorkbench should own task summary derivation');
 assert.match(panel, /useChatModels/, 'ChatPanel should delegate chat model state to useChatModels');
 assert.doesNotMatch(panel, /api\.chatModels|api\.selectChatModel/, 'ChatPanel should not own chat model API calls after hook extraction');
 assert.doesNotMatch(panel, /setChatModels/, 'ChatPanel should not directly mutate chat model state after hook extraction');

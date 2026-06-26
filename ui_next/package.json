@@ -19,6 +19,7 @@
     "test:task-outcome-experience": "node tests/taskOutcomeExperience.test.mjs",
     "test:e2e": "playwright test",
     "test:e2e:real": "playwright test -c playwright.real-backend.config.ts",
+    "lint": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173"
   },

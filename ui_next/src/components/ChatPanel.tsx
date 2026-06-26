@@ -17,11 +17,12 @@ import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { buildRetryEditedMessageDraft, THESIS_WORKFLOW_PROMPT } from './chat/chatActionModel';
-import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
+import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
 import { useChatSessions } from './chat/useChatSessions';
+import { useChatTaskWorkbench } from './chat/useChatTaskWorkbench';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -325,8 +326,7 @@ export function ChatWorkspace({
   const [listening, setListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
-  const renderMessages = useMemo(() => buildRenderMessages(messages), [messages]);
-  const taskSummaryItems = useMemo(() => buildChatTaskSummary(messages), [messages]);
+  const { renderMessages, taskSummaryItems } = useChatTaskWorkbench(messages);
   const [workspaceMentions, setWorkspaceMentions] = useState<WorkspaceMention[]>(() => normalizeWorkspaceMentions(mentionDatasets));
   const [gscloudLoginOpen, setGSCloudLoginOpen] = useState(false);
   const [pendingLoginJobId, setPendingLoginJobId] = useState('');
