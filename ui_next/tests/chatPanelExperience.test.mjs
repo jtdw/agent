@@ -18,6 +18,7 @@ const mapCommandActionHookSource = await readFile('src/components/chat/useChatMa
 const promptPreparationHookSource = await readFile('src/components/chat/useChatPromptPreparation.ts', 'utf8');
 const promptStreamActionHookSource = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const confirmationActionHookSource = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
+const conversationHeaderSource = await readFile('src/components/chat/ChatConversationHeader.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -114,6 +115,14 @@ assert.match(confirmationActionHookSource, /export function useChatConfirmationA
 assert.match(confirmationActionHookSource, /await api\.confirmChatAction/, 'confirmation hook should preserve the confirmation API call');
 assert.match(confirmationActionHookSource, /onConfirmationComplete\(token, response\)/, 'confirmation hook should hand successful responses back to ChatPanel');
 assert.match(confirmationActionHookSource, /streamLifecycle\.finishTask\(taskId, controller\)/, 'confirmation hook should finish the stream lifecycle');
+assert.match(source, /<ChatConversationHeader/, 'ChatPanel should render the conversation header through an isolated component');
+assert.doesNotMatch(source, /data-testid="floating-chat-toolbar"/, 'ChatPanel should not own the header toolbar JSX inline');
+assert.match(conversationHeaderSource, /export function ChatConversationHeader/, 'ChatConversationHeader should be exported');
+assert.match(conversationHeaderSource, /data-testid="chat-conversation-header"/, 'ChatConversationHeader should preserve the header test id');
+assert.match(conversationHeaderSource, /data-testid="floating-chat-toolbar"/, 'ChatConversationHeader should preserve the floating toolbar test id');
+assert.match(conversationHeaderSource, /data-testid="chat-model-selector"/, 'ChatConversationHeader should preserve the model selector');
+assert.match(conversationHeaderSource, /data-testid="chat-file-input"/, 'ChatConversationHeader should preserve the hidden file input');
+assert.match(conversationHeaderSource, /runThesisWorkflow/, 'ChatConversationHeader should preserve the thesis workflow action');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
