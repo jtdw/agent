@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSquare, Pencil, PlayCircle, Plus, RefreshCcw, SearchCheck, Sparkles, Trash2, UploadCloud, Wrench, X } from 'lucide-react';
@@ -18,6 +18,7 @@ import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { useChatModels } from './chat/useChatModels';
+import { useChatSessions } from './chat/useChatSessions';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -310,8 +311,6 @@ export function ChatWorkspace({
   const [width, setWidth] = useState(430);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState('');
   const [thinking, setThinking] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
@@ -321,21 +320,6 @@ export function ChatWorkspace({
   const [listening, setListening] = useState(false);
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [voiceUnavailableReason, setVoiceUnavailableReason] = useState('');
-  const visibleSessions = useMemo(() => {
-    const byId = new Map<string, ChatSession>();
-    sessions.forEach((session) => {
-      const id = String(session.session_id || '').trim();
-      if (id) byId.set(id, session);
-    });
-    return Array.from(byId.values());
-  }, [sessions]);
-  const currentInteractionMode = useMemo<'chat_only' | 'tool_enabled'>(() => {
-    const session = visibleSessions.find((item) => item.session_id === currentSessionId);
-    return session?.interaction_mode === 'tool_enabled' ? 'tool_enabled' : 'chat_only';
-  }, [currentSessionId, visibleSessions]);
-  const interactionModeLabel = currentInteractionMode === 'tool_enabled'
-    ? '工具模式：可以在确认和校验后执行下载、GIS 处理和建模。'
-    : '聊天模式：只回答问题，不会操作数据或创建任务。';
   const renderMessages = useMemo(() => buildRenderMessages(messages), [messages]);
   const taskSummaryItems = useMemo(() => buildChatTaskSummary(messages), [messages]);
   const [workspaceMentions, setWorkspaceMentions] = useState<WorkspaceMention[]>(() => normalizeWorkspaceMentions(mentionDatasets));
@@ -352,15 +336,38 @@ export function ChatWorkspace({
   const stickToBottomRef = useRef(true);
   const handledLoginMessageRef = useRef('');
   const announcedDownloadJobsRef = useRef<Set<string>>(new Set());
-  const sessionRefreshSeqRef = useRef(0);
-  const lastKnownUserIdRef = useRef('');
-  const lastSuccessfulSessionUserIdRef = useRef('');
-  const latestUserIdRef = useRef('');
   const mountedRef = useRef(true);
   const realtimeEventSourceRef = useRef<EventSource | null>(null);
   const realtimeEventIdsRef = useRef<Set<string>>(new Set());
   const realtimeTaskVersionRef = useRef(0);
   const userId = user?.user_id || '';
+  const handleSessionMessagesRefreshed = useCallback((incoming: ChatMessage[]) => {
+    setMessages((current) => mergeServerMessages(current, normalizeChatMessages(incoming)));
+  }, []);
+  const handleSessionMessagesCleared = useCallback(() => setMessages([]), []);
+  const handleSessionRefreshError = useCallback(() => {
+    setError('聊天记录加载失败，已保留当前显示内容，可稍后重试。');
+    setMessages((current) => current.length ? [...current, { role: 'system', content: '聊天记录暂时无法刷新，已保留当前显示内容。', meta: { reason: 'chat_load_failed' } }] : current);
+  }, []);
+  const {
+    sessions,
+    setSessions,
+    currentSessionId,
+    setCurrentSessionId,
+    visibleSessions,
+    currentSession,
+    refreshSessions,
+  } = useChatSessions({
+    userId,
+    onSessionChange,
+    onMessagesCleared: handleSessionMessagesCleared,
+    onMessagesRefreshed: handleSessionMessagesRefreshed,
+    onRefreshError: handleSessionRefreshError,
+  });
+  const currentInteractionMode = currentSession?.interaction_mode === 'tool_enabled' ? 'tool_enabled' : 'chat_only';
+  const interactionModeLabel = currentInteractionMode === 'tool_enabled'
+    ? '工具模式：可以在确认和校验后执行下载、GIS 处理和建模。'
+    : '聊天模式：只回答问题，不会操作数据或创建任务。';
   const {
     chatModels,
     visibleModels,
@@ -369,7 +376,6 @@ export function ChatWorkspace({
     modelError,
     changeChatModel,
   } = useChatModels({ userId, sessionId: currentSessionId });
-  latestUserIdRef.current = userId;
 
   function applyRealtimeEvent(event: RealtimeChatEvent) {
     const eventId = String(event.event_id || '').trim();
@@ -470,52 +476,6 @@ export function ChatWorkspace({
       if (realtimeEventSourceRef.current === source) realtimeEventSourceRef.current = null;
     };
   }, [userId, currentSessionId]);
-
-  const refreshSessions = async () => {
-    const requestedUserId = userId;
-    const seq = ++sessionRefreshSeqRef.current;
-    if (!userId) {
-      if (lastKnownUserIdRef.current) {
-        lastKnownUserIdRef.current = '';
-        lastSuccessfulSessionUserIdRef.current = '';
-      }
-      setSessions([]);
-      setCurrentSessionId('');
-      onSessionChange?.('');
-      setMessages([]);
-      return;
-    }
-    if (requestedUserId) lastKnownUserIdRef.current = requestedUserId;
-    let r = await api.chatSessions(requestedUserId);
-    if ((!r.sessions || r.sessions.length === 0) && r.current_session_id) {
-      await new Promise((resolve) => window.setTimeout(resolve, 150));
-      if (seq === sessionRefreshSeqRef.current && latestUserIdRef.current === requestedUserId) {
-        const retry = await api.chatSessions(requestedUserId);
-        if ((retry.sessions || []).length > 0) r = retry;
-      }
-    }
-    if (seq !== sessionRefreshSeqRef.current || latestUserIdRef.current !== requestedUserId) return;
-    const nextSessions = (r.sessions || []).length > 0
-      ? r.sessions || []
-      : r.current_session_id
-        ? [{ session_id: r.current_session_id, title: '新对话' }]
-        : [];
-    if (requestedUserId && nextSessions.length === 0 && lastSuccessfulSessionUserIdRef.current === requestedUserId) {
-      return;
-    }
-    setSessions(nextSessions);
-    if (nextSessions.length > 0) lastSuccessfulSessionUserIdRef.current = requestedUserId;
-    setCurrentSessionId(r.current_session_id || '');
-    onSessionChange?.(r.current_session_id || '');
-    setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
-  };
-
-  useEffect(() => {
-    refreshSessions().catch(() => {
-      setError('聊天记录加载失败，已保留当前显示内容，可稍后重试。');
-      setMessages((current) => current.length ? [...current, { role: 'system', content: '聊天记录暂时无法刷新，已保留当前显示内容。', meta: { reason: 'chat_load_failed' } }] : current);
-    });
-  }, [userId]);
 
   useEffect(() => {
     const message = [...messages].reverse().find((item) => item.meta?.action_required?.type === 'login_required');
@@ -1146,7 +1106,6 @@ export function ChatWorkspace({
   }), [width]);
 
   const isPage = mode === 'page';
-  const currentSession = visibleSessions.find((session) => session.session_id === currentSessionId);
   const workspaceBody = (
     <>
         <header data-testid="chat-conversation-header" className={cn('relative border-b border-slate-200/80 bg-white/82 shadow-[0_10px_30px_rgba(15,23,42,.04)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/78', isPage ? 'flex min-h-14 items-center gap-3 px-4 lg:col-start-2 lg:row-start-1' : 'flex flex-col gap-2 px-3 py-3')}>

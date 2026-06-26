@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const chatSessionsHookSource = await readFile('src/components/chat/useChatSessions.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -16,17 +17,17 @@ assert.equal(layerPanelSource.includes('if (!user) {'), true);
 assert.equal(layerPanelSource.includes('setJobs([]);'), true);
 
 const sendPromptSource = source.match(/const sendPrompt = async[\s\S]*?\n  const send =/)?.[0] || '';
-const refreshSessionsSource = source.match(/const refreshSessions = async[\s\S]*?\n  useEffect/)?.[0] || '';
-assert.match(refreshSessionsSource, /if \(!userId\) \{[\s\S]*?setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?setMessages\(\[\]\);[\s\S]*?return;/, 'ChatPanel must not load anonymous chat history before login');
+const refreshSessionsSource = chatSessionsHookSource.match(/const refreshSessions = useCallback[\s\S]*?\n  useEffect/)?.[0] || '';
+assert.match(refreshSessionsSource, /if \(!requestedUserId\) \{[\s\S]*?setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?onMessagesCleared\(\);[\s\S]*?return;/, 'useChatSessions must not load anonymous chat history before login');
 const missingUserBranch = refreshSessionsSource.slice(
-  refreshSessionsSource.indexOf('if (!userId) {'),
-  refreshSessionsSource.indexOf('let r = await api.chatSessions')
+  refreshSessionsSource.indexOf('if (!requestedUserId) {'),
+  refreshSessionsSource.indexOf('let result = await api.chatSessions')
 );
-assert.match(missingUserBranch, /setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?setMessages\(\[\]\);[\s\S]*?return;/, 'ChatPanel must return before requesting sessions when userId is initially empty');
+assert.match(missingUserBranch, /setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?onMessagesCleared\(\);[\s\S]*?return;/, 'useChatSessions must return before requesting sessions when userId is initially empty');
 assert.match(
   missingUserBranch,
-  /if \(!userId\) \{\s*if \(lastKnownUserIdRef\.current\) \{[\s\S]*?lastSuccessfulSessionUserIdRef\.current = '';[\s\S]*?\}\s*setSessions\(\[\]\);[\s\S]*?return;/,
-  'ChatPanel must keep previous-user cleanup separate from the unconditional missing-user return'
+  /if \(!requestedUserId\) \{\s*if \(lastKnownUserIdRef\.current\) \{[\s\S]*?lastSuccessfulSessionUserIdRef\.current = '';[\s\S]*?\}\s*setSessions\(\[\]\);[\s\S]*?return;/,
+  'useChatSessions must keep previous-user cleanup separate from the unconditional missing-user return'
 );
 assert.match(sendPromptSource, /if \(!userId\) \{[\s\S]*?return;/, 'ChatPanel must not create anonymous chat records before login');
 assert.equal(sendPromptSource.includes('await api.streamChat('), true, 'ChatPanel must send through the streaming chat endpoint');
