@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
 const renderer = await readFile('src/components/ChatMessageRenderer.tsx', 'utf8');
 const chatPanel = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const sessionSidebar = await readFile('src/components/chat/ChatSessionSidebar.tsx', 'utf8');
 const chatUploadsHook = await readFile('src/components/chat/useChatUploads.ts', 'utf8');
 const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const confirmationActionHook = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
@@ -49,7 +50,8 @@ assert.match(chatUploadsHook, /export function useChatUploads/, 'useChatUploads 
 assert.match(chatUploadsHook, /api\.uploadFiles\(files, userId, sessionId\)/, 'useChatUploads should preserve session-scoped upload API calls');
 assert.match(chatUploadsHook, /normalizeWorkspaceMentions/, 'useChatUploads should refresh workspace mentions from upload dashboard datasets');
 assert.match(chatUploadsHook, /upload_summaries/, 'useChatUploads should preserve upload summaries for UploadResultCard');
-assert.match(chatPanel, /data-testid="chat-session-list"/, 'ChatPanel must render session/data partition area');
+assert.match(chatPanel, /<ChatSessionSidebar/, 'ChatPanel must render session/data partition area through ChatSessionSidebar');
+assert.match(sessionSidebar, /data-testid="chat-session-list"/, 'ChatSessionSidebar must preserve the session/data partition area');
 assert.ok(/AbortController/.test(promptStreamActionHook) && /AbortController/.test(confirmationActionHook), 'Prompt and confirmation hooks must support cooperative stop');
 
 assert.match(productConsole, /activeTab === 'chat'/, 'ProductConsole must have a dedicated chat layout branch');

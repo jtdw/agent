@@ -19,6 +19,7 @@ const promptPreparationHookSource = await readFile('src/components/chat/useChatP
 const promptStreamActionHookSource = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 const confirmationActionHookSource = await readFile('src/components/chat/useChatConfirmationAction.ts', 'utf8');
 const conversationHeaderSource = await readFile('src/components/chat/ChatConversationHeader.tsx', 'utf8');
+const sessionSidebarSource = await readFile('src/components/chat/ChatSessionSidebar.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -123,6 +124,12 @@ assert.match(conversationHeaderSource, /data-testid="floating-chat-toolbar"/, 'C
 assert.match(conversationHeaderSource, /data-testid="chat-model-selector"/, 'ChatConversationHeader should preserve the model selector');
 assert.match(conversationHeaderSource, /data-testid="chat-file-input"/, 'ChatConversationHeader should preserve the hidden file input');
 assert.match(conversationHeaderSource, /runThesisWorkflow/, 'ChatConversationHeader should preserve the thesis workflow action');
+assert.match(source, /<ChatSessionSidebar/, 'ChatPanel should render the session sidebar through an isolated component');
+assert.doesNotMatch(source, /data-testid="chat-session-list"/, 'ChatPanel should not own the page session sidebar JSX inline');
+assert.match(sessionSidebarSource, /export function ChatSessionSidebar/, 'ChatSessionSidebar should be exported');
+assert.match(sessionSidebarSource, /data-testid="chat-session-list"/, 'ChatSessionSidebar should preserve the session list test id');
+assert.match(sessionSidebarSource, /data-testid="chat-new-session"/, 'ChatSessionSidebar should preserve the new session test id');
+assert.match(sessionSidebarSource, /sessionDate\(session\)/, 'ChatSessionSidebar should preserve session date labels');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
