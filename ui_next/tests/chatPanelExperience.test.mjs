@@ -12,6 +12,7 @@ const thesisWorkflowHookSource = await readFile('src/components/chat/useChatThes
 const interactionModeActionHookSource = await readFile('src/components/chat/useChatInteractionModeAction.ts', 'utf8');
 const newSessionActionHookSource = await readFile('src/components/chat/useChatNewSessionAction.ts', 'utf8');
 const switchSessionActionHookSource = await readFile('src/components/chat/useChatSwitchSessionAction.ts', 'utf8');
+const deleteSessionActionHookSource = await readFile('src/components/chat/useChatDeleteSessionAction.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -73,6 +74,14 @@ assert.doesNotMatch(source, /await api\.switchChatSession/, 'ChatPanel should no
 assert.match(switchSessionActionHookSource, /export function useChatSwitchSessionAction/, 'useChatSwitchSessionAction hook should be exported');
 assert.match(switchSessionActionHookSource, /api\.switchChatSession\(sessionId, userId\)/, 'switch-session hook should preserve the session-scoped switch API call');
 assert.match(switchSessionActionHookSource, /onSessionSwitched\(sessionId, response\)/, 'switch-session hook should hand responses back to ChatPanel for existing session reconciliation');
+assert.match(source, /useChatDeleteSessionAction/, 'ChatPanel should delegate session deletion to a focused hook');
+assert.doesNotMatch(source, /const deleteSession = async/, 'ChatPanel should not own delete-session flow inline');
+assert.doesNotMatch(source, /await api\.deleteChatSession/, 'ChatPanel should not call the delete-session API directly after hook extraction');
+assert.doesNotMatch(source, /await api\.clearChatSession/, 'ChatPanel should not call the clear-session API directly after hook extraction');
+assert.match(deleteSessionActionHookSource, /export function useChatDeleteSessionAction/, 'useChatDeleteSessionAction hook should be exported');
+assert.match(deleteSessionActionHookSource, /api\.deleteChatSession\(currentSessionId, userId\)/, 'delete-session hook should preserve the session-scoped delete API call');
+assert.match(deleteSessionActionHookSource, /api\.clearChatSession\(currentSessionId, userId\)/, 'delete-session hook should preserve the single-session clear API call');
+assert.match(deleteSessionActionHookSource, /onSessionDeleted\(response\)/, 'delete-session hook should hand responses back to ChatPanel for existing session reconciliation');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);

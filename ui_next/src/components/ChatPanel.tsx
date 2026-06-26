@@ -33,6 +33,7 @@ import { useChatThesisWorkflow } from './chat/useChatThesisWorkflow';
 import { useChatInteractionModeAction } from './chat/useChatInteractionModeAction';
 import { useChatNewSessionAction } from './chat/useChatNewSessionAction';
 import { useChatSwitchSessionAction } from './chat/useChatSwitchSessionAction';
+import { useChatDeleteSessionAction } from './chat/useChatDeleteSessionAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -418,6 +419,22 @@ export function ChatWorkspace({
     setError,
     onSessionSwitched: handleSessionSwitched,
   });
+  const handleSessionDeleted = useCallback((response: Awaited<ReturnType<typeof api.deleteChatSession>> | Awaited<ReturnType<typeof api.clearChatSession>>) => {
+    setSessions(response.sessions || []);
+    const nextSessionId = response.current_session_id || '';
+    setCurrentSessionId(nextSessionId);
+    onSessionChange?.(nextSessionId);
+    setMessages(normalizeChatMessages(response.messages));
+    cancelEdit();
+  }, [cancelEdit, onSessionChange, setCurrentSessionId, setSessions]);
+  const { deleteSession } = useChatDeleteSessionAction({
+    thinking,
+    userId,
+    currentSessionId,
+    sessionCount: sessions.length,
+    setError,
+    onSessionDeleted: handleSessionDeleted,
+  });
   const { runThesisWorkflow } = useChatThesisWorkflow({
     thinking,
     userId,
@@ -623,29 +640,6 @@ export function ChatWorkspace({
   const send = () => sendPrompt(input);
 
   useChatExternalPrompt({ externalPrompt, sendPrompt });
-
-  const deleteSession = async () => {
-    if (!currentSessionId || thinking) return;
-    setError('');
-    if (!userId) {
-      setError('请先登录账号，再管理对话。');
-      return;
-    }
-    if (!window.confirm('删除当前对话？删除后该对话的聊天记录和会话级数据将不可恢复。')) return;
-    try {
-      const r = sessions.length > 1
-        ? await api.deleteChatSession(currentSessionId, userId)
-        : await api.clearChatSession(currentSessionId, userId);
-      setSessions(r.sessions || []);
-      const nextSessionId = r.current_session_id || '';
-      setCurrentSessionId(nextSessionId);
-      onSessionChange?.(nextSessionId);
-      setMessages(normalizeChatMessages(r.messages));
-      cancelEdit();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '删除对话失败');
-    }
-  };
 
   const isPage = mode === 'page';
   const workspaceBody = (
