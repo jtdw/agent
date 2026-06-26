@@ -6,6 +6,7 @@ const root = resolve(import.meta.dirname, '..');
 const renderer = readFileSync(resolve(root, 'src/components/ChatMessageRenderer.tsx'), 'utf8');
 const panel = readFileSync(resolve(root, 'src/components/ChatPanel.tsx'), 'utf8');
 const realtimeHook = readFileSync(resolve(root, 'src/components/chat/useChatRealtimeEvents.ts'), 'utf8');
+const downloadsHook = readFileSync(resolve(root, 'src/components/chat/useChatDownloads.ts'), 'utf8');
 const api = readFileSync(resolve(root, 'src/lib/api.ts'), 'utf8');
 
 assert.match(renderer, /function TaskStatusCard/, 'ChatMessageRenderer must render tool work through one unified task card');
@@ -66,9 +67,15 @@ assert.match(panel, /messageIsToolTask/, 'ChatPanel must identify tool task mess
 assert.match(panel, /mergeTaskCardUpdate/, 'ChatPanel must merge task state changes into the existing task card');
 assert.match(panel, /messageMatchesConfirmation/, 'Confirmation responses must target the original awaiting-confirmation card');
 assert.match(panel, /messageMatchesJob/, 'Download job updates must target the original running task card');
-assert.match(panel, /reason: 'download_success'[\s\S]*mergeTaskCardUpdate/, 'Download completion must update the existing task card');
-assert.match(panel, /const retryDownload = async \(jobId: string\)/, 'ChatPanel must expose a structured download retry handler');
-assert.match(panel, /api\.retryDownloadJob\(jobId, userId, currentSessionId\)/, 'ChatPanel retry must call backend retry endpoint with session_id');
+assert.match(panel, /useChatDownloads/, 'ChatPanel should delegate download job controls to a focused hook');
+assert.doesNotMatch(panel, /setGSCloudLoginOpen|setPendingLoginJobId|setResumeReadyJobIds|api\.resumeDownloadJob|api\.cancelDownloadJob|api\.retryDownloadJob/, 'ChatPanel should not own GSCloud login/download control state after hook extraction');
+assert.match(downloadsHook, /export function useChatDownloads/, 'Download controls should live in useChatDownloads');
+assert.match(downloadsHook, /reason: 'download_success'[\s\S]*mergeTaskCardUpdate/, 'Download completion must update the existing task card');
+assert.match(downloadsHook, /api\.resumeDownloadJob\(jobId\)/, 'Download hook must resume jobs through the backend endpoint');
+assert.match(downloadsHook, /api\.cancelDownloadJob\(jobId, userId, .*sessionId\)/, 'Download hook cancel must pass session_id');
+assert.match(downloadsHook, /api\.retryDownloadJob\(jobId, userId, sessionId\)/, 'Download hook retry must call backend retry endpoint with session_id');
+assert.match(downloadsHook, /const retryDownload = async \(jobId: string\)/, 'Download hook must expose a structured retry handler');
+assert.match(panel, /retryDownload/, 'ChatPanel must still pass the structured retry handler through to the task card');
 assert.match(panel, /onRetry=\{retryDownload\}/, 'Task card must receive the structured retry handler');
 assert.match(panel, /max-w-\[min\(66%,34rem\)\]/, 'User message bubbles should remain compact instead of occupying the whole row');
 assert.doesNotMatch(panel, /Boolean\(meta\.presentation_result\)/, 'Answer-only PresentationResult must not promote a chat message into a tool task card');
