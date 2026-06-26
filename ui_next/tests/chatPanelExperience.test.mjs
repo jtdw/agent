@@ -10,6 +10,7 @@ const externalPromptHookSource = await readFile('src/components/chat/useChatExte
 const editingHookSource = await readFile('src/components/chat/useChatEditing.ts', 'utf8');
 const thesisWorkflowHookSource = await readFile('src/components/chat/useChatThesisWorkflow.ts', 'utf8');
 const interactionModeActionHookSource = await readFile('src/components/chat/useChatInteractionModeAction.ts', 'utf8');
+const newSessionActionHookSource = await readFile('src/components/chat/useChatNewSessionAction.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -59,6 +60,12 @@ assert.doesNotMatch(source, /await api\.setChatInteractionMode/, 'ChatPanel shou
 assert.match(interactionModeActionHookSource, /export function useChatInteractionModeAction/, 'useChatInteractionModeAction hook should be exported');
 assert.match(interactionModeActionHookSource, /api\.setChatInteractionMode\(currentSessionId, mode, userId\)/, 'interaction mode hook should preserve the session-scoped mode API call');
 assert.match(interactionModeActionHookSource, /onModeChanged\(response\)/, 'interaction mode hook should hand responses back to ChatPanel for existing merge/session reconciliation');
+assert.match(source, /useChatNewSessionAction/, 'ChatPanel should delegate new session creation to a focused hook');
+assert.doesNotMatch(source, /const newSession = async/, 'ChatPanel should not own new-session flow inline');
+assert.doesNotMatch(source, /await api\.createChatSession/, 'ChatPanel should not call the new-session API directly after hook extraction');
+assert.match(newSessionActionHookSource, /export function useChatNewSessionAction/, 'useChatNewSessionAction hook should be exported');
+assert.match(newSessionActionHookSource, /api\.createChatSession\(userId\)/, 'new-session hook should preserve the existing create session API call');
+assert.match(newSessionActionHookSource, /onSessionCreated\(response\)/, 'new-session hook should hand responses back to ChatPanel for existing session reconciliation');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);

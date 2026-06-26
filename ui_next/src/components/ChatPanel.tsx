@@ -31,6 +31,7 @@ import { useChatExternalPrompt } from './chat/useChatExternalPrompt';
 import { useChatEditing } from './chat/useChatEditing';
 import { useChatThesisWorkflow } from './chat/useChatThesisWorkflow';
 import { useChatInteractionModeAction } from './chat/useChatInteractionModeAction';
+import { useChatNewSessionAction } from './chat/useChatNewSessionAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -364,6 +365,20 @@ export function ChatWorkspace({
     setError,
     onModeChanged: handleInteractionModeChanged,
   });
+  const handleSessionCreated = useCallback((response: Awaited<ReturnType<typeof api.createChatSession>>) => {
+    setSessions(response.sessions || []);
+    const nextSessionId = response.current_session_id || response.session_id;
+    setCurrentSessionId(nextSessionId);
+    onSessionChange?.(nextSessionId);
+    setMessages(normalizeChatMessages(response.messages));
+    setInput('');
+  }, [onSessionChange, setCurrentSessionId, setSessions]);
+  const { newSession } = useChatNewSessionAction({
+    thinking,
+    userId,
+    setError,
+    onSessionCreated: handleSessionCreated,
+  });
   const handleEditedRetryComplete = useCallback((response: Awaited<ReturnType<typeof api.retryMessage>>) => {
     setMessages((current) => mergeServerMessages(current, normalizeChatMessages(response.messages)));
     setSessions(response.sessions || []);
@@ -591,26 +606,6 @@ export function ChatWorkspace({
   const send = () => sendPrompt(input);
 
   useChatExternalPrompt({ externalPrompt, sendPrompt });
-
-  const newSession = async () => {
-    if (thinking) return;
-    setError('');
-    if (!userId) {
-      setError('请先登录账号，再新建对话。');
-      return;
-    }
-    try {
-      const r = await api.createChatSession(userId);
-      setSessions(r.sessions || []);
-      const nextSessionId = r.current_session_id || r.session_id;
-      setCurrentSessionId(nextSessionId);
-      onSessionChange?.(nextSessionId);
-      setMessages(normalizeChatMessages(r.messages));
-      setInput('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '新建对话失败');
-    }
-  };
 
   const switchSession = async (sessionId: string) => {
     if (!sessionId || sessionId === currentSessionId || thinking || modelLoading) return;
