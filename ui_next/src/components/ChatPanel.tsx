@@ -16,6 +16,7 @@ import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
+import { buildRetryEditedMessageDraft, THESIS_WORKFLOW_PROMPT } from './chat/chatActionModel';
 import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
@@ -987,9 +988,9 @@ export function ChatWorkspace({
   };
 
   const retryEditedMessage = async () => {
-    if (!editingId || thinking) return;
-    const text = editText.trim();
-    if (!text) return;
+    if (thinking) return;
+    const draft = buildRetryEditedMessageDraft(editingId, editText);
+    if (!draft) return;
     if (!userId) {
       setError('请先登录账号，再重新生成回答。');
       return;
@@ -997,7 +998,7 @@ export function ChatWorkspace({
     streamLifecycle.startBusy();
     setError('');
     try {
-      const r = await api.retryMessage(editingId, text, userId, currentSessionId);
+      const r = await api.retryMessage(draft.messageId, draft.text, userId, currentSessionId);
       setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
       setSessions(r.sessions || []);
       const nextSessionId = r.current_session_id || currentSessionId;
@@ -1049,7 +1050,7 @@ export function ChatWorkspace({
     }
     streamLifecycle.startBusy();
     setError('');
-    const prompt = '一键检查并运行闪电河流域土壤水分融合论文流程。';
+    const prompt = THESIS_WORKFLOW_PROMPT;
     setMessages((v) => [...v, { role: 'user', content: prompt }]);
     try {
       const r = await api.runSoilMoistureWorkflow(userId, currentSessionId);
