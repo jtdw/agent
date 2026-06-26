@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSquare, Pencil, PlayCircle, Plus, RefreshCcw, SearchCheck, Sparkles, Trash2, UploadCloud, Wrench, X } from 'lucide-react';
 import { api, ChatMessage, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
@@ -27,6 +26,7 @@ import { useChatDownloads } from './chat/useChatDownloads';
 import { useChatWorkspaceMentions } from './chat/useChatWorkspaceMentions';
 import { useChatUploads } from './chat/useChatUploads';
 import { useChatVoiceInput } from './chat/useChatVoiceInput';
+import { useChatPanelResize } from './chat/useChatPanelResize';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -298,7 +298,7 @@ export function ChatWorkspace({
   const userId = user?.user_id || '';
   const streamLifecycle = useChatStreamLifecycle({ userId });
   const { thinking } = streamLifecycle;
-  const [width, setWidth] = useState(430);
+  const { panelRef, panelStyle, dragHandle } = useChatPanelResize();
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setError] = useState('');
@@ -306,7 +306,6 @@ export function ChatWorkspace({
   const [editText, setEditText] = useState('');
   const [lastFailedPrompt, setLastFailedPrompt] = useState('');
   const { renderMessages, taskSummaryItems } = useChatTaskWorkbench(messages);
-  const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stickToBottomRef = useRef(true);
@@ -692,20 +691,6 @@ export function ChatWorkspace({
     }
   };
 
-  const dragHandle = useMemo(() => ({
-    onPointerDown: (e: PointerEvent) => {
-      const startX = e.clientX;
-      const startW = width;
-      const move = (ev: globalThis.PointerEvent) => setWidth(Math.min(680, Math.max(360, startW + ev.clientX - startX)));
-      const up = () => {
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', up);
-      };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', up);
-    }
-  }), [width]);
-
   const isPage = mode === 'page';
   const workspaceBody = (
     <>
@@ -1020,7 +1005,7 @@ export function ChatWorkspace({
   return (
     <motion.aside
       ref={panelRef}
-      style={{ width: `min(${width}px, calc(100vw - 1.5rem))`, minWidth: 'min(360px, calc(100vw - 1.5rem))' }}
+      style={panelStyle}
       initial={{ opacity: 0, x: -16 }}
       animate={{ opacity: 1, x: 0 }}
       transition={{ type: 'spring', stiffness: 300, damping: 30 }}

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const chatSessionsHookSource = await readFile('src/components/chat/useChatSessions.ts', 'utf8');
 const workspaceMentionsHookSource = await readFile('src/components/chat/useChatWorkspaceMentions.ts', 'utf8');
+const resizeHookSource = await readFile('src/components/chat/useChatPanelResize.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -12,6 +13,13 @@ assert.doesNotMatch(source, /api\.workspaceMentions/, 'ChatPanel should not own 
 assert.match(workspaceMentionsHookSource, /export function useChatWorkspaceMentions/, 'useChatWorkspaceMentions hook should be exported');
 assert.match(workspaceMentionsHookSource, /export function normalizeWorkspaceMentions/, 'workspace mention normalization should move with the hook');
 assert.match(workspaceMentionsHookSource, /api\.workspaceMentions/, 'workspace mention hook should own API loading');
+assert.match(source, /useChatPanelResize/, 'ChatPanel should delegate floating panel resize behavior to a focused hook');
+assert.doesNotMatch(source, /const dragHandle = useMemo/, 'ChatPanel should not own pointer resize handlers inline');
+assert.match(resizeHookSource, /export function useChatPanelResize/, 'useChatPanelResize hook should be exported');
+assert.match(resizeHookSource, /initialWidth = 430/, 'resize hook should preserve the existing default floating width');
+assert.match(resizeHookSource, /minWidth = 360/, 'resize hook should preserve the existing minimum floating width');
+assert.match(resizeHookSource, /maxWidth = 680/, 'resize hook should preserve the existing maximum floating width');
+assert.match(resizeHookSource, /window\.addEventListener\('pointermove'/, 'resize hook should own pointermove subscription');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
