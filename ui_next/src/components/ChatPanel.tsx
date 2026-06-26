@@ -14,7 +14,7 @@ import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
-import { buildRetryEditedMessageDraft, THESIS_WORKFLOW_PROMPT } from './chat/chatActionModel';
+import { THESIS_WORKFLOW_PROMPT } from './chat/chatActionModel';
 import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { buildSendPromptDraft, buildStreamChatContext } from './chat/chatSendModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
@@ -29,6 +29,7 @@ import { useChatVoiceInput } from './chat/useChatVoiceInput';
 import { useChatPanelResize } from './chat/useChatPanelResize';
 import { useChatAutoScroll } from './chat/useChatAutoScroll';
 import { useChatExternalPrompt } from './chat/useChatExternalPrompt';
+import { useChatEditing } from './chat/useChatEditing';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -304,8 +305,6 @@ export function ChatWorkspace({
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [error, setError] = useState('');
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [editText, setEditText] = useState('');
   const [lastFailedPrompt, setLastFailedPrompt] = useState('');
   const { renderMessages, taskSummaryItems } = useChatTaskWorkbench(messages);
   const { listRef, handleScroll } = useChatAutoScroll({ messages, thinking });
@@ -351,6 +350,28 @@ export function ChatWorkspace({
     modelError,
     changeChatModel,
   } = useChatModels({ userId, sessionId: currentSessionId });
+  const handleEditedRetryComplete = useCallback((response: Awaited<ReturnType<typeof api.retryMessage>>) => {
+    setMessages((current) => mergeServerMessages(current, normalizeChatMessages(response.messages)));
+    setSessions(response.sessions || []);
+    const nextSessionId = response.current_session_id || currentSessionId;
+    setCurrentSessionId(nextSessionId);
+    onSessionChange?.(nextSessionId);
+  }, [currentSessionId, onSessionChange, setCurrentSessionId, setSessions]);
+  const {
+    editingId,
+    editText,
+    setEditText,
+    beginEdit,
+    cancelEdit,
+    retryEditedMessage,
+  } = useChatEditing({
+    thinking,
+    userId,
+    currentSessionId,
+    streamLifecycle,
+    setError,
+    onRetryComplete: handleEditedRetryComplete,
+  });
 
   const mergeRealtimeEvent = useCallback((event: RealtimeChatEvent, syncState: 'connecting' | 'live' | 'polling') => {
     const taskUpdate = event.task_update && typeof event.task_update === 'object' ? event.task_update : {};
@@ -582,7 +603,7 @@ export function ChatWorkspace({
       setCurrentSessionId(nextSessionId);
       onSessionChange?.(nextSessionId);
       setMessages(normalizeChatMessages(r.messages));
-      setEditingId(null);
+      cancelEdit();
     } catch (e) {
       setError(e instanceof Error ? e.message : '切换对话失败');
     }
@@ -622,41 +643,9 @@ export function ChatWorkspace({
       setCurrentSessionId(nextSessionId);
       onSessionChange?.(nextSessionId);
       setMessages(normalizeChatMessages(r.messages));
-      setEditingId(null);
+      cancelEdit();
     } catch (e) {
       setError(e instanceof Error ? e.message : '删除对话失败');
-    }
-  };
-
-  const beginEdit = (message: ChatMessage) => {
-    if (!message.message_id || thinking) return;
-    setEditingId(message.message_id);
-    setEditText(message.content);
-  };
-
-  const retryEditedMessage = async () => {
-    if (thinking) return;
-    const draft = buildRetryEditedMessageDraft(editingId, editText);
-    if (!draft) return;
-    if (!userId) {
-      setError('请先登录账号，再重新生成回答。');
-      return;
-    }
-    streamLifecycle.startBusy();
-    setError('');
-    try {
-      const r = await api.retryMessage(draft.messageId, draft.text, userId, currentSessionId);
-      setMessages((current) => mergeServerMessages(current, normalizeChatMessages(r.messages)));
-      setSessions(r.sessions || []);
-      const nextSessionId = r.current_session_id || currentSessionId;
-      setCurrentSessionId(nextSessionId);
-      onSessionChange?.(nextSessionId);
-      setEditingId(null);
-      setEditText('');
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '重新生成失败');
-    } finally {
-      streamLifecycle.finishBusy();
     }
   };
 
@@ -861,7 +850,7 @@ export function ChatWorkspace({
                           className="min-h-24 w-full resize-y rounded-2xl border border-white/40 bg-white/95 px-3 py-2 text-slate-900 outline-none"
                         />
                         <div className="flex justify-end gap-2">
-                          <button onClick={() => setEditingId(null)} className="rounded-xl bg-white/20 p-2" title="取消"><X size={15} /></button>
+                          <button onClick={cancelEdit} className="rounded-xl bg-white/20 p-2" title="取消"><X size={15} /></button>
                           <button onClick={retryEditedMessage} className="rounded-xl bg-white/25 p-2" title="保存并重新生成"><Check size={15} /></button>
                         </div>
                       </div>

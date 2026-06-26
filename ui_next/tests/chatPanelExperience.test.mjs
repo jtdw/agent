@@ -7,6 +7,7 @@ const workspaceMentionsHookSource = await readFile('src/components/chat/useChatW
 const resizeHookSource = await readFile('src/components/chat/useChatPanelResize.ts', 'utf8');
 const autoScrollHookSource = await readFile('src/components/chat/useChatAutoScroll.ts', 'utf8');
 const externalPromptHookSource = await readFile('src/components/chat/useChatExternalPrompt.ts', 'utf8');
+const editingHookSource = await readFile('src/components/chat/useChatEditing.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -34,6 +35,14 @@ assert.match(externalPromptHookSource, /externalPrompt\?\.prompt/, 'external pro
 assert.match(externalPromptHookSource, /sendPromptRef\.current\(externalPrompt\.prompt\)/, 'external prompt hook should send the provided prompt through the current sender');
 assert.match(externalPromptHookSource, /sendPromptRef\.current = sendPrompt/, 'external prompt hook should keep the latest sender without widening dispatch triggers');
 assert.match(externalPromptHookSource, /\[externalPrompt\?\.id\]/, 'external prompt hook should retain id-scoped triggering');
+assert.match(source, /useChatEditing/, 'ChatPanel should delegate edit-and-regenerate state to a focused hook');
+assert.doesNotMatch(source, /const \[editingId, setEditingId\]/, 'ChatPanel should not own editing id state inline');
+assert.doesNotMatch(source, /const retryEditedMessage = async/, 'ChatPanel should not own edited-message retry flow inline');
+assert.match(editingHookSource, /export function useChatEditing/, 'useChatEditing hook should be exported');
+assert.match(editingHookSource, /buildRetryEditedMessageDraft/, 'useChatEditing should preserve retry draft validation');
+assert.match(editingHookSource, /api\.retryMessage\(draft\.messageId, draft\.text, userId, currentSessionId\)/, 'useChatEditing should preserve session-scoped retry API call');
+assert.match(editingHookSource, /onRetryComplete\(response\)/, 'useChatEditing should hand retry responses back to ChatPanel for existing merge/session reconciliation');
+assert.match(source, /mergeServerMessages\(current, normalizeChatMessages\(response\.messages\)\)/, 'ChatPanel should keep stable message merging after edited-message retry');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
