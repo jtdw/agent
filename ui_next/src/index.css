@@ -520,15 +520,14 @@ body {
   background: rgba(236, 254, 255, 0.85);
 }
 .chat-composer-shell {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 0.45rem;
-  border-radius: 1.1rem;
-  border: 1px solid rgba(203, 213, 225, 0.82);
-  background: rgba(255, 255, 255, 0.88);
-  padding: 0.5rem;
-  box-shadow: 0 16px 36px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255,255,255,.7);
+  position: relative;
+  isolation: isolate;
+  display: block;
+  border-radius: 1.15rem;
+  border: 1px solid rgba(148, 163, 184, 0.38);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.9));
+  padding: 0.35rem;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.1), inset 0 1px 0 rgba(255,255,255,.8);
   transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
 }
 .chat-composer-shell:focus-within,
@@ -537,14 +536,65 @@ body {
   background: rgba(255, 255, 255, 0.95);
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.1), 0 0 0 4px rgba(8, 199, 232, 0.12);
 }
+.chat-composer-input-frame {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.55rem;
+  min-height: 3rem;
+}
+.chat-composer-tool-group {
+  display: inline-flex;
+  align-items: center;
+  align-self: end;
+  gap: 0.32rem;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  background: rgba(248, 250, 252, 0.78);
+  padding: 0.22rem;
+}
+.chat-composer-field {
+  min-width: 0;
+  border-radius: 0.95rem;
+  border: 1px solid rgba(226, 232, 240, 0.88);
+  background: rgba(255, 255, 255, 0.72);
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+.chat-composer-field:focus-within {
+  border-color: rgba(8, 145, 178, 0.36);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: inset 0 0 0 1px rgba(8, 145, 178, 0.08);
+}
+.chat-composer-action-cluster {
+  display: inline-flex;
+  align-items: center;
+  align-self: end;
+  justify-content: flex-end;
+}
+.chat-composer-drag-rail {
+  position: absolute;
+  left: 0.7rem;
+  right: 0.7rem;
+  top: 0.28rem;
+  z-index: 1;
+  height: 3px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #16a34a, #0891b2, #0f62fe);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+.chat-composer-shell[data-dragging="true"] .chat-composer-drag-rail {
+  opacity: 1;
+}
 .chat-composer-textarea {
-  min-height: 2.7rem;
+  min-height: 2.5rem;
   max-height: 13.75rem;
   width: 100%;
   resize: none;
   border: 0;
   background: transparent;
-  padding: 0.58rem 0.25rem;
+  padding: 0.55rem 0.75rem;
   color: rgb(15, 23, 42);
   font-size: 0.92rem;
   font-weight: 600;
@@ -554,20 +604,31 @@ body {
 .chat-composer-textarea::placeholder {
   color: rgb(148, 163, 184);
 }
+.chat-composer-tool,
 .chat-composer-submit {
   display: inline-grid;
-  height: 2.7rem;
-  width: 2.7rem;
+  height: 2.5rem;
+  width: 2.5rem;
   align-self: center;
   place-items: center;
-  border-radius: 0.95rem;
+  border-radius: 0.75rem;
+}
+.chat-composer-tool {
+  border-color: transparent;
+  background: transparent;
+}
+.chat-composer-tool:hover,
+.chat-composer-tool.is-active {
+  transform: none;
+  border-color: rgba(8, 145, 178, 0.2);
+  background: rgba(236, 254, 255, 0.86);
+}
+.chat-composer-submit {
+  border: 0;
   color: white;
   background: linear-gradient(135deg, #0f62fe, #0891b2);
   box-shadow: 0 12px 26px rgba(15, 98, 254, 0.22);
   transition: transform 0.16s ease, filter 0.16s ease, box-shadow 0.16s ease;
-}
-.chat-composer-tool {
-  align-self: center;
 }
 .chat-composer-tool svg,
 .chat-composer-submit svg {
@@ -591,11 +652,12 @@ body {
 .chat-mention-menu {
   position: absolute;
   bottom: calc(100% + 0.65rem);
-  left: 0.5rem;
+  left: 0.35rem;
   z-index: 10;
-  width: min(24rem, calc(100vw - 2rem));
+  width: min(26rem, calc(100vw - 1rem));
+  max-width: calc(100vw - 1rem);
   overflow: hidden;
-  border-radius: 1rem;
+  border-radius: 0.95rem;
   border: 1px solid rgba(203, 213, 225, 0.84);
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 24px 60px rgba(15, 23, 42, 0.16);
@@ -612,7 +674,7 @@ body {
   font-weight: 900;
 }
 .chat-mention-list {
-  max-height: 16rem;
+  max-height: min(18rem, 42vh);
   overflow-y: auto;
   padding: 0.4rem;
 }
@@ -692,6 +754,8 @@ body {
 .dark .chat-compact-select,
 .dark .chat-model-select,
 .dark .chat-composer-shell,
+.dark .chat-composer-tool-group,
+.dark .chat-composer-field,
 .dark .chat-mention-menu {
   border-color: rgba(51, 65, 85, 0.96);
   background: rgba(15, 23, 42, 0.88);
@@ -705,6 +769,10 @@ body {
   border-color: rgba(8, 145, 178, 0.58);
   background: rgba(8, 47, 73, 0.42);
   color: rgb(103, 232, 249);
+}
+.dark .chat-composer-field:focus-within {
+  border-color: rgba(8, 145, 178, 0.58);
+  background: rgba(15, 23, 42, 0.96);
 }
 .dark .chat-session-rail {
   border-right-color: rgba(30, 41, 59, 0.96);
@@ -814,7 +882,7 @@ body {
   background: rgba(15, 23, 42, 0.72);
 }
 
-@media (max-width: 640px) {
+@media (max-width: 720px) {
   .artifact-download-card {
     align-items: flex-start;
     flex-wrap: wrap;
@@ -823,10 +891,35 @@ body {
     margin-left: 2.75rem;
   }
   .chat-composer-shell {
-    grid-template-columns: auto auto minmax(0, 1fr) auto;
+    padding: 0.3rem;
   }
-  .chat-composer-tool:nth-of-type(4) {
+  .chat-composer-input-frame {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.35rem;
+  }
+  .chat-composer-tool-group {
+    gap: 0.22rem;
+    padding: 0.16rem;
+  }
+  .chat-composer-tool-group .chat-composer-tool[data-optional="voice"] {
     display: none;
+  }
+  .chat-composer-tool,
+  .chat-composer-submit {
+    height: 2.35rem;
+    width: 2.35rem;
+  }
+  .chat-composer-field {
+    border-radius: 0.82rem;
+  }
+  .chat-composer-textarea {
+    padding: 0.48rem 0.55rem;
+    font-size: 0.88rem;
+  }
+  .chat-mention-menu {
+    left: 0.25rem;
+    right: 0.25rem;
+    width: auto;
   }
 }
 

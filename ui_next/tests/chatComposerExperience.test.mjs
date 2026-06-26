@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+
+const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
+const css = await readFile('src/index.css', 'utf8');
+
+assert.match(composer, /data-testid="chat-composer"/, 'ChatComposer must keep its root test id');
+assert.match(composer, /data-testid="chat-input"/, 'ChatComposer must keep its textarea test id');
+assert.match(composer, /data-testid="chat-send"/, 'ChatComposer must keep its send action test id');
+assert.match(composer, /data-testid="chat-stop"/, 'ChatComposer must keep its stop action test id');
+assert.match(composer, /data-testid="chat-voice"/, 'ChatComposer must keep its voice action test id');
+assert.match(composer, /data-testid="chat-mention-trigger"/, 'ChatComposer must keep the workspace mention action test id');
+assert.match(composer, /className="chat-composer-input-frame"/, 'Composer controls should be wrapped in a stable command-frame');
+assert.match(composer, /className="chat-composer-tool-group"/, 'Secondary tools should be grouped for stable spacing');
+assert.match(composer, /className="chat-composer-field"/, 'Textarea should sit in a dedicated flexible field');
+assert.match(composer, /className="chat-composer-action-cluster"/, 'Primary send and stop actions should have a stable action cluster');
+assert.match(composer, /chat-composer-drag-rail/, 'Drag state should have a dedicated visual rail');
+assert.match(composer, /data-dragging=\{dragging \? 'true' : 'false'\}/, 'Root should expose drag state without changing behavior');
+
+assert.match(css, /\.chat-composer-input-frame\s*\{[\s\S]*grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto/, 'Composer frame must keep secondary tools, flexible input, and action cluster in stable columns');
+assert.match(css, /\.chat-composer-tool-group\s*\{[\s\S]*display:\s*inline-flex/, 'Tool group must use inline-flex for consistent icon spacing');
+assert.match(css, /\.chat-composer-tool,\s*\n\.chat-composer-submit\s*\{[\s\S]*height:\s*2\.5rem[\s\S]*width:\s*2\.5rem/, 'Tool buttons and submit should share stable square dimensions');
+assert.match(css, /\.chat-composer-field\s*\{[\s\S]*min-width:\s*0[\s\S]*border-radius:/, 'Textarea field must prevent overflow while retaining a visible input surface');
+assert.match(css, /\.chat-composer-drag-rail\s*\{[\s\S]*position:\s*absolute/, 'Drag rail must be CSS-only and avoid layout shift');
+assert.match(css, /\.chat-mention-menu\s*\{[\s\S]*max-width:\s*calc\(100vw - 1rem\)/, 'Mention menu must be viewport constrained');
+assert.match(css, /\.chat-mention-list\s*\{[\s\S]*max-height:\s*min\(18rem,\s*42vh\)/, 'Mention list must be height constrained on small screens');
+assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.chat-composer-input-frame\s*\{[\s\S]*grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto/, 'Mobile composer must retain upload/mention, input, and send columns');
+assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.chat-composer-tool-group\s*\{[\s\S]*\.chat-composer-tool-group \.chat-composer-tool\[data-optional="voice"\]/, 'Mobile layout should hide only the optional voice control');
+
+console.log('chatComposerExperience.test.mjs passed');

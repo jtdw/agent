@@ -161,6 +161,7 @@ export function ChatComposer({
     <div
       data-testid="chat-composer"
       className={cn('chat-composer-shell relative', dragging && 'is-dragging')}
+      data-dragging={dragging ? 'true' : 'false'}
       onDragOver={(event) => {
         event.preventDefault();
         setDragging(true);
@@ -204,78 +205,88 @@ export function ChatComposer({
           )}
         </div>
       )}
-      <button
-        type="button"
-        className="chat-composer-tool"
-        onClick={() => fileInputRef.current?.click()}
-        disabled={disabled || uploading}
-        title={uploading ? '上传中' : '上传文件'}
-        aria-label={uploading ? '上传中' : '上传文件'}
-      >
-        {uploading ? <Loader2 size={18} className="animate-spin" /> : <Paperclip size={18} />}
-      </button>
-      <button
-        data-testid="chat-mention-trigger"
-        type="button"
-        className={cn('chat-composer-tool', mentionOpen && 'is-active')}
-        onClick={toggleMentionMenu}
-        disabled={disabled}
-        title="引用已上传的数据"
-        aria-label="引用已上传的数据"
-      >
-        <AtSign size={18} />
-      </button>
-      <textarea
-        ref={textareaRef}
-        data-testid="chat-input"
-        value={value}
-        onChange={(event) => {
-          onChange(event.target.value);
-          syncMentionState(event.target.value, event.target.selectionStart);
-        }}
-        onKeyDown={onKeyDown}
-        disabled={disabled}
-        rows={1}
-        aria-label="聊天输入框，Enter 发送，Shift+Enter 换行"
-        placeholder={placeholder}
-        className="chat-composer-textarea"
-      />
-      <button
-        data-testid="chat-voice"
-        type="button"
-        onClick={onVoiceToggle}
-        disabled={disabled || !onVoiceToggle || !voiceSupported}
-        className={cn('chat-composer-tool', listening && 'is-active')}
-        title={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
-        aria-label={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
-      >
-        <Mic size={18} />
-      </button>
-      {sending ? (
-        <button
-          data-testid="chat-stop"
-          type="button"
-          onClick={submit}
-          disabled={disabled}
-          className="chat-composer-submit is-stopping"
-          title="停止等待本次回复"
-          aria-label="停止等待本次回复"
-        >
-          <Square size={17} fill="currentColor" />
-        </button>
-      ) : (
-        <button
-          data-testid="chat-send"
-          type="button"
-          onClick={submit}
-          disabled={disabled || !value.trim()}
-          className="chat-composer-submit"
-          title="发送，Shift+Enter 换行"
-          aria-label="发送"
-        >
-          <SendHorizontal size={18} />
-        </button>
-      )}
+      <span className="chat-composer-drag-rail" aria-hidden="true" />
+      <div className="chat-composer-input-frame">
+        <div className="chat-composer-tool-group">
+          <button
+            type="button"
+            className="chat-composer-tool"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={disabled || uploading}
+            title={uploading ? '上传中' : '上传文件'}
+            aria-label={uploading ? '上传中' : '上传文件'}
+          >
+            {uploading ? <Loader2 size={18} className="animate-spin" /> : <Paperclip size={18} />}
+          </button>
+          <button
+            data-testid="chat-mention-trigger"
+            type="button"
+            className={cn('chat-composer-tool', mentionOpen && 'is-active')}
+            onClick={toggleMentionMenu}
+            disabled={disabled}
+            title="引用已上传的数据"
+            aria-label="引用已上传的数据"
+          >
+            <AtSign size={18} />
+          </button>
+          <button
+            data-testid="chat-voice"
+            type="button"
+            data-optional="voice"
+            onClick={onVoiceToggle}
+            disabled={disabled || !onVoiceToggle || !voiceSupported}
+            className={cn('chat-composer-tool', listening && 'is-active')}
+            title={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
+            aria-label={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
+          >
+            <Mic size={18} />
+          </button>
+        </div>
+        <div className="chat-composer-field">
+          <textarea
+            ref={textareaRef}
+            data-testid="chat-input"
+            value={value}
+            onChange={(event) => {
+              onChange(event.target.value);
+              syncMentionState(event.target.value, event.target.selectionStart);
+            }}
+            onKeyDown={onKeyDown}
+            disabled={disabled}
+            rows={1}
+            aria-label="聊天输入框，Enter 发送，Shift+Enter 换行"
+            placeholder={placeholder}
+            className="chat-composer-textarea"
+          />
+        </div>
+        <div className="chat-composer-action-cluster">
+          {sending ? (
+            <button
+              data-testid="chat-stop"
+              type="button"
+              onClick={submit}
+              disabled={disabled}
+              className="chat-composer-submit is-stopping"
+              title="停止等待本次回复"
+              aria-label="停止等待本次回复"
+            >
+              <Square size={17} fill="currentColor" />
+            </button>
+          ) : (
+            <button
+              data-testid="chat-send"
+              type="button"
+              onClick={submit}
+              disabled={disabled || !value.trim()}
+              className="chat-composer-submit"
+              title="发送，Shift+Enter 换行"
+              aria-label="发送"
+            >
+              <SendHorizontal size={18} />
+            </button>
+          )}
+        </div>
+      </div>
       <input
         ref={fileInputRef}
         type="file"
