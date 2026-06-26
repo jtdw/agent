@@ -27,6 +27,7 @@ import { useChatWorkspaceMentions } from './chat/useChatWorkspaceMentions';
 import { useChatUploads } from './chat/useChatUploads';
 import { useChatVoiceInput } from './chat/useChatVoiceInput';
 import { useChatPanelResize } from './chat/useChatPanelResize';
+import { useChatAutoScroll } from './chat/useChatAutoScroll';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -306,9 +307,8 @@ export function ChatWorkspace({
   const [editText, setEditText] = useState('');
   const [lastFailedPrompt, setLastFailedPrompt] = useState('');
   const { renderMessages, taskSummaryItems } = useChatTaskWorkbench(messages);
-  const listRef = useRef<HTMLDivElement>(null);
+  const { listRef, handleScroll } = useChatAutoScroll({ messages, thinking });
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const stickToBottomRef = useRef(true);
   const mountedRef = useRef(true);
   const handleSessionMessagesRefreshed = useCallback((incoming: ChatMessage[]) => {
     setMessages((current) => mergeServerMessages(current, normalizeChatMessages(incoming)));
@@ -452,11 +452,6 @@ export function ChatWorkspace({
     setInput(value === 'admin_region' ? '下载行政区：' : '下载 bbox：');
     setError(`请补充${label}后发送。`);
   };
-
-  useEffect(() => {
-    if (!stickToBottomRef.current) return;
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, thinking]);
 
   const appendSystem = (content: string) => setMessages((v) => [...v, { role: 'system', content }]);
 
@@ -820,10 +815,7 @@ export function ChatWorkspace({
 
         <div
           ref={listRef}
-          onScroll={(event) => {
-            const target = event.currentTarget;
-            stickToBottomRef.current = target.scrollHeight - target.scrollTop - target.clientHeight < 96;
-          }}
+          onScroll={handleScroll}
           className={cn('chat-scroll relative flex-1 space-y-4 overflow-y-auto bg-gradient-to-b from-slate-50/35 to-white/35 px-4 pb-24 pt-5 lg:pb-5 dark:from-slate-950/20 dark:to-slate-900/20', isPage && 'min-h-0 px-6 lg:col-start-2 lg:row-start-2')}
         >
           {messages.length === 0 && (

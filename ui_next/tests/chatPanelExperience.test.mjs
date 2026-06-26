@@ -5,6 +5,7 @@ const source = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const chatSessionsHookSource = await readFile('src/components/chat/useChatSessions.ts', 'utf8');
 const workspaceMentionsHookSource = await readFile('src/components/chat/useChatWorkspaceMentions.ts', 'utf8');
 const resizeHookSource = await readFile('src/components/chat/useChatPanelResize.ts', 'utf8');
+const autoScrollHookSource = await readFile('src/components/chat/useChatAutoScroll.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -20,6 +21,11 @@ assert.match(resizeHookSource, /initialWidth = 430/, 'resize hook should preserv
 assert.match(resizeHookSource, /minWidth = 360/, 'resize hook should preserve the existing minimum floating width');
 assert.match(resizeHookSource, /maxWidth = 680/, 'resize hook should preserve the existing maximum floating width');
 assert.match(resizeHookSource, /window\.addEventListener\('pointermove'/, 'resize hook should own pointermove subscription');
+assert.match(source, /useChatAutoScroll/, 'ChatPanel should delegate chat list auto-scroll behavior to a focused hook');
+assert.doesNotMatch(source, /stickToBottomRef/, 'ChatPanel should not own sticky-bottom scroll state inline');
+assert.match(autoScrollHookSource, /export function useChatAutoScroll/, 'useChatAutoScroll hook should be exported');
+assert.match(autoScrollHookSource, /scrollHeight - target\.scrollTop - target\.clientHeight < 96/, 'auto-scroll hook should preserve the existing sticky threshold');
+assert.match(autoScrollHookSource, /scrollTo\(\{ top: listRef\.current\.scrollHeight, behavior: 'smooth' \}\)/, 'auto-scroll hook should keep smooth scroll-to-bottom behavior');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
