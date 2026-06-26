@@ -15,6 +15,8 @@ import { UploadResultCard } from './UploadResultCard';
 import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { ModalPortal } from './ModalPortal';
 import { RealtimeSyncIndicator } from './chat/RealtimeSyncIndicator';
+import { TaskSummaryRail } from './chat/TaskSummaryRail';
+import { buildChatTaskSummary, buildRenderMessages, hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -146,37 +148,6 @@ function renderInlineMarkdown(text: string) {
     offset += part.length;
     return bold ? <strong key={key} className="font-black text-inherit">{bold[1]}</strong> : <span key={key}>{part}</span>;
   });
-}
-
-function hashString(value: string) {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = ((hash << 5) - hash + value.charCodeAt(i)) | 0;
-  }
-  return Math.abs(hash).toString(36);
-}
-
-function messageKey(message: ChatMessage) {
-  if (message.id) return `message-${message.id}`;
-  if (message.message_id) return `message-${message.message_id}`;
-  const stableParts = [message.role, message.created_at || '', message.session_id || '', String(message.content || '').length, hashString(message.content || '')];
-  return `message-${stableParts.join('-')}`;
-}
-
-function messageIsToolTask(message: ChatMessage) {
-  const meta = message.meta || {};
-  const mode = String(meta.mode || '');
-  const actionType = String(meta.action_required?.type || '');
-  const interactionType = String(meta.interaction_type || '');
-  const reason = String(meta.reason || '');
-  return reason !== 'tool_mode_required' && (
-    interactionType === 'tool_task'
-    || Boolean(meta.task_card)
-    || Boolean(meta.management_view)
-    || Boolean(meta.download_management_view)
-    || ['background_worker', 'validated_download_executor', 'coordinated_workflow', 'validated_workflow_executor', 'validated_tool_executor'].includes(mode)
-    || ['confirmation_required', 'login_required'].includes(actionType)
-  );
 }
 
 function responseAssistantMessage(response: {
@@ -374,13 +345,8 @@ export function ChatWorkspace({
   const interactionModeLabel = currentInteractionMode === 'tool_enabled'
     ? '工具模式：可以在确认和校验后执行下载、GIS 处理和建模。'
     : '聊天模式：只回答问题，不会操作数据或创建任务。';
-  const renderMessages = useMemo(() => {
-    const byKey = new Map<string, ChatMessage>();
-    messages.forEach((message) => {
-      byKey.set(messageKey(message), message);
-    });
-    return Array.from(byKey.values());
-  }, [messages]);
+  const renderMessages = useMemo(() => buildRenderMessages(messages), [messages]);
+  const taskSummaryItems = useMemo(() => buildChatTaskSummary(messages), [messages]);
   const [modelNotice, setModelNotice] = useState('');
   const [modelError, setModelError] = useState('');
   const [workspaceMentions, setWorkspaceMentions] = useState<WorkspaceMention[]>(() => normalizeWorkspaceMentions(mentionDatasets));
@@ -1337,6 +1303,14 @@ export function ChatWorkspace({
           </aside>
         )}
 
+        {isPage && (
+          <TaskSummaryRail
+            taskSummaryItems={taskSummaryItems}
+            realtimeState={realtimeSyncState}
+            messageCount={messages.length}
+          />
+        )}
+
         <div
           ref={listRef}
           onScroll={(event) => {
@@ -1514,7 +1488,7 @@ export function ChatWorkspace({
     return (
       <section
         data-testid="chat-page-workspace"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white/82 shadow-[0_22px_60px_rgba(51,65,85,.10)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78 lg:grid lg:h-[calc(100vh-11rem)] lg:min-h-[620px] lg:grid-cols-[240px_minmax(0,1fr)] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
+        className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white/82 shadow-[0_22px_60px_rgba(51,65,85,.10)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78 lg:grid lg:h-[calc(100vh-11rem)] lg:min-h-[620px] lg:grid-cols-[240px_minmax(0,1fr)_280px] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
       >
         {workspaceBody}
       </section>
