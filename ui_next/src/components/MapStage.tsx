@@ -8,7 +8,7 @@ import { api, ResultMapLayer, StationCollection, StationPoint, TiandituConfig } 
 import type { ChatContextPayload } from '@/lib/chatContext';
 import { sanitizeFeatureProperties } from '@/lib/chatContext';
 import { cn } from '@/lib/cn';
-import { getOverlayVisibilityPlan, type LayerVisibility } from './mapLayerPolicy';
+import { getOverlayVisibilityPlan, isReferenceMapLayer, resultLayerKey, resultLayerPalette, visibleResultLayers as filterVisibleResultLayers, type LayerVisibility, type ResultLayerStateMap } from './mapLayerPolicy';
 import type { MapCommand } from './mapCommands';
 import { drawGeoJson, type DrawPoint, type DrawTool, measurementLabel } from './mapGeometry';
 type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
@@ -311,6 +311,22 @@ function layerColor(kind: string, index: number) {
   return ['#0B5FF4', '#f59e0b', '#fb7185'][index % 3];
 }
 
+function palettePrimaryColor(paletteName: string | undefined, fallback: string) {
+  const colors = resultLayerPalette(paletteName).colors;
+  return colors[Math.min(1, colors.length - 1)] || fallback;
+}
+
+function rasterPreviewUrl(url: string, paletteName: string | undefined) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    parsed.searchParams.set('palette', paletteName || 'cyan');
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    const joiner = url.includes('?') ? '&' : '?';
+    return `${url}${joiner}palette=${encodeURIComponent(paletteName || 'cyan')}`;
+  }
+}
+
 function hasStations(collection: StationCollection | null) {
   return Boolean(collection?.stations?.length);
 }
@@ -359,25 +375,32 @@ function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLaye
   (map as unknown as Record<string, unknown>)[key] = true;
 }
 
-function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
+function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibility: LayerVisibility, resultLayerState: ResultLayerStateMap, onChatContextChange?: (patch: Partial<ChatContextPayload>) => void) {
   if (!map.isStyleLoaded()) return;
   const activeIds = new Set<string>();
   layers.forEach((layer, index) => {
-    const id = `result_${String(layer.id || index).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+    const layerKey = resultLayerKey(layer, String(index));
+    const state = resultLayerState[layerKey];
+    if (state?.removed) return;
+    const id = `result_${layerKey}`;
     activeIds.add(id);
-    const kind = (layer.kind || 'boundary') as keyof LayerVisibility;
-    const visible = visibility[kind] ?? true;
-    const color = layerColor(layer.kind || '', index);
+    const visible = isReferenceMapLayer(layer)
+      ? (visibility.boundary && (state?.visible ?? true))
+      : (state?.visible ?? true);
+    const color = palettePrimaryColor(state?.palette, layerColor(layer.kind || '', index));
 
     if (layer.type === 'raster' && layer.preview_url && layer.bounds?.length === 4) {
       const [minx, miny, maxx, maxy] = layer.bounds;
       const coordinates: [[number, number], [number, number], [number, number], [number, number]] = [[minx, maxy], [maxx, maxy], [maxx, miny], [minx, miny]];
+      const previewUrl = rasterPreviewUrl(layer.preview_url, state?.palette);
       const source = map.getSource(id) as maplibregl.ImageSource | undefined;
-      if (source) source.updateImage({ url: layer.preview_url, coordinates });
-      else map.addSource(id, { type: 'image', url: layer.preview_url, coordinates });
+      if (source) source.updateImage({ url: previewUrl, coordinates });
+      else map.addSource(id, { type: 'image', url: previewUrl, coordinates });
       const rasterId = `${id}_raster`;
       if (!map.getLayer(rasterId)) {
-        map.addLayer({ id: rasterId, type: 'raster', source: id, paint: { 'raster-opacity': 0.72, 'raster-fade-duration': 240 } });
+        map.addLayer({ id: rasterId, type: 'raster', source: id, paint: { 'raster-opacity': 0.76, 'raster-fade-duration': 240 } });
+      } else {
+        map.setPaintProperty(rasterId, 'raster-opacity', 0.76);
       }
       setLayerVisibility(map, [rasterId], visible);
       bindResultQuery(map, rasterId, layer, onChatContextChange);
@@ -393,12 +416,18 @@ function setResultMapLayers(map: MapLibreMap, layers: ResultMapLayer[], visibili
     const pointId = `${id}_point`;
     if (!map.getLayer(fillId)) {
       map.addLayer({ id: fillId, type: 'fill', source: id, filter: ['in', ['geometry-type'], ['literal', ['Polygon', 'MultiPolygon']]], paint: { 'fill-color': color, 'fill-opacity': layer.kind === 'boundary' ? 0.08 : 0.22 } });
+    } else {
+      map.setPaintProperty(fillId, 'fill-color', color);
     }
     if (!map.getLayer(lineId)) {
       map.addLayer({ id: lineId, type: 'line', source: id, filter: ['in', ['geometry-type'], ['literal', ['LineString', 'MultiLineString', 'Polygon', 'MultiPolygon']]], paint: { 'line-color': color, 'line-width': layer.kind === 'boundary' ? 2 : 1.35, 'line-opacity': 0.82 } });
+    } else {
+      map.setPaintProperty(lineId, 'line-color', color);
     }
     if (!map.getLayer(pointId)) {
       map.addLayer({ id: pointId, type: 'circle', source: id, filter: ['in', ['geometry-type'], ['literal', ['Point', 'MultiPoint']]], paint: { 'circle-radius': 5, 'circle-color': color, 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.5, 'circle-opacity': 0.9 } });
+    } else {
+      map.setPaintProperty(pointId, 'circle-color', color);
     }
     [fillId, lineId, pointId].forEach((queryLayerId) => bindResultQuery(map, queryLayerId, layer, onChatContextChange));
     setLayerVisibility(map, [fillId, lineId, pointId], visible);
@@ -421,23 +450,35 @@ function fitToResultLayers(map: MapLibreMap, layers: ResultMapLayer[]) {
   return safeFitBounds(map, bounds, 11);
 }
 
+function fitToResultLayer(map: MapLibreMap, layers: ResultMapLayer[], layerId: string | undefined) {
+  if (!layerId) return false;
+  const target = layers.find((layer, index) => resultLayerKey(layer, String(index)) === layerId || layer.id === layerId);
+  return target ? safeFitBounds(map, target.bounds, 12) : false;
+}
+
 export function MapStage({
   theme,
   basemap,
   userId = '',
+  sessionId = '',
   drawMode,
   setDrawMode,
   layerVisibility,
+  resultLayerState,
   mapCommand,
+  onResultLayersChange,
   onChatContextChange
 }: {
   theme: 'light' | 'dark';
   basemap: Basemap;
   userId?: string;
+  sessionId?: string;
   drawMode: boolean;
   setDrawMode: (value: boolean) => void;
   layerVisibility: LayerVisibility;
+  resultLayerState: ResultLayerStateMap;
   mapCommand?: MapCommand | null;
+  onResultLayersChange?: (layers: ResultMapLayer[]) => void;
   onChatContextChange?: (patch: Partial<ChatContextPayload>) => void;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -463,7 +504,7 @@ export function MapStage({
   const refreshMapOverlays = (map: MapLibreMap, collection: StationCollection | null, fit: boolean = false) => {
     if (!map.isStyleLoaded()) return;
     try {
-      setResultMapLayers(map, resultLayers, layerVisibility, onChatContextChange);
+      setResultMapLayers(map, resultLayers, layerVisibility, resultLayerState, onChatContextChange);
       setStationLayer(map, collection?.stations || [], onChatContextChange);
       setDrawLayer(map, drawPoints, drawTool);
       raiseStationLayers(map);
@@ -471,7 +512,7 @@ export function MapStage({
       applyOverlayVisibility(map);
       publishMapDebugState(map, collection, resultLayers);
       if (fit) {
-        if (!fitToResultLayers(map, resultLayers)) fitToStations(map, collection);
+        if (!fitToResultLayers(map, filterVisibleResultLayers(resultLayers, resultLayerState))) fitToStations(map, collection);
         hasFitRef.current = true;
       }
       setMapError('');
@@ -549,14 +590,24 @@ export function MapStage({
     let cancelled = false;
     const load = async () => {
       if (!userId) {
-        if (!cancelled) setResultLayers([]);
+        if (!cancelled) {
+          setResultLayers([]);
+          onResultLayersChange?.([]);
+        }
         return;
       }
       try {
-        const data = await api.mapLayers(userId);
-        if (!cancelled) setResultLayers(data.layers || []);
+        const data = await api.mapLayers(userId, sessionId);
+        if (!cancelled) {
+          const layers = data.layers || [];
+          setResultLayers(layers);
+          onResultLayersChange?.(layers);
+        }
       } catch {
-        if (!cancelled) setResultLayers([]);
+        if (!cancelled) {
+          setResultLayers([]);
+          onResultLayersChange?.([]);
+        }
       }
     };
     load();
@@ -565,7 +616,7 @@ export function MapStage({
       cancelled = true;
       if (timer) window.clearInterval(timer);
     };
-  }, [userId]);
+  }, [userId, sessionId]);
 
   const style = useMemo(() => {
     if (tdtConfig?.enabled && tdtConfig.tile_url_templates) return buildTiandituStyle(tdtConfig, basemap, theme);
@@ -650,16 +701,16 @@ export function MapStage({
       refreshMapOverlaysWhenReady(false);
       return;
     }
-    setResultMapLayers(map, resultLayers, layerVisibility, onChatContextChange);
+    setResultMapLayers(map, resultLayers, layerVisibility, resultLayerState, onChatContextChange);
     setStationLayer(map, stationCollection?.stations || [], onChatContextChange);
     raiseStationLayers(map);
     raiseDrawLayers(map);
     applyOverlayVisibility(map);
     publishMapDebugState(map, stationCollection, resultLayers);
-    if (resultLayers.length && !hasFitRef.current && fitToResultLayers(map, resultLayers)) {
+    if (resultLayers.length && !hasFitRef.current && fitToResultLayers(map, filterVisibleResultLayers(resultLayers, resultLayerState))) {
       hasFitRef.current = true;
     }
-  }, [resultLayers, layerVisibility, stationCollection]);
+  }, [resultLayers, layerVisibility, resultLayerState, stationCollection]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -686,9 +737,9 @@ export function MapStage({
     raiseStationLayers(map);
     raiseDrawLayers(map);
     applyOverlayVisibility(map);
-    setResultMapLayers(map, resultLayers, layerVisibility, onChatContextChange);
+    setResultMapLayers(map, resultLayers, layerVisibility, resultLayerState, onChatContextChange);
     publishMapDebugState(map, stationCollection, resultLayers);
-  }, [layerVisibility]);
+  }, [layerVisibility, resultLayerState]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -729,19 +780,23 @@ export function MapStage({
             });
           },
           () => {
-            if (!fitToResultLayers(map, resultLayers)) fitToStations(map, stationCollection);
+            if (!fitToResultLayers(map, filterVisibleResultLayers(resultLayers, resultLayerState))) fitToStations(map, stationCollection);
           },
           { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
         );
-      } else if (!fitToResultLayers(map, resultLayers)) {
+      } else if (!fitToResultLayers(map, filterVisibleResultLayers(resultLayers, resultLayerState))) {
         fitToStations(map, stationCollection);
       }
+      return;
+    }
+    if (mapCommand.type === 'locateLayer') {
+      if (!fitToResultLayer(map, resultLayers, mapCommand.layerId)) fitToResultLayers(map, filterVisibleResultLayers(resultLayers, resultLayerState));
       return;
     }
     if (mapCommand.type === 'clearDraw') {
       setDrawPoints([]);
     }
-  }, [mapCommand]);
+  }, [mapCommand, resultLayers, resultLayerState, stationCollection]);
 
   useEffect(() => {
     if (!containerRef.current || !mapRef.current) return;
@@ -757,7 +812,7 @@ export function MapStage({
   }, []);
 
   const stationCount = stationCollection?.count || 0;
-  const visibleResultLayers = resultLayers.filter((layer) => layerVisibility[(layer.kind || 'boundary') as keyof LayerVisibility] ?? true);
+  const visibleResultLayerItems = filterVisibleResultLayers(resultLayers, resultLayerState).filter((layer) => !isReferenceMapLayer(layer));
   const drawSummary = measurementLabel(drawPoints, drawTool);
 
   const exportDrawGeoJson = () => {
@@ -817,11 +872,11 @@ export function MapStage({
         <Layers3 size={13} className="mr-1 inline" /> 天地图 {basemap === 'satellite' ? '影像' : basemap === 'terrain' ? '地形' : basemap === 'dark' ? '暗色' : '矢量'}底图
       </div>
 
-      {visibleResultLayers.length > 0 && (
+      {visibleResultLayerItems.length > 0 && (
         <div className="glass-panel no-drag absolute right-4 top-24 z-20 max-w-[260px] rounded-[22px] px-3 py-3 text-xs font-semibold text-slate-600 dark:text-slate-300 lg:right-[390px]">
           <div className="mb-2 flex items-center gap-2 font-black text-slate-800 dark:text-slate-100"><Layers3 size={14} /> 地图结果图层</div>
           <div className="space-y-1.5">
-            {visibleResultLayers.slice(0, 5).map((layer, index) => (
+            {visibleResultLayerItems.slice(0, 5).map((layer, index) => (
               <div key={layer.id} className="flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full" style={{ background: layerColor(layer.kind || '', index) }} />
                 <span className="truncate">{layer.name}</span>

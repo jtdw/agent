@@ -27,7 +27,7 @@ from .llm_planner_observability import summarize_shadow_plan
 from .llm_config import load_llm_provider_config_for_role, model_for_role, validate_llm_config
 from .lifecycle_cleanup import cleanup_session_private_state
 from .durable_jobs import DurableJobStore
-from .model_results import generate_model_result_id
+from .model_results import MODEL_ARTIFACT_SCHEMA_VERSION, MODEL_RESULT_SCHEMA_VERSION, generate_model_result_id
 from .coordinated_executor import run_coordinated_execution
 from .download_request_executor import execute_download_requests
 from .presentation_result import build_presentation_bundle, build_presentation_bundle_from_raw_execution
@@ -51,6 +51,7 @@ from .task_outcome_advisor import build_task_outcome
 from .tool_executor import execute_validated_tool_plan
 from .tool_context import ToolRuntimeContext
 from .workflow_executor import execute_workflow_plan
+from .workflow_priority import workflow_priority_route
 from .workflows.data_package import format_ingest_message, ingest_data_package
 from .zhipu_json_client import LLMProviderError, ZhipuJSONClient
 
@@ -1194,6 +1195,8 @@ class GISWorkspaceService:
             if model_artifact:
                 related.append({"label": "模型文件", **model_artifact})
             results.append({
+                "schema_version": MODEL_RESULT_SCHEMA_VERSION,
+                "artifact_version": MODEL_ARTIFACT_SCHEMA_VERSION,
                 "model_result_id": generate_model_result_id(model, prefix, legacy_key=metrics_path or name),
                 "task_id": "",
                 "dataset_id": str(summary.get("dataset") or ""),
@@ -1836,7 +1839,25 @@ class GISWorkspaceService:
                     record=pending_record,
                 )
             candidate_plan = build_task_plan(user_message, intent, context, manager=self.manager)
-            llm_active_plan = build_llm_task_plan(user_message, context)
+            priority_route = workflow_priority_route(candidate_plan, prompt=user_message)
+            if priority_route.get("ok"):
+                executable_workflow = candidate_plan.get("executable_workflow") if isinstance(candidate_plan.get("executable_workflow"), dict) else {}
+                llm_active_plan = {
+                    "status": "ready",
+                    "mode": "workflow_priority",
+                    "planner_source": "deterministic_workflow_priority",
+                    "executes_tools": True,
+                    "skipped_llm": True,
+                    "route": priority_route,
+                    "plan": {
+                        **candidate_plan,
+                        "workflow_priority_route": priority_route,
+                        "route_confidence": priority_route.get("confidence"),
+                        "workflow_plan": executable_workflow.get("workflow_plan") if isinstance(executable_workflow.get("workflow_plan"), list) else candidate_plan.get("workflow_plan", []),
+                    },
+                }
+            else:
+                llm_active_plan = build_llm_task_plan(user_message, context)
             plan = llm_active_plan.get("plan") if isinstance(llm_active_plan.get("plan"), dict) else candidate_plan
             plan_validation: dict[str, Any] | None = None
             if llm_active_plan.get("status") == "ready":
@@ -2426,13 +2447,16 @@ class GISWorkspaceService:
                         "task_outcome": task_outcome,
                     }
 
-            coordinated_execution = run_coordinated_execution(
-                self.manager,
-                plan,
-                context,
-                user_message,
-                runtime_context=self._tool_runtime_context(),
-            )
+            priority_route_for_execution = plan.get("workflow_priority_route") if isinstance(plan.get("workflow_priority_route"), dict) else {}
+            coordinated_execution = {"executed": False, "blocked_reason": "NO_EXECUTABLE_STEPS"}
+            if not priority_route_for_execution.get("ok"):
+                coordinated_execution = run_coordinated_execution(
+                    self.manager,
+                    plan,
+                    context,
+                    user_message,
+                    runtime_context=self._tool_runtime_context(),
+                )
             if coordinated_execution.get("executed") or coordinated_execution.get("blocked_reason") != "NO_EXECUTABLE_STEPS":
                 raw_reply = json.dumps(coordinated_execution, ensure_ascii=False, default=str)
                 dashboard_data = self.dashboard()
@@ -2533,6 +2557,8 @@ class GISWorkspaceService:
                 dashboard_data = self.dashboard()
                 context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
                 workflow_result = workflow_execution.get("workflow_result") if isinstance(workflow_execution.get("workflow_result"), dict) else {}
+                priority_route_meta = plan.get("workflow_priority_route") if isinstance(plan.get("workflow_priority_route"), dict) else {}
+                workflow_reason = "workflow_priority_route" if priority_route_meta.get("ok") else "validated_workflow_plan"
                 presentation_bundle = build_presentation_bundle_from_raw_execution(
                     plan=plan,
                     raw_results={"workflow_result": workflow_result},
@@ -2567,7 +2593,8 @@ class GISWorkspaceService:
                 assistant_meta = _assistant_meta({
                     "model": "conversation-coordinator",
                     "mode": "validated_workflow_executor",
-                    "reason": "validated_workflow_plan",
+                    "reason": workflow_reason,
+                    "route": priority_route_meta,
                     "intent": intent,
                     "plan": plan,
                     "normalized_results": normalized_results,
@@ -2604,7 +2631,8 @@ class GISWorkspaceService:
                 self.last_route = {
                     "mode": "validated_workflow_executor",
                     "model": "conversation-coordinator",
-                    "reason": "validated_workflow_plan",
+                    "reason": workflow_reason,
+                    "route": priority_route_meta,
                     "images": images,
                 }
                 self.manager.log_operation("validated_workflow_execution", ",".join(workflow_execution.get("executed_steps", [])), "workflow")
@@ -2613,7 +2641,8 @@ class GISWorkspaceService:
                     "reply": reply,
                     "model": "conversation-coordinator",
                     "mode": "validated_workflow_executor",
-                    "reason": "validated_workflow_plan",
+                    "reason": workflow_reason,
+                    "route": priority_route_meta,
                     "images": images,
                     "artifacts": artifacts,
                     "files": artifacts,

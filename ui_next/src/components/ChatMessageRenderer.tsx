@@ -225,21 +225,120 @@ function taskSummary(message: ChatMessage, result: PresentationResult | null) {
   return summary || '任务状态已更新。';
 }
 
-function timelineSteps(result: PresentationResult | null) {
-  const executed = (result?.executed_steps || []).filter((step) => step?.step_id || step?.tool_name);
-  if (executed.length) {
-    return executed.slice(0, 6).map((step, index) => ({
-      id: step.step_id || step.tool_name || `step-${index + 1}`,
-      label: readableStepLabel(step.tool_name || step.step_id || `步骤 ${index + 1}`),
-      status: step.status || '',
-    }));
+type AgentProcessStep = {
+  id: string;
+  title: string;
+  detail: string;
+  status?: string;
+  toolName?: string;
+};
+
+function userReadableStatus(status = '') {
+  const normalized = String(status || '').toLowerCase();
+  if (['success', 'completed', 'complete'].includes(normalized)) return 'succeeded';
+  return normalized || '';
+}
+
+function firstText(...values: unknown[]) {
+  for (const value of values) {
+    const text = String(value || '').trim();
+    if (text) return text;
   }
-  return [
-    { id: 'planning', label: '生成计划', status: '' },
-    { id: 'validation', label: '参数校验', status: '' },
-    { id: 'execution', label: '执行任务', status: '' },
-    { id: 'result', label: '生成结果', status: '' },
+  return '';
+}
+
+function countLabel(count: number, unit: string) {
+  return count > 0 ? `${count} 个${unit}` : '';
+}
+
+function buildAgentProcessSteps(message: ChatMessage, result: PresentationResult | null, status: string): AgentProcessStep[] {
+  const cardMeta = metaRecord(message.meta?.task_card);
+  const managementView = metaRecord(message.meta?.management_view || message.meta?.download_management_view);
+  const executionSummary = metaRecord(message.meta?.execution_summary);
+  const action = metaRecord(message.meta?.action_required);
+  const activeStep = firstText(cardMeta.current_step, managementView.current_step, message.meta?.current_step, managementView.action_state, action.message);
+  const executed = (result?.executed_steps || []).filter((step) => step?.step_id || step?.tool_name);
+  const artifactCount = (result?.artifact_refs || []).length + (result?.image_refs || []).length;
+  const layerCount = (result?.map_layer_refs || []).length;
+  const tableCount = (result?.table_refs || []).length;
+  const dataSourceCount = (result?.data_sources || []).length;
+  const outputParts = [
+    countLabel(artifactCount, '文件'),
+    countLabel(layerCount, '地图图层'),
+    countLabel(tableCount, '表格'),
+  ].filter(Boolean);
+  const running = ['planning', 'queued', 'running', 'waiting_login', 'awaiting_confirmation', 'paused'].includes(String(status || '').toLowerCase());
+  const terminal = ['succeeded', 'failed', 'blocked', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
+  const baseStatus = terminal ? 'succeeded' : 'running';
+  const steps: AgentProcessStep[] = [
+    {
+      id: 'receive',
+      title: '接收任务',
+      detail: '读取你的请求，识别目标区域、数据类型、制图或 GIS 工具需求。',
+      status: baseStatus,
+    },
+    {
+      id: 'plan',
+      title: '制定执行计划',
+      detail: firstText(
+        executionSummary.summary,
+        cardMeta.summary,
+        '拆解为数据检查、参数校验、工具调用、成果整理和回复生成。'
+      ),
+      status: baseStatus,
+    },
+    {
+      id: 'validate',
+      title: '正在检查输入数据',
+      detail: dataSourceCount > 0
+        ? `检查 ${dataSourceCount} 个数据源的会话归属、字段、坐标系、范围和必要参数。`
+        : '检查工作区数据、会话、文件、字段、坐标系和必要参数。',
+      status: executed.length || terminal ? 'succeeded' : (running ? 'running' : status),
+    },
   ];
+
+  if (executed.length) {
+    executed.slice(0, 6).forEach((step, index) => {
+      const toolName = String(step.tool_name || '').trim();
+      const stepId = String(step.step_id || '').trim();
+      steps.push({
+        id: stepId || toolName || `execute-${index + 1}`,
+        title: readableStepLabel(toolName || stepId || `步骤 ${index + 1}`),
+        detail: toolName
+          ? `调用工具 ${toolName}，执行 ${stepId || `第 ${index + 1} 个处理步骤`}。`
+          : `执行 ${stepId || `第 ${index + 1} 个处理步骤`}。`,
+        status: userReadableStatus(step.status || status),
+        toolName,
+      });
+    });
+  } else {
+    steps.push({
+      id: 'execute',
+      title: '调用工具或工作流',
+      detail: activeStep || '等待后端返回具体工具步骤；实时事件到达后会继续更新这里。',
+      status: running ? 'running' : status,
+    });
+  }
+
+  steps.push({
+    id: 'register-results',
+    title: '注册成果与地图图层',
+    detail: outputParts.length
+      ? `把 ${outputParts.join('、')} 绑定到当前会话，供地图面板、结果面板和下载按钮使用。`
+      : '等待工具产物返回后，注册 artifact、地图图层、表格和预览资源。',
+    status: outputParts.length || status === 'succeeded' ? 'succeeded' : (terminal ? status : 'queued'),
+  });
+  steps.push({
+    id: 'respond',
+    title: '生成回复和下一步建议',
+    detail: firstText(
+      result?.concise_summary,
+      result?.next_action_suggestions?.[0] ? `整理结果摘要，并给出下一步建议：${result.next_action_suggestions[0]}` : '',
+      '汇总执行结果、风险提示、可下载成果和可继续操作。'
+    ),
+    status: terminal ? status : 'queued',
+  });
+  return steps;
 }
 
 function readableStepLabel(value = '') {
@@ -264,6 +363,63 @@ function taskPhaseIndex(status = '') {
   if (normalized === 'awaiting_confirmation' || normalized === 'queued' || normalized === 'blocked') return 1;
   if (normalized === 'running' || normalized === 'waiting_login' || normalized === 'paused') return 2;
   return 3;
+}
+
+function processStepVisualStatus(step: AgentProcessStep, index: number, overallStatus: string, total: number) {
+  const normalized = userReadableStatus(step.status || '');
+  if (['succeeded', 'failed', 'blocked', 'cancelled', 'canceled'].includes(normalized)) return normalized;
+  const phase = taskPhaseIndex(overallStatus);
+  if (index < Math.min(phase + 1, total - 1)) return 'succeeded';
+  if (index === Math.min(phase + 1, total - 1)) return ['failed', 'blocked'].includes(String(overallStatus).toLowerCase()) ? overallStatus : 'running';
+  return normalized || 'queued';
+}
+
+function AgentProcessTimeline({ steps, overallStatus }: { steps: AgentProcessStep[]; overallStatus: string }) {
+  return (
+    <section className="rounded-[18px] border border-slate-200/75 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-900/38">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-black text-slate-900 dark:text-slate-100">处理过程</div>
+          <div className="mt-0.5 text-[11px] font-semibold leading-5 text-slate-500 dark:text-slate-400">
+            智能体按顺序完成数据检查、工具调用、成果注册和结果说明。
+          </div>
+        </div>
+        <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-black', statusTone(overallStatus))}>
+          <StatusIcon status={overallStatus} />{statusLabel(overallStatus)}
+        </span>
+      </div>
+      <div data-testid="task-timeline" className="grid gap-2 lg:grid-cols-2">
+        {steps.map((step, index) => {
+          const visualStatus = processStepVisualStatus(step, index, overallStatus, steps.length);
+          const completed = visualStatus === 'succeeded';
+          const active = ['running', 'planning', 'queued', 'waiting_login', 'awaiting_confirmation', 'paused'].includes(visualStatus);
+          return (
+            <div key={`${step.id}-${index}`} className={cn(
+              'rounded-2xl border px-3 py-2.5 text-xs',
+              completed && 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-200',
+              active && !completed && 'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/25 dark:text-blue-200',
+              !completed && !active && 'border-slate-200 bg-white text-slate-600 dark:border-slate-800 dark:bg-slate-950/35 dark:text-slate-300',
+            )}>
+              <div className="flex items-start gap-2">
+                <span className={cn(
+                  'mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-full text-[10px] font-black',
+                  completed ? 'bg-emerald-600 text-white' : active ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500 dark:bg-slate-800',
+                )}>{completed ? <Check size={12} /> : index + 1}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2 font-black">
+                    <span>{step.title}</span>
+                    <span className={cn('rounded-full px-2 py-0.5 text-[10px] font-black', statusTone(visualStatus))}>{statusLabel(visualStatus)}</span>
+                  </div>
+                  <div className="mt-1 leading-5 opacity-80">{step.detail}</div>
+                  {step.toolName && <div className="mt-1 truncate text-[11px] font-semibold opacity-70">工具：{step.toolName}</div>}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
 }
 
 function numberFrom(value: unknown) {
@@ -423,8 +579,7 @@ function TaskStatusCard({
   const confirmationPrompt = String(action?.confirmation_prompt || '');
   const confirmedActionId = String(action?.confirmed_action_id || '');
   const status = inferTaskStatus(message, result);
-  const steps = timelineSteps(result);
-  const currentPhase = taskPhaseIndex(status);
+  const steps = buildAgentProcessSteps(message, result, status);
   const cardMeta = metaRecord(message.meta?.task_card);
   const managementView = metaRecord(message.meta?.management_view || message.meta?.download_management_view);
   const executionSummary = metaRecord(message.meta?.execution_summary);
@@ -432,10 +587,10 @@ function TaskStatusCard({
   const availableActions = Array.isArray(managementView.available_actions) ? managementView.available_actions : [];
   const actionType = String(action?.type || '');
   const realtimeSync = String(message.meta?.realtime_sync || '');
-  const progress = numberFrom(cardMeta.progress ?? managementView.progress);
-  const elapsedMs = numberFrom(cardMeta.elapsed_ms ?? executionSummary.elapsed_ms);
+  const progress = numberFrom(cardMeta.progress ?? managementView.progress ?? message.meta?.progress);
+  const elapsedMs = numberFrom(cardMeta.elapsed_ms ?? message.meta?.elapsed_ms ?? executionSummary.elapsed_ms);
   const elapsedLabel = elapsedMs !== null && elapsedMs > 0 ? `${Math.max(1, Math.round(elapsedMs / 1000))} 秒` : '';
-  const activeStep = String(cardMeta.current_step || managementView.current_step || managementView.action_state || '').trim();
+  const activeStep = String(cardMeta.current_step || managementView.current_step || message.meta?.current_step || managementView.action_state || '').trim();
   const highlights = (result?.result_highlights || []).slice(0, 4);
   const dataSources = (result?.data_sources || []).slice(0, 4);
   const diagnostics = {
@@ -490,21 +645,7 @@ function TaskStatusCard({
           )}
         </div>
 
-        <div data-testid="task-timeline" className="grid gap-2 sm:grid-cols-4">
-          {steps.map((step, index) => {
-            const completed = result?.executed_steps?.length ? ['succeeded', 'success', 'completed'].includes(String(step.status || '').toLowerCase()) : index < currentPhase;
-            const active = result?.executed_steps?.length ? !completed && index === 0 : index === currentPhase;
-            return (
-              <div key={step.id} className={cn('rounded-2xl border px-3 py-2 text-xs', completed ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-200' : active ? 'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900 dark:bg-blue-950/25 dark:text-blue-200' : 'border-slate-200 bg-white text-slate-500 dark:border-slate-800 dark:bg-slate-950/35 dark:text-slate-400')}>
-                <div className="flex items-center gap-2 font-black">
-                  <span className={cn('grid h-5 w-5 place-items-center rounded-full text-[10px]', completed ? 'bg-emerald-600 text-white' : active ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500 dark:bg-slate-800')}>{completed ? <Check size={12} /> : index + 1}</span>
-                  {step.label}
-                </div>
-                <div className="mt-1 text-[11px] opacity-75">{step.status ? statusLabel(step.status) : completed ? '已完成' : active ? '进行中' : '等待'}</div>
-              </div>
-            );
-          })}
-        </div>
+        <AgentProcessTimeline steps={steps} overallStatus={status} />
 
         {(highlights.length > 0 || dataSources.length > 0) && (
           <div className="grid gap-2 sm:grid-cols-2">

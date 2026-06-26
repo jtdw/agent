@@ -36,6 +36,96 @@ class MultiSessionDownloadSecurityTests(unittest.TestCase):
 
             self.assertTrue(any(job["job_id"] == legacy["job_id"] for job in jobs))
 
+    def test_download_job_views_logs_and_artifacts_are_session_scoped(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            original_workdir = api_server.base_settings.workdir
+            original_commercial = api_server.commercial_service
+            original_services = dict(api_server._workspace_services)
+            try:
+                root = Path(tmp) / "server"
+                root.mkdir(parents=True, exist_ok=True)
+                api_server._workspace_services.clear()
+                api_server.base_settings.workdir = root
+                api_server.base_settings.ensure_dirs()
+                api_server.commercial_service = CommercialService(root)
+                client = TestClient(api_server.app)
+                user_id = client.post("/api/auth/register", json={"email": "session-jobs@example.com", "password": "password1"}).json()["user"]["user_id"]
+                workspace = api_server.workspace_for(user_id)
+                workspace.current_user_id = user_id
+                session_a = workspace.create_new_session("session A")
+                session_b = workspace.create_new_session("session B")
+
+                workspace.set_request_context(user_id, session_a)
+                artifact_a = workspace.manager.derived_dir / "alpha_result.tif"
+                artifact_a.write_text("session-a", encoding="utf-8")
+                workspace.set_request_context(user_id, session_b)
+                artifact_b = workspace.manager.derived_dir / "beta_result.tif"
+                artifact_b.write_text("session-b", encoding="utf-8")
+
+                job_a = api_server.commercial_service.submit_job(
+                    user_id=user_id,
+                    source_key="gscloud",
+                    resource_type="dem",
+                    region="session-a-region",
+                    account_mode="direct_url",
+                    request_text="session a",
+                    output_name="alpha_output",
+                    session_id=session_a,
+                )
+                job_b = api_server.commercial_service.submit_job(
+                    user_id=user_id,
+                    source_key="gscloud",
+                    resource_type="dem",
+                    region="session-b-region",
+                    account_mode="direct_url",
+                    request_text="session b",
+                    output_name="beta_output",
+                    session_id=session_b,
+                )
+                api_server.commercial_service.run_job_with_result(
+                    job_a["job_id"],
+                    {
+                        "output_path": str(artifact_a),
+                        "artifact_refs": [{"artifact_id": f"download:{job_a['job_id']}:output_path", "path": str(artifact_a), "title": "alpha result"}],
+                        "artifact_quality": [{"ok": True, "path": str(artifact_a)}],
+                    },
+                )
+                api_server.commercial_service.run_job_with_result(
+                    job_b["job_id"],
+                    {
+                        "output_path": str(artifact_b),
+                        "artifact_refs": [{"artifact_id": f"download:{job_b['job_id']}:output_path", "path": str(artifact_b), "title": "beta result"}],
+                        "artifact_quality": [{"ok": True, "path": str(artifact_b)}],
+                    },
+                )
+
+                jobs = client.get("/api/downloads/jobs", params={"user_id": user_id, "session_id": session_a, "include_raw": True}).json()
+                job_ids = {job["job_id"] for job in jobs["jobs"]}
+                view_ids = {view["task_id"] for view in jobs["management_views"]}
+
+                self.assertIn(job_a["job_id"], job_ids)
+                self.assertNotIn(job_b["job_id"], job_ids)
+                self.assertIn(job_a["job_id"], view_ids)
+                self.assertNotIn(job_b["job_id"], view_ids)
+                self.assertTrue(jobs["artifact_refs"])
+                self.assertTrue(all(job_a["job_id"] in item["artifact_id"] for item in jobs["artifact_refs"]))
+
+                own_log = client.get("/api/downloads/jobs/log", params={"user_id": user_id, "session_id": session_a, "job_id": job_a["job_id"]})
+                other_log = client.get("/api/downloads/jobs/log", params={"user_id": user_id, "session_id": session_a, "job_id": job_b["job_id"]})
+                other_artifact = client.get(
+                    "/api/downloads/artifact",
+                    params={"user_id": user_id, "session_id": session_a, "job_id": job_b["job_id"], "path": str(artifact_b)},
+                )
+
+                self.assertEqual(own_log.status_code, 200)
+                self.assertEqual(other_log.status_code, 403)
+                self.assertEqual(other_artifact.status_code, 403)
+            finally:
+                api_server._workspace_services.clear()
+                api_server._workspace_services.update(original_services)
+                api_server.base_settings.workdir = original_workdir
+                api_server.commercial_service = original_commercial
+
     def test_artifact_download_rejects_sensitive_names_extensions_and_markers(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             original_workdir = api_server.base_settings.workdir

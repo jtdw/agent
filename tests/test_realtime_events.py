@@ -69,6 +69,53 @@ def test_durable_job_state_changes_publish_replayable_events() -> None:
         assert events[1]["progress"] == 42
 
 
+def test_durable_job_progress_events_include_phase_step_heartbeat_and_timeout_context() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        db_path = Path(tmp) / "durable_jobs.db"
+        jobs = DurableJobStore(db_path)
+        created = jobs.submit_job(
+            plan_id="plan-1",
+            user_id="u1",
+            session_id="s1",
+            job_type="validated_task_plan",
+            payload={"context": {"chat_task_id": "chat-task-1"}},
+        )
+
+        jobs.update_status(
+            created["job_id"],
+            "running",
+            progress=37,
+            phase="tool_execution",
+            current_step="裁剪研究区 DEM",
+        )
+        jobs.update_status(
+            created["job_id"],
+            "failed",
+            progress=100,
+            phase="timeout",
+            current_step="裁剪研究区 DEM",
+            error_code="WORKER_RUNTIME_LIMIT_EXCEEDED",
+            error_message="Worker runtime exceeded.",
+            timeout_reason="max_runtime_seconds exceeded",
+        )
+
+        events = TaskEventStore(db_path).list_events(user_id="u1", session_id="s1")
+        running = events[1]
+        failed = events[2]
+
+        assert running["phase"] == "tool_execution"
+        assert running["current_step"] == "裁剪研究区 DEM"
+        assert running["heartbeat_at"]
+        assert running["started_at"]
+        assert isinstance(running["elapsed_ms"], int)
+        assert running["task_update"]["phase"] == "tool_execution"
+        assert running["task_update"]["current_step"] == "裁剪研究区 DEM"
+        assert running["task_update"]["progress"] == 37
+        assert failed["phase"] == "timeout"
+        assert failed["timeout_reason"] == "max_runtime_seconds exceeded"
+        assert failed["task_update"]["timeout_reason"] == "max_runtime_seconds exceeded"
+
+
 def test_replay_api_returns_sanitized_session_scoped_events() -> None:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         root = Path(tmp)

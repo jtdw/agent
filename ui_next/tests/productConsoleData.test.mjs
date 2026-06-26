@@ -31,6 +31,8 @@ assert.match(consoleSource, /api\.artifactMetadata/, 'ProductConsole download ac
 assert.doesNotMatch(consoleSource, /job\.download_url/, 'ProductConsole main download management path must not consume raw job.download_url');
 assert.doesNotMatch(consoleSource, /if \(error\) return <StateMessage/, 'ProductConsole must not replace the whole page with a dashboard error banner');
 assert.match(consoleSource, /\{error && <StateMessage tone="error">\{error\}<\/StateMessage>\}/, 'ProductConsole should show dashboard errors inline while preserving page content');
+const openChatWorkspaceSource = consoleSource.match(/const openChatWorkspace = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
+assert.doesNotMatch(openChatWorkspaceSource, /onOpenChat\?\.\(\)/, 'ProductConsole chat tab must not also mount the floating ChatPanel');
 assert.match(
   appSource,
   /onOpenMap=\{\(\) => \{\s*setConsoleOpen\(false\);\s*setChatOpen\(true\);\s*setToolsOpen\(true\);\s*\}\}/,

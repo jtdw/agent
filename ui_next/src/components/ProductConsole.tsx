@@ -394,7 +394,6 @@ export function ProductConsole({
   const defaultOutputName = `${region}_${product.outputSuffix}`;
   const openChatWorkspace = () => {
     setActiveTab('chat');
-    onOpenChat?.();
   };
 
   const runPreflight = async () => {
@@ -414,6 +413,7 @@ export function ProductConsole({
       }
       const result = await api.preflightDownload({
         user_id: user.user_id,
+        session_id: sessionId || chatContext?.session_id,
         source_key: 'gscloud',
         resource_type: product.value,
         region,

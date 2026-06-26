@@ -1,24 +1,16 @@
 import { motion } from 'framer-motion';
-import { BarChart3, Database, Download, FileArchive, Layers3, Map, PanelRightClose, RotateCcw, ScanSearch, Trash2, XCircle } from 'lucide-react';
+import { BarChart3, Database, Download, FileArchive, Layers3, Map, Palette, PanelRightClose, RotateCcw, ScanSearch, Trash2, XCircle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { GlassCard } from './GlassCard';
 import { LocalLibraryPanel } from './LocalLibraryPanel';
 import { ResearchWorkflowPanel } from './ResearchWorkflowPanel';
 import { SegmentedControl } from './SegmentedControl';
-import { CommercialUser, DownloadJob, DownloadManagementView, WorkspaceDashboard, api } from '@/lib/api';
+import { CommercialUser, DownloadJob, DownloadManagementView, ResultMapLayer, WorkspaceDashboard, api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import type { LayerVisibility } from './mapLayerPolicy';
+import { RESULT_LAYER_PALETTES, defaultResultLayerPalette, isReferenceMapLayer, resultLayerKey, resultLayerPalette, type LayerVisibility, type ResultLayerPaletteName, type ResultLayerStateMap } from './mapLayerPolicy';
 import type { WorkflowAction } from './researchWorkflow';
 
 type Basemap = 'standard' | 'satellite' | 'terrain' | 'dark';
-
-type LayerItem = {
-  id: string;
-  name: string;
-  desc: string;
-  active: boolean;
-  accent: string;
-};
 
 type DownloadProduct = {
   value: string;
@@ -37,10 +29,10 @@ const downloadProducts: DownloadProduct[] = [
   { value: 'sentinel2_msi', label: 'Sentinel-2 MSI', outputSuffix: 'sentinel2_msi', requestLabel: 'Sentinel-2 MSI 数据' }
 ];
 
-function LayerThumb({ accent }: { accent: string }) {
+function LayerThumb({ colors }: { colors: string[] }) {
   return (
     <div className="relative h-12 w-14 shrink-0 overflow-hidden rounded-2xl border border-white/55 bg-white/55 shadow-inner dark:border-white/10 dark:bg-white/5">
-      <div className="absolute inset-0 opacity-70" style={{ background: `linear-gradient(135deg, ${accent}, transparent 62%)` }} />
+      <div className="absolute inset-0 opacity-80" style={{ background: `linear-gradient(135deg, ${colors.join(', ')})` }} />
       <svg viewBox="0 0 80 64" className="absolute inset-0 h-full w-full opacity-80">
         <path d="M0 46 C15 34 22 42 37 31 C54 20 62 28 80 16" fill="none" stroke="currentColor" strokeWidth="4" className="text-white/80" />
         <path d="M-5 60 C14 49 28 58 43 43 C56 31 66 39 86 25" fill="none" stroke="currentColor" strokeWidth="3" className="text-white/45" />
@@ -62,18 +54,10 @@ function GlowSwitch({ active, onClick }: { active: boolean; onClick: () => void 
   );
 }
 
-const initialLayers: LayerItem[] = [
-  { id: 'stations', name: '站点观测数据', desc: '土壤水分站点、样点表与时间序列', active: true, accent: '#0B5FF4' },
-  { id: 'boundary', name: '研究区边界', desc: '流域边界、行政区裁剪范围与制图边界', active: true, accent: '#22D3EE' },
-  { id: 'dem', name: 'DEM / 高程成果', desc: '地形、高程下载结果与待处理 DEM 图层', active: true, accent: '#38bdf8' },
-  { id: 'soil', name: '土壤水分结果', desc: '融合建模结果、站点插值与专题图层', active: true, accent: '#10b981' },
-  { id: 'uncertainty', name: '不确定性分析', desc: 'GCP 预测区间与空间可靠性', active: false, accent: '#f59e0b' },
-  { id: 'download', name: '自动下载数据', desc: '地理空间数据云、DEM 与遥感产品', active: false, accent: '#8b5cf6' }
+const referenceLayers: Array<{ id: keyof LayerVisibility; name: string; desc: string; colors: string[] }> = [
+  { id: 'stations', name: '站点观测数据', desc: '土壤水分站点、样点表与时间序列', colors: ['#0B5FF4', '#22D3EE', '#10b981'] },
+  { id: 'boundary', name: '研究区边界', desc: '流域边界、行政区裁剪范围与制图边界', colors: ['#22D3EE', '#A7F3D0'] }
 ];
-
-function hasLayerVisibility(id: string): id is keyof LayerVisibility {
-  return id === 'stations' || id === 'boundary' || id === 'dem' || id === 'soil';
-}
 
 function attachManagementViews(jobs: DownloadJob[] = [], views: DownloadManagementView[] = []) {
   if (!jobs.length && views.length) {
@@ -136,7 +120,10 @@ export function LayerPanel({
   setBasemap,
   onClose,
   layerVisibility,
+  resultLayers,
+  resultLayerState,
   onLayerToggle,
+  onResultLayerChange,
   onLayerLocate,
   onRunWorkflowAction
 }: {
@@ -146,8 +133,11 @@ export function LayerPanel({
   setBasemap: (value: Basemap) => void;
   onClose?: () => void;
   layerVisibility: LayerVisibility;
+  resultLayers: ResultMapLayer[];
+  resultLayerState: ResultLayerStateMap;
   onLayerToggle: (id: keyof LayerVisibility) => void;
-  onLayerLocate: (id: keyof LayerVisibility) => void;
+  onResultLayerChange: (id: string, patch: Partial<{ visible: boolean; removed: boolean; palette: ResultLayerPaletteName }>) => void;
+  onLayerLocate: (id: string) => void;
   onRunWorkflowAction: (action: WorkflowAction) => void;
 }) {
   const [side, setSide] = useState<'right' | 'left'>('right');
@@ -158,7 +148,6 @@ export function LayerPanel({
   const [downloadResourceType, setDownloadResourceType] = useState(downloadProducts[0].value);
   const [dashboard, setDashboard] = useState<WorkspaceDashboard | null>(null);
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
-  const [layers, setLayers] = useState<LayerItem[]>(initialLayers);
   const completedSeenRef = useRef<Set<string>>(new Set());
   const jobsInitializedRef = useRef(false);
   const userId = user?.user_id || '';
@@ -259,6 +248,7 @@ export function LayerPanel({
       }
       const result = await api.preflightDownload({
         user_id: user.user_id,
+        session_id: sessionId,
         source_key: 'gscloud',
         resource_type: product.value,
         region,
@@ -425,6 +415,19 @@ export function LayerPanel({
   const recentJobs = jobs.slice(0, 5);
   const runningJobs = jobs.filter((job) => jobStatus(job) === 'running');
   const waitingJobs = jobs.filter((job) => ['awaiting_confirmation', 'blocked'].includes(jobStatus(job)));
+  const resultLayerRows = resultLayers.map((layer, index) => {
+    const id = resultLayerKey(layer, String(index));
+    const state = resultLayerState[id];
+    const palette = state?.palette || defaultResultLayerPalette(layer, index);
+    return {
+      id,
+      layer,
+      active: state?.visible ?? true,
+      removed: state?.removed ?? false,
+      palette,
+      colors: resultLayerPalette(palette).colors
+    };
+  }).filter((item) => !item.removed && !isReferenceMapLayer(item.layer));
 
   return (
     <motion.aside
@@ -560,33 +563,69 @@ export function LayerPanel({
 
           <LocalLibraryPanel userId={userId} onImported={refreshDashboard} />
 
-          <div className="mt-4 space-y-2">
-            {layers.map((layer) => {
-              const active = hasLayerVisibility(layer.id) ? layerVisibility[layer.id] : layer.active;
-              const locatableLayerId = hasLayerVisibility(layer.id) ? layer.id : null;
-              return (
-                <motion.div key={layer.id} whileHover={{ x: 3 }} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/45 bg-white/34 p-2.5 shadow-sm transition hover:bg-white/62 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/8', active && 'bg-white/68 ring-1 ring-cyan-300/25 dark:bg-white/8')}>
-                  {active && <motion.span layoutId="layer-active" className="absolute left-0 top-3 h-10 w-1 rounded-full bg-gradient-to-b from-ocean to-cyan-glow" />}
-                  <LayerThumb accent={layer.accent} />
-                  <div className="min-w-0 flex-1">
+          <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-black"><Layers3 size={16} strokeWidth={1.5} /> 结果图层</div>
+              <span className="rounded-full bg-white/60 px-2 py-1 text-[11px] font-black text-slate-500 dark:bg-white/10 dark:text-slate-300">{resultLayerRows.length}</span>
+            </div>
+            {resultLayerRows.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-white/36 px-3 py-4 text-xs font-semibold leading-5 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400">
+                当前工作区还没有可显示的结果图层。生成或加载 DEM、矢量、模型结果后会出现在这里。
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {resultLayerRows.map((item) => (
+                  <motion.div key={item.id} whileHover={{ x: 3 }} className={cn('group relative grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 rounded-[18px] border border-white/45 bg-white/34 p-2.5 shadow-sm transition hover:bg-white/62 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/8', item.active && 'bg-white/68 ring-1 ring-cyan-300/25 dark:bg-white/8')}>
+                    {item.active && <motion.span layoutId="result-layer-active" className="absolute left-0 top-3 h-10 w-1 rounded-full bg-gradient-to-b from-ocean to-cyan-glow" />}
+                    <LayerThumb colors={item.colors} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-black">{item.layer.name || item.layer.id}</div>
+                      <div className="truncate text-xs text-slate-500 dark:text-slate-400">
+                        {item.layer.kind || 'result'} · {item.layer.type} {item.layer.feature_count ? `· ${item.layer.feature_count} features` : ''}
+                      </div>
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <Palette size={13} className="text-slate-400" strokeWidth={1.7} />
+                        <select
+                          value={item.palette}
+                          onChange={(event) => onResultLayerChange(item.id, { palette: event.target.value as ResultLayerPaletteName })}
+                          className="min-w-0 flex-1 rounded-full border border-white/55 bg-white/70 px-2 py-1 text-[11px] font-bold text-slate-600 outline-none dark:border-white/10 dark:bg-slate-900 dark:text-slate-200"
+                          aria-label="选择图层配色"
+                        >
+                          {Object.entries(RESULT_LAYER_PALETTES).map(([value, palette]) => (
+                            <option key={value} value={value}>{palette.label}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => onLayerLocate(item.id)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/45 bg-white/58 text-slate-500 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/80 dark:border-white/10 dark:bg-white/10" title="定位到图层">
+                      <Map size={14} strokeWidth={1.7} />
+                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button type="button" onClick={() => onResultLayerChange(item.id, { removed: true, visible: false })} className="grid h-8 w-8 place-items-center rounded-full border border-white/35 bg-white/45 text-coral transition hover:bg-white/70 dark:border-white/10 dark:bg-white/10" title="从地图移除图层">
+                        <Trash2 size={14} strokeWidth={1.8} />
+                      </button>
+                      <GlowSwitch active={item.active} onClick={() => onResultLayerChange(item.id, { visible: !item.active })} />
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
+            <div className="mb-2 flex items-center gap-2 text-sm font-black"><Layers3 size={16} strokeWidth={1.5} /> 参考图层</div>
+            <div className="space-y-2">
+              {referenceLayers.map((layer) => (
+                <div key={layer.id} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-2xl border border-white/35 bg-white/42 p-2.5 dark:border-white/10 dark:bg-white/5">
+                  <LayerThumb colors={layer.colors} />
+                  <div className="min-w-0">
                     <div className="truncate text-sm font-black">{layer.name}</div>
                     <div className="truncate text-xs text-slate-500 dark:text-slate-400">{layer.desc}</div>
                   </div>
-                  {locatableLayerId && (
-                    <button type="button" onClick={() => onLayerLocate(locatableLayerId)} className="grid h-8 w-8 shrink-0 place-items-center rounded-full border border-white/45 bg-white/58 text-slate-500 shadow-sm transition hover:-translate-y-0.5 hover:bg-white/80 dark:border-white/10 dark:bg-white/10" title="定位到图层">
-                      <Map size={14} strokeWidth={1.7} />
-                    </button>
-                  )}
-                  <GlowSwitch
-                    active={active}
-                    onClick={() => {
-                      if (hasLayerVisibility(layer.id)) onLayerToggle(layer.id);
-                      setLayers((items) => items.map((x) => x.id === layer.id ? { ...x, active: !active } : x));
-                    }}
-                  />
-                </motion.div>
-              );
-            })}
+                  <GlowSwitch active={layerVisibility[layer.id]} onClick={() => onLayerToggle(layer.id)} />
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">

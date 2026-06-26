@@ -86,7 +86,12 @@ export type RealtimeChatEvent = {
   message_id?: string;
   status?: string;
   progress?: number | null;
+  phase?: string;
   current_step?: string;
+  heartbeat_at?: string;
+  started_at?: string;
+  elapsed_ms?: number;
+  timeout_reason?: string;
   message?: string;
   delta?: string;
   management_view?: DownloadManagementView;
@@ -1241,6 +1246,7 @@ export const api = {
   },
   async preflightDownload(input: {
     user_id: string;
+    session_id?: string;
     source_key: string;
     resource_type: string;
     region?: string;

@@ -247,6 +247,7 @@ class WorkflowExecutorTests(unittest.TestCase):
                 task_goal="check",
                 task_plan_summary={"primary_goal": "data_upload_analysis"},
                 coordinator_status="succeeded",
+                llm_client=False,
             )
             success_reply = success_bundle["reply"]
             self.assertIn("Completed", success_reply)
@@ -262,6 +263,7 @@ class WorkflowExecutorTests(unittest.TestCase):
                 task_goal="bad",
                 task_plan_summary={"primary_goal": "data_processing"},
                 coordinator_status="failed",
+                llm_client=False,
             )
             failure_reply = failure_bundle["reply"]
             self.assertEqual(failure_bundle["presentation_result"]["status"], "failed")

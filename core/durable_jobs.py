@@ -48,6 +48,17 @@ def _loads(text: str | None) -> Any:
         return {}
 
 
+def _elapsed_ms(started_at: str, *, now: datetime | None = None) -> int:
+    if not started_at:
+        return 0
+    try:
+        started = datetime.fromisoformat(str(started_at))
+    except Exception:
+        return 0
+    current = now or datetime.now()
+    return max(0, int((current - started).total_seconds() * 1000))
+
+
 def _tool_status(job_status: str) -> str:
     if job_status == "succeeded":
         return "succeeded"
@@ -95,6 +106,12 @@ class DurableJobStore:
             kind = "error"
         elif status == "cancelled":
             kind = "warning"
+        phase = str(job.get("phase") or status or "")
+        current_step = str(job.get("current_step") or job.get("job_type") or "")
+        heartbeat_at = _now()
+        started_at = str(job.get("started_at") or job.get("created_at") or "")
+        elapsed_ms = _elapsed_ms(started_at)
+        timeout_reason = str(job.get("timeout_reason") or "")
         message = str(job.get("error_message") or "")
         if not message:
             message = {
@@ -106,6 +123,27 @@ class DurableJobStore:
                 "failed": "任务执行失败。",
                 "cancelled": "任务已取消。",
             }.get(status, "任务状态已更新。")
+        task_update = {
+            "interaction_type": "tool_task",
+            "task_card": {
+                "status": status,
+                "progress": int(job.get("progress") or 0),
+                "current_step": current_step,
+                "phase": phase,
+                "elapsed_ms": elapsed_ms,
+                "heartbeat_at": heartbeat_at,
+                "started_at": started_at,
+                "timeout_reason": timeout_reason,
+            },
+            "status": status,
+            "progress": int(job.get("progress") or 0),
+            "phase": phase,
+            "current_step": current_step,
+            "elapsed_ms": elapsed_ms,
+            "heartbeat_at": heartbeat_at,
+            "started_at": started_at,
+            "timeout_reason": timeout_reason,
+        }
         self.events.append(
             user_id=str(job.get("user_id") or ""),
             session_id=str(job.get("session_id") or ""),
@@ -114,8 +152,25 @@ class DurableJobStore:
             kind=kind,
             status=status,
             progress=int(job.get("progress") or 0),
-            current_step=str(job.get("job_type") or ""),
+            phase=phase,
+            current_step=current_step,
+            heartbeat_at=heartbeat_at,
+            started_at=started_at,
+            elapsed_ms=elapsed_ms,
+            timeout_reason=timeout_reason,
             message=message,
+            management_view={
+                "task_id": str(job.get("job_id") or ""),
+                "job_id": str(job.get("job_id") or ""),
+                "status": status,
+                "progress": int(job.get("progress") or 0),
+                "current_step": current_step,
+                "phase": phase,
+                "updated_at": str(job.get("updated_at") or ""),
+                "timeout_reason": timeout_reason,
+                "available_actions": ["cancel"] if status in ACTIVE_STATUSES else (["retry"] if status == "failed" else []),
+            },
+            task_update=task_update,
         )
 
     @contextmanager
@@ -142,6 +197,10 @@ class DurableJobStore:
                     idempotency_key TEXT,
                     status TEXT NOT NULL,
                     progress INTEGER NOT NULL DEFAULT 0,
+                    phase TEXT,
+                    current_step TEXT,
+                    heartbeat_at TEXT,
+                    timeout_reason TEXT,
                     attempt_count INTEGER NOT NULL DEFAULT 0,
                     max_attempts INTEGER NOT NULL DEFAULT 3,
                     next_retry_at TEXT,
@@ -160,6 +219,15 @@ class DurableJobStore:
             )
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_durable_jobs_idempotency ON durable_jobs(idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_durable_jobs_session ON durable_jobs(user_id, session_id)")
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(durable_jobs)").fetchall()}
+            for name, definition in {
+                "phase": "TEXT",
+                "current_step": "TEXT",
+                "heartbeat_at": "TEXT",
+                "timeout_reason": "TEXT",
+            }.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE durable_jobs ADD COLUMN {name} {definition}")
 
     def _row_to_job(self, row: dict[str, Any]) -> dict[str, Any]:
         job = dict(row)
@@ -199,6 +267,10 @@ class DurableJobStore:
             "idempotency_key": clean_key,
             "status": "queued",
             "progress": 0,
+            "phase": "queued",
+            "current_step": "任务已进入后台队列",
+            "heartbeat_at": ts,
+            "timeout_reason": "",
             "attempt_count": 0,
             "max_attempts": max(1, int(max_attempts or 1)),
             "next_retry_at": "",
@@ -305,6 +377,9 @@ class DurableJobStore:
         progress: int | None = None,
         error_code: str = "",
         error_message: str = "",
+        phase: str = "",
+        current_step: str = "",
+        timeout_reason: str = "",
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized = str(status or "").strip().lower()
@@ -313,8 +388,20 @@ class DurableJobStore:
         update: dict[str, Any] = {"status": normalized, "updated_at": _now()}
         if progress is not None:
             update["progress"] = max(0, min(100, int(progress)))
+        update["heartbeat_at"] = _now()
+        if phase:
+            update["phase"] = str(phase or "")[:120]
+        else:
+            update["phase"] = normalized
+        if current_step:
+            update["current_step"] = str(current_step or "")[:240]
+        elif normalized in {"queued", "running"}:
+            update["current_step"] = str(self.get_job(job_id).get("current_step") or "")
+        if timeout_reason:
+            update["timeout_reason"] = str(timeout_reason or "")[:500]
         if normalized == "running":
-            update["started_at"] = _now()
+            current = self.get_job(job_id)
+            update["started_at"] = str(current.get("started_at") or _now())
         if normalized in TERMINAL_STATUSES:
             update["finished_at"] = _now()
         if error_code:

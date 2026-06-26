@@ -1,27 +1,33 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 import tempfile
 import time
-from queue import Empty
-from threading import Event, Thread
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
-from urllib.parse import urlencode
+from typing import Any
 from uuid import uuid4
-from zipfile import ZipFile
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, EmailStr, Field
-
+from api.routes.admin_capabilities import create_capabilities_router
+from api.routes.admin_operations import create_admin_operations_router
+from api.routes.admin_platform import create_admin_platform_router
+from api.routes.auth import create_auth_router
+from api.routes.chat_actions import create_chat_actions_router
+from api.routes.chat_state import create_chat_state_router
 from api.routes.data_sources import create_data_sources_router
 from api.routes.downloads import create_downloads_router
+from api.routes.downloads_main import create_downloads_main_router
+from api.routes.local_library import create_local_library_router
+from api.routes.map import create_map_router
+from api.routes.payments import create_payments_router
+from api.routes.system import create_system_router
+from api.routes.workflows import create_workflows_router
+from api.routes.workspace import create_workspace_router
+from api.schemas.chat import AskIn
 from core.config import Settings, load_settings
 from core.service import GISWorkspaceService
 from core.commercial.service import CommercialService, PLAN_PRESETS
@@ -37,7 +43,6 @@ from core.api_helpers import (
     request_session as _request_session,
     safe_key as _safe_key,
 )
-from core.archive_utils import safe_extract_zip
 from core.artifacts import artifact_download_url, assert_artifact_path_allowed, content_disposition_attachment, public_artifact_payload, safe_download_filename, shapefile_zip_path
 from core.chat_response import attach_chat_state, build_chat_response
 from core.chat_tasks import cancel_chat_task, finish_chat_task, start_chat_task
@@ -45,32 +50,42 @@ from core.download_request_executor import _attach_registered_download_artifacts
 from core.durable_jobs import DurableJobStore
 from core.realtime_events import GLOBAL_REALTIME_EVENT_HUB, TaskEventStore
 from core.response_quality import validate_response_before_send
-from core.presentation_result import build_presentation_bundle
 from core.management_views import download_job_to_management_view
-from core.diagnostic_views import diagnostic_event_views
 from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 from core.tool_contracts import download_job_to_tool_result
-from core.response_language import detect_response_language
 from core.api_utils import api_guard, resolve_child_path
 from core.local_library import LocalFileLibrary
-from core.capability_config import CapabilityConfigStore, CAPABILITY_CONFIG_VERSION
-from core.dataset_availability import DATASET_AVAILABILITY_SCHEMA_VERSION, DatasetAvailabilityStore
+from core.map_layers import read_vector_for_map
+from core.capability_config import CapabilityConfigStore
+from core.dataset_availability import DatasetAvailabilityStore
 from core.dataset_availability_scanner import scan_dataset_availability
 from core.system_reset import reset_system_workspace
 from core.storage_cleanup import cleanup_storage_candidates, scan_storage_cleanup_candidates
 from core.compat_usage import CompatibilityUsageStore
 from core.trial_monitoring import TrialMonitoringStore
-from core.map_layers import MapLayerService
 from core.semantic_parser import parse_user_semantics
 from core.station_data import find_station_archives, parse_ismn_station_zip
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
-from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI, match_gscloud_product
+from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
 from core.domestic_sources.gscloud_adapter import gscloud_platform_state_path
 from core.commercial.login_jobs import start_gscloud_login_process
-from core.ops_config import require_valid_production_config, validate_production_config
-from core.llm_config import check_llm_provider_health, validate_llm_config
+from core.ops_config import require_valid_production_config
 from services.data_sources.gscloud_accounts import GSCloudAccountService
+from services.downloads.gscloud_auto_start import (
+    GSCloudAutoStartService,
+    extract_cloud_max_from_prompt as _service_extract_cloud_max_from_prompt,
+    extract_gscloud_dem_dataset_id_from_prompt as _service_extract_gscloud_dem_dataset_id_from_prompt,
+    extract_max_scenes_from_prompt as _service_extract_max_scenes_from_prompt,
+    extract_year_from_prompt as _service_extract_year_from_prompt,
+    sentinel2_processing_level_from_prompt as _service_sentinel2_processing_level_from_prompt,
+)
+from services.downloads.preflight import DownloadPreflightService
+from services.downloads.presentation import (
+    DownloadPresentationService,
+    assert_download_job_session as _assert_download_job_session,
+    format_download_job_log_text,
+)
 from services.downloads.resume import DownloadResumeService
 
 try:
@@ -95,7 +110,6 @@ commercial_service = CommercialService(base_settings.workdir)
 local_library_root = Path(os.getenv("GIS_AGENT_LOCAL_LIBRARY_DIR", str(base_settings.workdir / "local_library"))).expanduser()
 local_library = LocalFileLibrary(local_library_root)
 _workspace_services: dict[str, GISWorkspaceService] = {}
-_LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE: dict | None = None
 MAX_UPLOAD_FILES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_FILES", "30") or 30)
 MAX_UPLOAD_BYTES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_MB", "300") or 300) * 1024 * 1024
 SESSION_COOKIE_ID = "gis_agent_session_id"
@@ -273,143 +287,6 @@ def _audit(
         pass
 
 
-class AuthIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=6, max_length=128)
-
-
-class ValidateIn(BaseModel):
-    session_id: str
-    session_token: str
-
-
-class AskIn(BaseModel):
-    prompt: str = Field(min_length=1, max_length=12000)
-    user_id: str = ""
-    session_id: str = ""
-    session_token: str = ""
-    task_id: str = ""
-    frontend_context: dict[str, Any] = Field(default_factory=dict)
-
-
-class ChatConfirmIn(BaseModel):
-    confirmation_id: str = Field(min_length=1, max_length=200)
-    confirmation_prompt: str = Field(default="", max_length=4000)
-    user_id: str = ""
-    session_id: str = ""
-    session_token: str = ""
-    task_id: str = ""
-    frontend_context: dict[str, Any] = Field(default_factory=dict)
-
-
-class ChatSessionIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    title: str = ""
-    interaction_mode: Literal["chat_only", "tool_enabled"] | None = None
-
-
-class ChatRetryIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    message_id: int
-    content: str = Field(min_length=1, max_length=12000)
-
-
-class ChatModelIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    model: str = Field(min_length=1, max_length=120)
-
-
-class ChatCancelIn(BaseModel):
-    user_id: str = ""
-    task_id: str = Field(min_length=1, max_length=120)
-    reason: str = ""
-
-
-class PaymentIn(BaseModel):
-    user_id: str
-    plan: Literal["pro", "team"] = "pro"
-
-
-class DownloadIn(BaseModel):
-    user_id: str
-    session_id: str = ""
-    source_key: str = "gscloud"
-    resource_type: str = "dem"
-    region: str = ""
-    start_date: str = ""
-    end_date: str = ""
-    account_mode: Literal["own", "platform", "auto"] = "auto"
-    request_text: str = ""
-    output_name: str = ""
-    include_raw: bool = False
-
-
-class DownloadDeleteIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    job_id: str
-
-
-class DownloadActionIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    job_id: str
-    reason: str = ""
-
-
-class DownloadPreflightIn(BaseModel):
-    user_id: str
-    source_key: str = "gscloud"
-    resource_type: str = "landsat8_oli_tirs"
-    product_key: str = ""
-    region: str = ""
-    start_date: str = ""
-    end_date: str = ""
-    account_mode: Literal["own", "platform", "auto"] = "auto"
-    request_text: str = ""
-    max_pages: int = 1
-    cloud_max: float = 30.0
-    processing_level: str = ""
-
-
-class ExportIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    mode: Literal["latest", "all"] = "all"
-
-
-class ArtifactDeleteIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    artifact_id: str = ""
-    path: str = ""
-
-
-class MapLayerRefreshIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    artifact_id: str = ""
-    dataset_name: str = ""
-
-
-class WorkflowIn(BaseModel):
-    user_id: str = ""
-    session_id: str = ""
-    run_now: bool = True
-
-
-class LocalLibraryImportIn(BaseModel):
-    user_id: str = ""
-    item_ids: list[str] = Field(default_factory=list)
-
-
-class LocalLibraryRescanIn(BaseModel):
-    pass
-
-
 def guard(fn):
     return api_guard(fn)
 
@@ -475,14 +352,181 @@ def _gscloud_account_service() -> GSCloudAccountService:
     return GSCloudAccountService(commercial_service)
 
 
+def _gscloud_auto_start_service() -> GSCloudAutoStartService:
+    return GSCloudAutoStartService(
+        commercial_service=lambda: commercial_service,
+        workdir=lambda: base_settings.workdir,
+        products={
+            "modl1d": MODL1D_CHINA_1KM_LST_DAILY,
+            "modnd1d": MODND1D_CHINA_500M_NDVI_DAILY,
+            "modev1f": MODEV1F_CHINA_250M_EVI_5DAY,
+            "mod021km": MOD021KM_1KM_SURFACE_REFLECTANCE,
+            "sentinel2": SENTINEL2_MSI,
+            "landsat8": LANDSAT8_OLI_TIRS,
+        },
+        tile_worker=start_gscloud_tile_process,
+        modl1d_worker=start_gscloud_modl1d_process,
+        modnd1d_worker=start_gscloud_modnd1d_process,
+        modev1f_worker=start_gscloud_modev1f_process,
+        mod021km_worker=start_gscloud_mod021km_process,
+        sentinel2_worker=start_gscloud_sentinel2_process,
+        landsat8_worker=start_gscloud_landsat8_process,
+    )
+
+
 def _download_resume_service() -> DownloadResumeService:
     return DownloadResumeService(
         commercial_service,
         _gscloud_account_service(),
-        _maybe_start_gscloud_auto_download,
+        _gscloud_auto_start_service().maybe_start,
     )
 
 
+def _download_presentation_service() -> DownloadPresentationService:
+    return DownloadPresentationService(
+        manager_for_job=_manager_for_download_job,
+        list_scene_jobs=lambda limit=100: list_gscloud_scene_jobs(commercial_service.workdir, limit=limit) if list_gscloud_scene_jobs is not None else [],
+        list_tile_jobs=lambda limit=100: list_gscloud_tile_jobs(commercial_service.workdir, limit=limit) if list_gscloud_tile_jobs is not None else [],
+        attach_registered_download_artifacts=_attach_registered_download_artifacts,
+    )
+
+
+def _download_preflight_service() -> DownloadPreflightService:
+    return DownloadPreflightService(
+        commercial_service=lambda: commercial_service,
+        products=GSCLOUD_PRODUCTS,
+        resolve_download_region=resolve_download_region,
+        inspect_storage_state=inspect_storage_state,
+        verify_gscloud_scene_download=verify_gscloud_scene_download,
+        workdir=lambda: base_settings.workdir,
+    )
+
+
+app.include_router(
+    create_system_router(
+        local_library_root=lambda: local_library.root,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_auth_router(
+        commercial_service=lambda: commercial_service,
+        set_session_cookies=_set_session_cookies,
+        clear_session_cookies=_clear_session_cookies,
+        request_session=_request_session,
+        optional_authenticated_session=optional_authenticated_session,
+        audit=_audit,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_workspace_router(
+        scoped_workspace_service=_scoped_workspace_service,
+        require_request_user_if_present=_require_request_user_if_present,
+        decorate_dashboard=lambda service, user_id="": _decorate_dashboard(service, user_id=user_id),
+        build_workspace_mentions=lambda datasets: _build_workspace_mentions(datasets),
+        local_library_items=lambda: local_library.list_items(),
+        artifact_download_url=artifact_download_url,
+        public_artifact_or_error=lambda service, artifact_id, user_id="", session_id="": _public_artifact_or_error(service, artifact_id, user_id=user_id, session_id=session_id),
+        audit=_audit,
+        guard=guard,
+        max_upload_files=lambda: MAX_UPLOAD_FILES,
+        max_upload_bytes=lambda: MAX_UPLOAD_BYTES,
+    )
+)
+app.include_router(
+    create_map_router(
+        scoped_workspace_service=_scoped_workspace_service,
+        require_request_user_if_present=_require_request_user_if_present,
+        load_station_collection=lambda user_id="": _load_station_collection(user_id),
+        guard=guard,
+    )
+)
+app.include_router(
+    create_local_library_router(
+        local_library=lambda: local_library,
+        scoped_workspace_service=lambda user_id, session_id="": _scoped_workspace_service(user_id, session_id),
+        require_request_user_if_present=_require_request_user_if_present,
+        decorate_dashboard=lambda service, user_id="": _decorate_dashboard(service, user_id=user_id),
+        guard=guard,
+    )
+)
+app.include_router(
+    create_capabilities_router(
+        capability_store=_capability_store,
+        require_capability_admin=_require_capability_admin,
+        extract_capability_document_text=_extract_capability_document_text,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_admin_operations_router(
+        dataset_availability_store=_dataset_availability_store,
+        compatibility_usage_store=_compat_usage_store,
+        trial_monitoring_store=_trial_monitoring_store,
+        require_capability_admin=_require_capability_admin,
+        scan_dataset_availability=scan_dataset_availability,
+        reset_system_workspace=reset_system_workspace,
+        get_commercial_service=lambda: commercial_service,
+        set_commercial_service=lambda value: globals().__setitem__("commercial_service", value),
+        clear_workspace_services=lambda: _workspace_services.clear(),
+        ensure_base_dirs=lambda: base_settings.ensure_dirs(),
+        scan_storage_cleanup_candidates=scan_storage_cleanup_candidates,
+        cleanup_storage_candidates=cleanup_storage_candidates,
+        workdir=lambda: base_settings.workdir,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_admin_platform_router(
+        commercial_service=lambda: commercial_service,
+        require_capability_admin=_require_capability_admin,
+        inspect_storage_state=inspect_storage_state,
+        gscloud_platform_state_path=gscloud_platform_state_path,
+        start_gscloud_login_process=lambda **kwargs: start_gscloud_login_process(**kwargs),
+        workdir=lambda: base_settings.workdir,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_chat_state_router(
+        scoped_workspace_service=lambda user_id, session_id="": _scoped_workspace_service(user_id, session_id),
+        require_request_user_if_present=lambda request, user_id: _require_request_user_if_present(request, user_id),
+        decorate_response_artifacts=lambda service, user_id, response: _decorate_response_artifacts(service, user_id, response),
+        public_task_events=lambda service, **kwargs: _public_task_events(service, **kwargs),
+        sse_event=lambda event: _sse_event(event),
+        realtime_event_hub=GLOBAL_REALTIME_EVENT_HUB,
+        cancel_chat_task=cancel_chat_task,
+        workspace_services=lambda: list(_workspace_services.values()),
+        durable_job_store_factory=lambda path: DurableJobStore(path),
+        cancel_session_jobs=commercial_service.cancel_session_jobs,
+        hard_delete_session_jobs=commercial_service.hard_delete_session_jobs,
+        compat_usage_store=_compat_usage_store,
+        compat_actor_type=_compat_actor_type,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_chat_actions_router(
+        scoped_workspace_service=lambda user_id, session_id="": _scoped_workspace_service(user_id, session_id),
+        require_request_user_if_present=lambda request, user_id: _require_request_user_if_present(request, user_id),
+        attach_result_panel=lambda service, user_id, response: _attach_result_panel(service, user_id, response),
+        attach_chat_state=lambda service, response: attach_chat_state(service, response),
+        build_chat_response=lambda *args, **kwargs: build_chat_response(*args, **kwargs),
+        start_chat_task=start_chat_task,
+        finish_chat_task=finish_chat_task,
+        is_commercial_download_status_prompt=lambda prompt: _is_commercial_download_status_prompt(prompt),
+        download_requires_login_result=lambda prompt: _download_requires_login_result(prompt),
+        format_commercial_download_status=lambda prompt, user_id: _format_commercial_download_status(prompt, user_id),
+        attach_download_tool_result=lambda payload: _download_presentation_service().attach_download_tool_result(payload),
+        realtime_event_hub=GLOBAL_REALTIME_EVENT_HUB,
+        task_event_store_for_service=lambda service: _task_event_store_for_service(service),
+        stream_task_update=lambda response: _stream_task_update(response),
+        sse_event=lambda event: _sse_event(event),
+        task_id_factory=lambda: f"chat_{uuid4().hex[:12]}",
+        guard=guard,
+    )
+)
 app.include_router(
     create_data_sources_router(
         account_service=_gscloud_account_service,
@@ -496,6 +540,49 @@ app.include_router(
         resume_service=_download_resume_service,
         authenticated_user=_require_current_request_user,
         audit=_audit,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_downloads_main_router(
+        commercial_service=lambda: commercial_service,
+        require_request_user=lambda request, user_id: _require_request_user(request, user_id),
+        scoped_workspace_service=lambda user_id, session_id="": _scoped_workspace_service(user_id, session_id),
+        maybe_start_gscloud_auto_download=lambda job, region="": _gscloud_auto_start_service().maybe_start(job, region=region),
+        attach_download_tool_result=lambda payload: _download_presentation_service().attach_download_tool_result(payload),
+        download_tool_result_for_job=lambda job, user_id="": _download_presentation_service().download_tool_result_for_job(job, user_id=user_id),
+        download_job_to_management_view=lambda job, tool_result=None: download_job_to_management_view(job, tool_result=tool_result),
+        require_resource_owner=lambda resource, user_id="", resource_name="": require_resource_owner(resource, user_id=user_id, resource_name=resource_name),
+        assert_download_job_session=lambda job, session_id="": _assert_download_job_session(job, session_id),
+        relative_shared_download_url=lambda file_path, **kwargs: _relative_shared_download_url(file_path, **kwargs),
+        list_gscloud_scene_jobs=lambda workdir, limit=100: list_gscloud_scene_jobs(workdir, limit=limit) if list_gscloud_scene_jobs is not None else [],
+        list_gscloud_tile_jobs=lambda workdir, limit=100: list_gscloud_tile_jobs(workdir, limit=limit) if list_gscloud_tile_jobs is not None else [],
+        format_download_job_log_text=format_download_job_log_text,
+        content_disposition_attachment=content_disposition_attachment,
+        resolve_child_path=resolve_child_path,
+        assert_artifact_path_allowed=assert_artifact_path_allowed,
+        preflight_service=_download_preflight_service,
+        workdir=lambda: base_settings.workdir,
+        audit=_audit,
+        compat_usage_store=_compat_usage_store,
+        compat_actor_type=_compat_actor_type,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_payments_router(
+        commercial_service=lambda: commercial_service,
+        require_payment_user=lambda request, user_id: _require_admin_or_mock_payment_user(request, user_id),
+        plan_presets=PLAN_PRESETS,
+        audit=_audit,
+        guard=guard,
+    )
+)
+app.include_router(
+    create_workflows_router(
+        require_request_user_if_present=lambda request, user_id: _require_request_user_if_present(request, user_id),
+        scoped_workspace_service=lambda user_id, session_id="": _scoped_workspace_service(user_id, session_id),
+        workflow_prompt=lambda: SHANDIAN_WORKFLOW_PROMPT,
         guard=guard,
     )
 )
@@ -531,8 +618,8 @@ def _load_station_collection(user_id: str = "") -> dict:
     return parse_ismn_station_zip(archives[0], preferred_depth="0.050000", year="2019")
 
 
-def _safe_layer_id(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_-]+", "_", value or "layer").strip("_")[:80] or "layer"
+def _read_vector_for_map(path: Path):
+    return read_vector_for_map(path)
 
 
 def _ensure_downloadable_artifact(service: GISWorkspaceService, item: dict, *, user_id: str, session_id: str) -> dict:
@@ -779,19 +866,6 @@ def _relative_shared_download_url(file_path: str, user_id: str = "", job_id: str
     return relative_shared_download_url(base_settings.workdir, file_path, user_id=user_id, job_id=job_id, session_id=session_id)
 
 
-def _assert_download_job_session(job: dict, session_id: str = "") -> None:
-    requested = str(session_id or "").strip()
-    if not requested:
-        return
-    actual = str(job.get("session_id") or "").strip()
-    if not actual:
-        # Legacy jobs created before chat/download requests carried session_id.
-        # Ownership is still enforced before this check, so keep them diagnosable.
-        return
-    if actual != requested:
-        raise PermissionError("download job belongs to another session")
-
-
 def _manager_for_download_job(user_id: str, job: dict) -> Any | None:
     session_id = str((job or {}).get("session_id") or "").strip()
     if not user_id or not session_id:
@@ -800,89 +874,6 @@ def _manager_for_download_job(user_id: str, job: dict) -> Any | None:
         return _scoped_workspace_service(user_id, session_id).manager
     except Exception:
         return None
-
-
-def _download_tool_result_for_job(job: dict, *, user_id: str = "") -> dict:
-    job_id = str((job or {}).get("job_id") or "")
-    scene_job = None
-    tile_job = None
-    if job_id and list_gscloud_scene_jobs is not None:
-        scene_job = next((item for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id), None)
-    if job_id and list_gscloud_tile_jobs is not None:
-        tile_job = next((item for item in list_gscloud_tile_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id), None)
-    tool_result = download_job_to_tool_result(job, scene_job=scene_job, tile_job=tile_job)
-    manager = _manager_for_download_job(user_id, job)
-    if manager is not None:
-        product = {
-            "product_id": str(job.get("output_name") or job.get("resource_type") or "download"),
-            "resource_type": str(job.get("resource_type") or "download"),
-        }
-        tool_result = _attach_registered_download_artifacts(manager, tool_result, job, product)
-    return tool_result
-
-
-def _attach_download_tool_result(payload: dict, job_key: str = "job") -> dict:
-    patched = dict(payload or {})
-    job = patched.get(job_key)
-    if isinstance(job, dict):
-        tool_result = _download_tool_result_for_job(job, user_id=str(job.get("user_id") or ""))
-        step_result = {**tool_result, "step_id": "download_job"}
-        bundle = build_presentation_bundle(
-            task_goal="download_status",
-            task_plan_summary={
-                "primary_goal": "download_status",
-                "intent": "download",
-                "operation": "status",
-                "response_language": detect_response_language(job.get("request_text") or job.get("region") or ""),
-            },
-            coordinator_status=str(tool_result.get("status") or ""),
-            normalized_results=[step_result],
-            response_language=detect_response_language(job.get("request_text") or job.get("region") or ""),
-        )
-        patched["tool_result"] = tool_result
-        patched["download_tool_result"] = tool_result
-        patched["normalized_results"] = bundle["normalized_results"]
-        patched["presentation_result"] = bundle["presentation_result"]
-        patched["execution_summary"] = bundle["execution_summary"]
-        patched["presentation_reply"] = bundle["reply"]
-        patched["result_rendering_path"] = "presentation_result"
-        patched["presentation_source"] = bundle.get("presentation_source")
-        patched["management_view"] = download_job_to_management_view(job, tool_result=tool_result)
-        patched["deprecated_raw_job_api"] = True
-    jobs = patched.get("jobs")
-    if isinstance(jobs, list):
-        patched["management_views"] = [
-            download_job_to_management_view(item, tool_result=_download_tool_result_for_job(item, user_id=str(item.get("user_id") or "")))
-            for item in jobs
-            if isinstance(item, dict)
-        ]
-    if any(isinstance(patched.get(key), list) for key in ("scene_jobs", "tile_jobs", "audit_events")):
-        patched["diagnostic_event_views"] = {
-            "scene_jobs": diagnostic_event_views(patched.get("scene_jobs") if isinstance(patched.get("scene_jobs"), list) else [], default_phase="scene"),
-            "tile_jobs": diagnostic_event_views(patched.get("tile_jobs") if isinstance(patched.get("tile_jobs"), list) else [], default_phase="tile"),
-            "audit_events": diagnostic_event_views(patched.get("audit_events") if isinstance(patched.get("audit_events"), list) else [], default_phase="audit"),
-        }
-    return patched
-
-
-def _gscloud_product_key_from_resource(value: str) -> str:
-    text = str(value or "").strip().lower()
-    for product in GSCLOUD_PRODUCTS.values():
-        if text in {product.key.lower(), product.resource_type.lower()}:
-            return product.key
-    return text
-
-
-def _resolve_preflight_storage_state(body: DownloadPreflightIn) -> str:
-    source_key = str(body.source_key or "gscloud").lower()
-    mode = commercial_service.resolve_account_mode(body.user_id, body.account_mode, source_key)
-    if mode in {"own", "user", "user_account", "manual_cookie"}:
-        return commercial_service.get_user_storage_state_path(body.user_id, source_key)
-    check = commercial_service._select_platform_account(source_key)
-    if not check.ok or not check.account_id:
-        raise PermissionError(check.reason or "没有可用平台账号。")
-    account = commercial_service.get_platform_account_private(check.account_id)
-    return str(account.get("storage_state_path") or "")
 
 
 def _resolve_gscloud_prompt_account_mode(user_id: str, prompt: str) -> str:
@@ -901,361 +892,6 @@ def _resolve_gscloud_prompt_account_mode(user_id: str, prompt: str) -> str:
     if any(marker in text for marker in platform_markers):
         return "platform"
     return commercial_service.default_account_mode(user_id, "gscloud")
-
-
-def _dataset_map_kind(name: str, data_type: str) -> str:
-    text = f"{name} {data_type}".lower()
-    if any(token in text for token in ["soil", "moisture", "sm", "ndvi", "prediction", "result"]):
-        return "soil"
-    if any(token in text for token in ["dem", "elevation", "srtm", "aster", "terrain"]):
-        return "dem"
-    if any(token in text for token in ["boundary", "region", "aoi", "basin", "admin"]):
-        return "boundary"
-    return "boundary" if data_type == "vector" else "dem"
-
-
-def _raster_preview_path(service: GISWorkspaceService, dataset_name: str) -> Path:
-    safe_name = _safe_layer_id(dataset_name)
-    return service.manager.temp_dir / "map_previews" / f"{safe_name}.png"
-
-
-def _ensure_raster_preview(service: GISWorkspaceService, dataset_name: str, user_id: str = "") -> dict:
-    import numpy as np
-    import rasterio
-    from PIL import Image
-    from rasterio.warp import transform_bounds
-
-    raster_path = service.manager.get_raster_path(dataset_name)
-    preview_path = _raster_preview_path(service, dataset_name)
-    preview_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not preview_path.exists() or preview_path.stat().st_mtime < raster_path.stat().st_mtime:
-        with rasterio.open(raster_path) as src:
-            max_size = 1200
-            scale = max(src.width / max_size, src.height / max_size, 1)
-            out_width = max(1, int(src.width / scale))
-            out_height = max(1, int(src.height / scale))
-            data = src.read(1, out_shape=(out_height, out_width), masked=True)
-            arr = np.asarray(data.filled(np.nan), dtype="float32")
-            valid = np.isfinite(arr)
-            rgba = np.zeros((out_height, out_width, 4), dtype=np.uint8)
-            if valid.any():
-                lo, hi = np.nanpercentile(arr[valid], [2, 98])
-                if hi <= lo:
-                    hi = lo + 1
-                norm = np.clip((arr - lo) / (hi - lo), 0, 1)
-                rgba[..., 0] = (32 + 210 * norm).astype(np.uint8)
-                rgba[..., 1] = (96 + 120 * norm).astype(np.uint8)
-                rgba[..., 2] = (180 - 140 * norm).astype(np.uint8)
-                rgba[..., 3] = np.where(valid, 190, 0).astype(np.uint8)
-            Image.fromarray(rgba, mode="RGBA").save(preview_path)
-
-    with rasterio.open(raster_path) as src:
-        bounds = tuple(src.bounds)
-        if src.crs:
-            bounds = transform_bounds(src.crs, "EPSG:4326", *bounds, densify_pts=21)
-    params = {"dataset_name": dataset_name}
-    if str(user_id or "").strip():
-        params["user_id"] = _safe_key(user_id)
-    return {
-        "preview_path": str(preview_path),
-        "preview_url": f"/api/map/raster-preview?{urlencode(params)}",
-        "bounds": [float(v) for v in bounds],
-    }
-
-
-def _read_vector_for_map(path: Path):
-    import geopandas as gpd
-
-    if path.suffix.lower() == ".zip":
-        with ZipFile(path) as archive:
-            shp_names = [name for name in archive.namelist() if name.lower().endswith(".shp")]
-            if not shp_names:
-                raise FileNotFoundError(f"zip archive has no shapefile: {path}")
-            shp_name = sorted(shp_names, key=lambda item: ("/" in item, item))[0]
-            with tempfile.TemporaryDirectory(prefix="gis-agent-map-vector-") as temp_dir:
-                safe_extract_zip(archive, Path(temp_dir))
-                return gpd.read_file(Path(temp_dir) / shp_name)
-    return gpd.read_file(path)
-
-
-def _vector_map_layer(name: str, gdf, *, layer_id: str = "", kind: str = "", meta: dict | None = None) -> dict | None:
-    if gdf.empty:
-        return None
-    if gdf.crs:
-        gdf = gdf.to_crs("EPSG:4326")
-    if len(gdf) > 2000:
-        gdf = gdf.head(2000)
-    return {
-        "id": layer_id or _safe_layer_id(name),
-        "name": name,
-        "type": "vector",
-        "kind": kind or _dataset_map_kind(name, "vector"),
-        "bounds": [float(v) for v in gdf.total_bounds.tolist()],
-        "feature_count": int(len(gdf)),
-        "geojson": json.loads(gdf.to_json()),
-        "meta": meta or {},
-    }
-
-
-def _local_library_boundary_layer() -> dict | None:
-    global _LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE
-    if _LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE is not None:
-        return json.loads(json.dumps(_LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE))
-    try:
-        item = local_library.get_item("lib_shandianhe_basin_boundary_full")
-        path = Path(str(item.get("absolute_path") or ""))
-        gdf = _read_vector_for_map(path)
-        layer = _vector_map_layer(
-            "闪电河流域边界",
-            gdf,
-            layer_id="local_library_shandianhe_basin_boundary",
-            kind="boundary",
-            meta={"source": "local_library", "item_id": item.get("item_id")},
-        )
-        if layer:
-            _LOCAL_LIBRARY_BOUNDARY_LAYER_CACHE = json.loads(json.dumps(layer))
-        return layer
-    except Exception:
-        return None
-
-
-def _dedupe_boundary_layers(layers: list[dict]) -> list[dict]:
-    seen: set[tuple[float, float, float, float]] = set()
-    result: list[dict] = []
-    for layer in layers:
-        if layer.get("kind") != "boundary":
-            result.append(layer)
-            continue
-        bounds = layer.get("bounds")
-        if not isinstance(bounds, list) or len(bounds) != 4:
-            result.append(layer)
-            continue
-        key = tuple(round(float(value), 6) for value in bounds)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(layer)
-    return result
-
-
-def _workspace_map_layers(service: GISWorkspaceService, user_id: str = "") -> dict:
-    layers: list[dict] = []
-    has_boundary = False
-    for item in service.manager.list_datasets():
-        name = str(item.get("name") or "")
-        data_type = str(item.get("type") or "")
-        meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
-        if data_type == "vector":
-            gdf = service.manager.get_vector(name)
-            layer = _vector_map_layer(name, gdf, kind=_dataset_map_kind(name, data_type), meta=meta)
-            if not layer:
-                continue
-            layers.append(layer)
-            has_boundary = has_boundary or layer.get("kind") == "boundary"
-        elif data_type == "raster":
-            preview = _ensure_raster_preview(service, name, user_id=user_id)
-            layers.append({
-                "id": _safe_layer_id(name),
-                "name": name,
-                "type": "raster",
-                "kind": _dataset_map_kind(name, data_type),
-                "bounds": preview["bounds"],
-                "preview_url": preview["preview_url"],
-                "meta": meta,
-            })
-    if not has_boundary:
-        fallback = _local_library_boundary_layer()
-        if fallback:
-            layers.insert(0, fallback)
-    layers = _dedupe_boundary_layers(layers)
-    return {"layers": layers}
-
-
-@app.get("/api/status")
-def status():
-    llm_validation = validate_llm_config()
-    return {
-        "ok": True,
-        "service": "GIS Agent Web API",
-        "version": "1.4.0",
-        "profile": "Web-only / LangChain 交互式 GIS 智能体 / 土壤水分融合建模 / 本地文件库 / 天地图底图与数据服务 / 国内资源下载 / 商业化账号体系",
-        "desktop_removed": True,
-        "local_library": {"enabled": True, "root": str(local_library.root)},
-        "tianditu": {"enabled": bool(os.getenv("TIANDITU_TOKEN", "").strip())},
-        "llm_status": {
-            "status": llm_validation.get("status"),
-            "provider": llm_validation.get("provider"),
-            "model": llm_validation.get("model"),
-            "role_models": llm_validation.get("role_models", {}),
-            "api_key_present": llm_validation.get("api_key_present"),
-            "intent_classifier": llm_validation.get("enable_llm_intent_classifier"),
-            "fallback_to_rule_classifier": llm_validation.get("fallback_to_rule_classifier"),
-        },
-    }
-
-
-@app.get("/api/llm/health")
-def llm_health(network: bool = Query(default=False)):
-    return check_llm_provider_health(skip_network=not network)
-
-
-@app.get("/api/ops/config")
-def ops_config():
-    return validate_production_config()
-
-
-def _tianditu_layer_url(layer: str, matrix_set: str = "w") -> str:
-    token = os.getenv("TIANDITU_TOKEN", "").strip()
-    return (
-        f"https://t{{s}}.tianditu.gov.cn/{layer}_{matrix_set}/wmts?"
-        f"SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER={layer}"
-        f"&STYLE=default&TILEMATRIXSET={matrix_set}&FORMAT=tiles"
-        f"&TILEMATRIX={{z}}&TILEROW={{y}}&TILECOL={{x}}&tk={token}"
-    )
-
-
-@app.get("/api/tianditu/config")
-def tianditu_config():
-    token = os.getenv("TIANDITU_TOKEN", "").strip()
-    default_basemap = os.getenv("TIANDITU_DEFAULT_BASEMAP", "vec").strip().lower() or "vec"
-    enabled = bool(token)
-    return {
-        "enabled": enabled,
-        "token_masked": (token[:4] + "***" + token[-4:]) if len(token) >= 8 else "",
-        "default_basemap": default_basemap,
-        "subdomains": ["0", "1", "2", "3", "4", "5", "6", "7"],
-        "matrix_set": "w",
-        "tile_url_templates": {
-            "vector": _tianditu_layer_url("vec"),
-            "vector_annotation": _tianditu_layer_url("cva"),
-            "image": _tianditu_layer_url("img"),
-            "image_annotation": _tianditu_layer_url("cia"),
-            "terrain": _tianditu_layer_url("ter"),
-            "terrain_annotation": _tianditu_layer_url("cta"),
-        } if enabled else {},
-        "capabilities": [
-            "WMTS 矢量底图",
-            "WMTS 影像底图",
-            "WMTS 地形晕渲",
-            "中文注记叠加",
-            "地名搜索与逆地理编码可通过后端服务继续封装",
-            "政区/道路/水系/居民地等数据 API 可作为辅助要素源",
-        ],
-        "setup_hint": "请在 .env 中配置 TIANDITU_TOKEN，并在天地图控制台限制浏览器端 Key 的域名/Referer。" if not enabled else "天地图 Token 已配置。",
-    }
-
-
-
-
-@app.get("/api/map/stations")
-def map_stations(request: Request, user_id: str = Query(default="")):
-    return guard(lambda: _load_station_collection(_require_request_user_if_present(request, user_id)))
-
-
-@app.get("/api/map/layers")
-def map_layers(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
-    def run():
-        if not str(user_id or "").strip() and not str(session_id or "").strip():
-            return {"layers": []}
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        return MapLayerService(_scoped_workspace_service(authorized_user_id, session_id)).workspace_layers(
-            user_id=authorized_user_id,
-            session_id=session_id,
-        )
-
-    return guard(run)
-
-
-@app.post("/api/map/layers/refresh")
-def refresh_map_layer(body: MapLayerRefreshIn, request: Request):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, body.user_id)
-        service = _scoped_workspace_service(authorized_user_id, body.session_id)
-        layer_service = MapLayerService(service)
-        if body.artifact_id:
-            service.manager.assert_artifact_access(authorized_user_id, body.session_id or service.current_session_id, body.artifact_id)
-            return layer_service.refresh_artifact(body.artifact_id, user_id=authorized_user_id, session_id=body.session_id)
-        if body.dataset_name:
-            dataset = next((item for item in service.manager.list_datasets() if item.get("name") == body.dataset_name), None)
-            if not dataset:
-                raise FileNotFoundError(f"dataset not found: {body.dataset_name}")
-            layer = layer_service.dataset_layer(dataset, user_id=authorized_user_id, session_id=body.session_id)
-            if not layer:
-                raise ValueError(f"dataset produced no map layer: {body.dataset_name}")
-            return {"dataset_name": body.dataset_name, "map_layer_id": layer["id"], "map_ready": True, "layer": layer}
-        raise ValueError("artifact_id or dataset_name is required")
-
-    return guard(run)
-
-
-@app.get("/api/map/raster-preview")
-def map_raster_preview(request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), dataset_name: str = Query(...)):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id, session_id)
-        layer_service = MapLayerService(service)
-        target = layer_service.raster_preview_path(dataset_name)
-        if not target.exists():
-            layer_service.ensure_raster_preview(dataset_name, user_id=authorized_user_id)
-        if not target.exists():
-            raise FileNotFoundError(f"raster preview not found: {dataset_name}")
-        return FileResponse(str(target), media_type="image/png", filename=target.name)
-
-    return guard(run)
-
-@app.post("/api/auth/login")
-def login(body: AuthIn, response: Response, request: Request):
-    def run():
-        session = commercial_service.authenticate_user(str(body.email), body.password)
-        _set_session_cookies(response, session)
-        _audit(request, user_id=str(session["user"].get("user_id") or ""), action="auth.login", resource_type="user", resource_id=str(session["user"].get("user_id") or ""))
-        return {"user": session["user"], "expires_at": session.get("expires_at")}
-
-    return guard(run)
-
-
-@app.post("/api/auth/register")
-def register(body: AuthIn, response: Response, request: Request):
-    def run():
-        commercial_service.register_user(str(body.email), body.password, plan="basic")
-        session = commercial_service.authenticate_user(str(body.email), body.password)
-        _set_session_cookies(response, session)
-        _audit(request, user_id=str(session["user"].get("user_id") or ""), action="auth.register", resource_type="user", resource_id=str(session["user"].get("user_id") or ""))
-        return {"user": session["user"], "expires_at": session.get("expires_at")}
-
-    return guard(run)
-
-
-@app.post("/api/auth/validate")
-def validate(body: ValidateIn):
-    return guard(lambda: commercial_service.validate_session(body.session_id, body.session_token))
-
-
-@app.get("/api/auth/me")
-def me(request: Request):
-    def run():
-        session_id, session_token = _request_session(request)
-        return optional_authenticated_session(commercial_service, session_id=session_id, session_token=session_token)
-
-    return guard(run)
-
-
-@app.post("/api/auth/logout")
-def logout(response: Response, request: Request):
-    _clear_session_cookies(response)
-    _audit(request, action="auth.logout")
-    return {"ok": True}
-
-
-@app.get("/api/chat/messages")
-def messages(request: Request, user_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id)
-        return _decorate_response_artifacts(service, authorized_user_id, {"messages": service.current_messages()})
-
-    return guard(run)
 
 
 def _task_event_store_for_service(service: GISWorkspaceService) -> TaskEventStore:
@@ -1383,230 +1019,6 @@ def _stream_task_update(response: dict[str, Any]) -> dict[str, Any]:
     return {key: meta[key] for key in allowed if key in meta}
 
 
-@app.get("/api/chat/events/replay")
-def replay_chat_events(
-    request: Request,
-    user_id: str = Query(default=""),
-    session_id: str = Query(default=""),
-    after_version: int = Query(default=0, ge=0),
-    limit: int = Query(default=200, ge=1, le=1000),
-):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id, session_id)
-        return {
-            "schema_version": "task-progress-event-replay/v1",
-            "events": _public_task_events(
-                service,
-                user_id=authorized_user_id,
-                session_id=session_id or service.current_session_id,
-                after_version=after_version,
-                limit=limit,
-            ),
-        }
-
-    return guard(run)
-
-
-@app.get("/api/chat/events")
-def stream_chat_events(
-    request: Request,
-    user_id: str = Query(default=""),
-    session_id: str = Query(default=""),
-    after_version: int = Query(default=0, ge=0),
-    once: bool = Query(default=False),
-):
-    authorized_user_id = _require_request_user_if_present(request, user_id)
-    service = _scoped_workspace_service(authorized_user_id, session_id)
-    scoped_session_id = session_id or service.current_session_id
-
-    def event_stream():
-        version = max(0, int(after_version or 0))
-        subscription = GLOBAL_REALTIME_EVENT_HUB.subscribe(user_id=authorized_user_id, session_id=scoped_session_id)
-        try:
-            while True:
-                events = _public_task_events(service, user_id=authorized_user_id, session_id=scoped_session_id, after_version=version)
-                for event in events:
-                    version = max(version, int(event.get("version") or 0))
-                    yield _sse_event(event)
-                transient_events: list[dict[str, Any]] = []
-                try:
-                    transient_events.append(subscription.get(timeout=0.8 if not events else 0.01))
-                    while True:
-                        transient_events.append(subscription.get_nowait())
-                except Empty:
-                    pass
-                for event in transient_events:
-                    yield _sse_event(event)
-                if once:
-                    return
-                if not events and not transient_events:
-                    yield ": keepalive\n\n"
-        finally:
-            GLOBAL_REALTIME_EVENT_HUB.unsubscribe(subscription)
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.get("/api/chat/sessions")
-def chat_sessions(request: Request, user_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id)
-        if not service.current_session_id:
-            service.set_request_context(authorized_user_id, create_if_missing=True)
-        return _decorate_response_artifacts(service, authorized_user_id, {
-            "sessions": service.list_sessions(),
-            "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
-        })
-
-    return guard(run)
-
-
-@app.post("/api/chat/sessions")
-def create_chat_session(body: ChatSessionIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id))
-        session_id = service.create_new_session(body.title or None)
-        return {
-            "session_id": session_id,
-            "sessions": service.list_sessions(),
-            "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
-        }
-
-    return guard(run)
-
-
-@app.post("/api/chat/sessions/switch")
-def switch_chat_session(body: ChatSessionIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
-        service.switch_session(body.session_id)
-        return {
-            "sessions": service.list_sessions(),
-            "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
-        }
-
-    return guard(run)
-
-
-@app.post("/api/chat/sessions/rename")
-def rename_chat_session(body: ChatSessionIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
-        service.rename_session(body.session_id, body.title)
-        return {"sessions": service.list_sessions(), "current_session_id": service.current_session_id}
-
-    return guard(run)
-
-
-@app.post("/api/chat/sessions/delete")
-def delete_chat_session(body: ChatSessionIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        _compat_usage_store().record_effective_request(source="POST /api/chat/ask", actor_type=_compat_actor_type(request))
-        service = _scoped_workspace_service(user_id, body.session_id)
-        cancelled_download_jobs = commercial_service.cancel_session_jobs(user_id, body.session_id, reason="Session deleted.")
-        current = service.delete_session(body.session_id)
-        hard_deleted_downloads = commercial_service.hard_delete_session_jobs(user_id, body.session_id)
-        return {
-            "current_session_id": current,
-            "sessions": service.list_sessions(),
-            "messages": service.current_messages(),
-            "cancelled_download_jobs": cancelled_download_jobs,
-            "hard_deleted_downloads": hard_deleted_downloads,
-        }
-
-    return guard(run)
-
-
-@app.post("/api/chat/sessions/mode")
-def set_chat_interaction_mode(body: ChatSessionIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
-        mode = service.set_interaction_mode(body.interaction_mode or "chat_only", body.session_id or service.current_session_id)
-        return {
-            "interaction_mode": mode,
-            "sessions": service.list_sessions(),
-            "current_session_id": service.current_session_id,
-            "messages": service.current_messages(),
-        }
-
-    return guard(run)
-
-
-@app.post("/api/chat/sessions/clear")
-def clear_chat_session(body: ChatSessionIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
-        service.clear_current_chat()
-        return {
-            "current_session_id": service.current_session_id,
-            "sessions": service.list_sessions(),
-            "messages": service.current_messages(),
-        }
-
-    return guard(run)
-
-
-@app.post("/api/chat/retry")
-def retry_chat_message(body: ChatRetryIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
-        result = service.edit_user_message_and_retry(body.message_id, body.content)
-        return {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id}
-
-    return guard(run)
-
-
-@app.get("/api/chat/models")
-def chat_models(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, user_id), session_id)
-        return service.chat_model_state(session_id or service.current_session_id)
-
-    return guard(run)
-
-
-@app.post("/api/chat/models/select")
-def select_chat_model(body: ChatModelIn, request: Request):
-    def run():
-        service = _scoped_workspace_service(_require_request_user_if_present(request, body.user_id), body.session_id)
-        return service.select_chat_model(body.model, body.session_id or service.current_session_id)
-
-    return guard(run)
-
-
-@app.post("/api/chat/cancel")
-def cancel_chat(body: ChatCancelIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        result = cancel_chat_task(body.task_id, user_id=user_id, reason=body.reason)
-        cancelled_durable_jobs: list[str] = []
-        for service in list(_workspace_services.values()):
-            try:
-                store = DurableJobStore(service.manager.workdir / "durable_jobs.db")
-                jobs = store.list_jobs(user_id=user_id, statuses=["queued", "running"], job_type="validated_task_plan", limit=100)
-                for job in jobs:
-                    payload = job.get("payload") if isinstance(job.get("payload"), dict) else {}
-                    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-                    if str(context.get("chat_task_id") or "") == body.task_id:
-                        store.cancel_job(str(job.get("job_id") or ""), user_id=user_id, reason=body.reason or "用户取消任务。")
-                        cancelled_durable_jobs.append(str(job.get("job_id") or ""))
-            except Exception:
-                continue
-        return {**result, "cancelled_durable_jobs": cancelled_durable_jobs}
-
-    return guard(run)
-
-
 def _extract_region_from_prompt(prompt: str) -> str:
     semantic = parse_user_semantics(prompt)
     semantic_region = str(semantic.get("region") or semantic.get("region_raw") or "").strip()
@@ -1644,40 +1056,21 @@ def _extract_region_from_prompt(prompt: str) -> str:
 
 
 def _extract_gscloud_dem_dataset_id_from_prompt(prompt: str) -> str:
-    semantic = parse_user_semantics(prompt)
-    dataset_id = str(semantic.get("dataset_id") or "").strip()
-    if dataset_id:
-        return dataset_id
-
-    text = str(prompt or "")
-    compact = re.sub(r"\s+", "", text).lower()
-    if "srtm" in compact or "90m" in compact or "90米" in compact:
-        return "306"
-    if "gdemv2" in compact or "gdem2" in compact:
-        return "421"
-    return "310"
+    return _service_extract_gscloud_dem_dataset_id_from_prompt(prompt)
 
 
 
 
 def _extract_year_from_prompt(prompt: str) -> str:
-    m = re.search(r"(20\d{2}|19\d{2})\s*年?", prompt or "")
-    return m.group(1) if m else ""
+    return _service_extract_year_from_prompt(prompt)
 
 
 def _extract_cloud_max_from_prompt(prompt: str, default: float = 30.0) -> float:
-    text = prompt or ""
-    m = re.search(r"云量(?:小于|低于|不超过|<=|≤|<)?\s*(\d+(?:\.\d+)?)", text)
-    if m:
-        return float(m.group(1))
-    return default
+    return _service_extract_cloud_max_from_prompt(prompt, default=default)
 
 
 def _extract_max_scenes_from_prompt(prompt: str, default: int = 1) -> int:
-    m = re.search(r"(?:下载|选择|获取)\s*(\d+)\s*(?:景|幅|个)", prompt or "")
-    if m:
-        return max(1, min(10, int(m.group(1))))
-    return default
+    return _service_extract_max_scenes_from_prompt(prompt, default=default)
 
 
 
@@ -1697,12 +1090,7 @@ def _extract_max_scenes_from_prompt(prompt: str, default: int = 1) -> int:
 
 
 def _sentinel2_processing_level_from_prompt(prompt: str) -> str:
-    upper = str(prompt or "").upper().replace(" ", "")
-    if "L2A" in upper or "MSIL2A" in upper:
-        return "MSIL2A"
-    if "L1C" in upper or "MSIL1C" in upper:
-        return "MSIL1C"
-    return ""
+    return _service_sentinel2_processing_level_from_prompt(prompt)
 
 
 
@@ -1720,158 +1108,7 @@ def _sentinel2_processing_level_from_prompt(prompt: str) -> str:
 
 
 def _maybe_start_gscloud_auto_download(job: dict, region: str = "") -> dict:
-    """Start the background GSCloud worker when a valid login state exists."""
-    source_key = str(job.get("source_key") or "").lower()
-    resource_type = str(job.get("resource_type") or "").lower()
-    if source_key != "gscloud":
-        return {"auto_supported": False, "auto_started": False, "reason": "not_gscloud"}
-
-    job_id = str(job.get("job_id") or "")
-    state_path = ""
-    try:
-        state_path = commercial_service.resolve_job_storage_state_path(job_id)
-    except Exception:
-        state_path = ""
-    if not state_path or not Path(state_path).exists():
-        if hasattr(commercial_service, "_release_platform_reservation"):
-            commercial_service._release_platform_reservation(job_id, "release_waiting_login_platform_download")
-        commercial_service._update_job(job_id, status="waiting_login", progress=5, stage="needs_gscloud_login_state")
-        return {"auto_supported": True, "auto_started": False, "reason": "waiting_login"}
-
-    actual_region = region or str(job.get("region") or "") or "当前研究区"
-    request_text = str(job.get("request_text") or "")
-    year = _extract_year_from_prompt(request_text) or str(job.get("start_date") or "")[:4]
-
-    if resource_type == MODL1D_CHINA_1KM_LST_DAILY.resource_type:
-        if start_gscloud_modl1d_process is None:
-            return {"auto_supported": True, "auto_started": False, "reason": "modl1d_worker_unavailable"}
-        commercial_service._update_job(job_id, status="running", progress=5, stage="starting_modl1d_scene_worker")
-        scene_job = start_gscloud_modl1d_process(
-            workdir=base_settings.workdir,
-            job_id=job_id,
-            region=actual_region,
-            year=year,
-            start_date=str(job.get("start_date") or ""),
-            end_date=str(job.get("end_date") or ""),
-            include_quality=("qc" in request_text.lower() or "质量" in request_text),
-            max_scenes=_extract_max_scenes_from_prompt(request_text, default=1),
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        return {"auto_supported": True, "auto_started": True, "reason": "started", "scene_job": scene_job}
-
-    if resource_type == MODND1D_CHINA_500M_NDVI_DAILY.resource_type:
-        if start_gscloud_modnd1d_process is None:
-            return {"auto_supported": True, "auto_started": False, "reason": "modnd1d_worker_unavailable"}
-        commercial_service._update_job(job_id, status="running", progress=5, stage="starting_modnd1d_scene_worker")
-        scene_job = start_gscloud_modnd1d_process(
-            workdir=base_settings.workdir,
-            job_id=job_id,
-            region=actual_region,
-            year=year,
-            start_date=str(job.get("start_date") or ""),
-            end_date=str(job.get("end_date") or ""),
-            include_qc=("qc" in request_text.lower() or "质量" in request_text),
-            max_scenes=_extract_max_scenes_from_prompt(request_text, default=1),
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        return {"auto_supported": True, "auto_started": True, "reason": "started", "scene_job": scene_job}
-
-    if resource_type == MODEV1F_CHINA_250M_EVI_5DAY.resource_type:
-        if start_gscloud_modev1f_process is None:
-            return {"auto_supported": True, "auto_started": False, "reason": "modev1t_worker_unavailable"}
-        commercial_service._update_job(job_id, status="running", progress=5, stage="starting_modev1t_scene_worker")
-        scene_job = start_gscloud_modev1f_process(
-            workdir=base_settings.workdir,
-            job_id=job_id,
-            region=actual_region,
-            year=year,
-            start_date=str(job.get("start_date") or ""),
-            end_date=str(job.get("end_date") or ""),
-            max_scenes=_extract_max_scenes_from_prompt(request_text, default=1),
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        return {"auto_supported": True, "auto_started": True, "reason": "started", "scene_job": scene_job}
-
-    if resource_type == MOD021KM_1KM_SURFACE_REFLECTANCE.resource_type:
-        if start_gscloud_mod021km_process is None:
-            return {"auto_supported": True, "auto_started": False, "reason": "mod021km_worker_unavailable"}
-        commercial_service._update_job(job_id, status="running", progress=5, stage="starting_mod021km_scene_worker")
-        scene_job = start_gscloud_mod021km_process(
-            workdir=base_settings.workdir,
-            job_id=job_id,
-            region=actual_region,
-            year=year,
-            start_date=str(job.get("start_date") or ""),
-            end_date=str(job.get("end_date") or ""),
-            max_scenes=_extract_max_scenes_from_prompt(request_text, default=1),
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        return {"auto_supported": True, "auto_started": True, "reason": "started", "scene_job": scene_job}
-
-    if resource_type == SENTINEL2_MSI.resource_type:
-        if start_gscloud_sentinel2_process is None:
-            return {"auto_supported": True, "auto_started": False, "reason": "sentinel2_worker_unavailable"}
-        commercial_service._update_job(job_id, status="running", progress=5, stage="starting_sentinel2_scene_worker")
-        scene_job = start_gscloud_sentinel2_process(
-            workdir=base_settings.workdir,
-            job_id=job_id,
-            region=actual_region,
-            year=year,
-            start_date=str(job.get("start_date") or ""),
-            end_date=str(job.get("end_date") or ""),
-            processing_level=_sentinel2_processing_level_from_prompt(request_text),
-            max_scenes=_extract_max_scenes_from_prompt(request_text, default=1),
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        return {"auto_supported": True, "auto_started": True, "reason": "started", "scene_job": scene_job}
-
-    if resource_type == LANDSAT8_OLI_TIRS.resource_type:
-        if start_gscloud_landsat8_process is None:
-            return {"auto_supported": True, "auto_started": False, "reason": "landsat_worker_unavailable"}
-        commercial_service._update_job(job_id, status="running", progress=5, stage="starting_landsat8_scene_worker")
-        scene_job = start_gscloud_landsat8_process(
-            workdir=base_settings.workdir,
-            job_id=job_id,
-            region=actual_region,
-            year=year,
-            start_date=str(job.get("start_date") or ""),
-            end_date=str(job.get("end_date") or ""),
-            cloud_max=_extract_cloud_max_from_prompt(request_text, default=30.0),
-            max_scenes=_extract_max_scenes_from_prompt(request_text, default=1),
-            timeout_seconds=1800,
-            headless=True,
-            auto_load=True,
-        )
-        return {"auto_supported": True, "auto_started": True, "reason": "started", "scene_job": scene_job}
-
-    if resource_type != "dem":
-        return {"auto_supported": False, "auto_started": False, "reason": "unsupported_gscloud_resource_type"}
-    if start_gscloud_tile_process is None:
-        return {"auto_supported": True, "auto_started": False, "reason": "tile_worker_unavailable"}
-
-    commercial_service._update_job(job_id, status="running", progress=5, stage="starting_auto_tile_worker")
-    tile_job = start_gscloud_tile_process(
-        workdir=base_settings.workdir,
-        job_id=job_id,
-        region=actual_region,
-        region_dataset="",
-        dataset_id=_extract_gscloud_dem_dataset_id_from_prompt(request_text),
-        max_tiles=0,
-        timeout_seconds=1800,
-        headless=True,
-        auto_load=True,
-    )
-    return {"auto_supported": True, "auto_started": True, "reason": "started", "auto_tile_job": tile_job}
+    return _gscloud_auto_start_service().maybe_start(job, region=region)
 
 
 def _is_commercial_download_status_prompt(prompt: str) -> bool:
@@ -1969,43 +1206,6 @@ def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
     }
 
 
-def _format_download_job_log_text(job: dict, scene_jobs: list[dict], tile_jobs: list[dict], audit_events: list[dict]) -> str:
-    lines = [
-        f"Download job log: {job.get('job_id')}",
-        f"status: {job.get('status')}",
-        f"stage: {job.get('stage')}",
-        f"progress: {job.get('progress')}%",
-        f"source_key: {job.get('source_key')}",
-        f"resource_type: {job.get('resource_type')}",
-        f"region: {job.get('region')}",
-        f"output_path: {job.get('output_path') or ''}",
-        f"zip_path: {job.get('zip_path') or ''}",
-        f"error_message: {job.get('error_message') or ''}",
-        "",
-        "Scene jobs:",
-    ]
-    if scene_jobs:
-        for item in scene_jobs:
-            lines.append(f"- {item.get('scene_job_id') or ''} state={item.get('state') or ''} message={item.get('message') or ''}")
-    else:
-        lines.append("- none")
-    lines.append("")
-    lines.append("Tile jobs:")
-    if tile_jobs:
-        for item in tile_jobs:
-            lines.append(f"- {item.get('tile_job_id') or ''} state={item.get('state') or ''} message={item.get('message') or ''}")
-    else:
-        lines.append("- none")
-    lines.append("")
-    lines.append("Recent audit events:")
-    if audit_events:
-        for item in audit_events:
-            lines.append(f"- {item.get('created_at') or ''} {item.get('action') or ''} {item.get('status') or ''} {item.get('resource_id') or ''}")
-    else:
-        lines.append("- none")
-    return "\n".join(lines) + "\n"
-
-
 def _download_requires_login_result(prompt: str) -> dict:
     return _api_download_requires_login_result(prompt)
 
@@ -2022,1167 +1222,9 @@ def _download_requires_login_result(prompt: str) -> dict:
 
 
 
-@app.post("/api/chat/ask")
-def ask(body: AskIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        service = _scoped_workspace_service(user_id, body.session_id)
-        task_id = str(body.task_id or "").strip()
-        if task_id:
-            start_chat_task(task_id, user_id=user_id, session_id=body.session_id)
-        def finalize(response: dict) -> dict:
-            if task_id:
-                finish_chat_task(task_id)
-            return _attach_result_panel(service, user_id, response)
-        service.apply_frontend_context(body.frontend_context)
-        if _is_commercial_download_status_prompt(body.prompt):
-            if not user_id:
-                return finalize(build_chat_response(service, user_prompt=body.prompt, result=_download_requires_login_result(body.prompt)))
-            result = _format_commercial_download_status(body.prompt, user_id)
-            result = _attach_download_tool_result(result)
-            if result.get("presentation_reply"):
-                result["reply"] = str(result["presentation_reply"])
-            return finalize(
-                build_chat_response(
-                    service,
-                    user_prompt=body.prompt,
-                    result=result,
-                    meta_keys=(
-                        "model",
-                        "reason",
-                        "normalized_results",
-                        "presentation_result",
-                        "execution_summary",
-                        "result_rendering_path",
-                        "presentation_source",
-                        "tool_result",
-                        "job",
-                        "tile_job",
-                        "scene_job",
-                    ),
-                )
-            )
-        return finalize(
-            attach_chat_state(
-                service,
-                service.ask(
-                    body.prompt,
-                    visible_prompt=body.prompt,
-                    frontend_context=body.frontend_context,
-                    extra_assistant_meta={"active_task_id": task_id} if task_id else None,
-                ),
-            )
-        )
-
-    return guard(run)
-
-
-@app.post("/api/chat/stream")
-def stream_chat(body: AskIn, request: Request):
-    authorized_user_id = _require_request_user_if_present(request, body.user_id)
-    service = _scoped_workspace_service(authorized_user_id, body.session_id)
-    session_id = body.session_id or service.current_session_id
-    task_id = str(body.task_id or "").strip() or f"chat_{uuid4().hex[:12]}"
-    completed = Event()
-    outcome: dict[str, Any] = {}
-    emitted_deltas: list[str] = []
-
-    def on_delta(delta: str) -> None:
-        emitted_deltas.append(delta)
-        GLOBAL_REALTIME_EVENT_HUB.publish_model_token(
-            user_id=authorized_user_id,
-            session_id=session_id,
-            task_id=task_id,
-            delta=delta,
-        )
-
-    def run_chat() -> None:
-        start_chat_task(task_id, user_id=authorized_user_id, session_id=session_id)
-        event_store = _task_event_store_for_service(service)
-        event_store.append(
-            user_id=authorized_user_id,
-            session_id=session_id,
-            task_id=task_id,
-            kind="task_status",
-            status="planning",
-            message="正在理解请求并准备回答或任务计划。",
-        )
-        try:
-            service.apply_frontend_context(body.frontend_context)
-            result = attach_chat_state(
-                service,
-                service.ask(
-                    body.prompt,
-                    visible_prompt=body.prompt,
-                    frontend_context=body.frontend_context,
-                    extra_assistant_meta={"active_task_id": task_id},
-                    stream_callback=on_delta,
-                ),
-            )
-            result = _attach_result_panel(service, authorized_user_id, result)
-            outcome["result"] = result
-            presentation = result.get("presentation_result") if isinstance(result.get("presentation_result"), dict) else {}
-            task_update = _stream_task_update(result)
-            status = str(
-                presentation.get("status")
-                or task_update.get("status")
-                or ("succeeded" if str(result.get("mode") or "") == "answer_only" else "running")
-            )
-            if status not in {"planning", "awaiting_confirmation", "queued", "running", "waiting_login", "paused", "succeeded", "failed", "cancelled"}:
-                status = "running"
-            GLOBAL_REALTIME_EVENT_HUB.publish(
-                user_id=authorized_user_id,
-                session_id=session_id,
-                kind="model_complete",
-                task_id=task_id,
-                status=status,
-                message="回答已生成。" if str(result.get("mode") or "") == "answer_only" else str(result.get("reply") or "任务状态已更新。")[:1200],
-                delta="" if emitted_deltas else str(result.get("reply") or "")[:2000],
-                management_view=task_update.get("management_view") if isinstance(task_update.get("management_view"), dict) else {},
-                presentation_result=presentation,
-                task_update=task_update,
-            )
-        except Exception:
-            GLOBAL_REALTIME_EVENT_HUB.publish(
-                user_id=authorized_user_id,
-                session_id=session_id,
-                kind="error",
-                task_id=task_id,
-                status="failed",
-                message="请求未能完成，未执行未验证的工具。请稍后重试。",
-            )
-        finally:
-            finish_chat_task(task_id)
-            completed.set()
-
-    def event_stream():
-        channel = GLOBAL_REALTIME_EVENT_HUB.subscribe(user_id=authorized_user_id, session_id=session_id)
-        worker = Thread(target=run_chat, name=f"chat-stream-{task_id}", daemon=True)
-        worker.start()
-        try:
-            while not completed.is_set() or not channel.empty():
-                try:
-                    event = channel.get(timeout=0.75)
-                    if str(event.get("task_id") or "") == task_id:
-                        yield _sse_event(event)
-                except Empty:
-                    yield ": keepalive\n\n"
-        finally:
-            GLOBAL_REALTIME_EVENT_HUB.unsubscribe(channel)
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.post("/api/chat/confirm")
-def confirm_chat_action(body: ChatConfirmIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        service = _scoped_workspace_service(user_id, body.session_id)
-        task_id = str(body.task_id or "").strip()
-        if task_id:
-            start_chat_task(task_id, user_id=user_id, session_id=body.session_id)
-
-        def finalize(response: dict) -> dict:
-            if task_id:
-                finish_chat_task(task_id)
-            return _attach_result_panel(service, user_id, response)
-
-        service.apply_frontend_context(body.frontend_context)
-        token = str(body.confirmation_id or "").strip()
-        prompt = f"{str(body.confirmation_prompt or '确认执行').strip()} confirmed_action_id={token}".strip()
-        return finalize(
-            attach_chat_state(
-                service,
-                service.ask(
-                    prompt,
-                    frontend_context=body.frontend_context,
-                    record_user_message=False,
-                    extra_assistant_meta={
-                        "active_task_id": task_id,
-                        "confirmed_pending_confirmation_id": token,
-                        "confirmation_submission": "structured",
-                    }
-                    if task_id
-                    else {
-                        "confirmed_pending_confirmation_id": token,
-                        "confirmation_submission": "structured",
-                    },
-                ),
-            )
-        )
-
-    return guard(run)
-
-
-@app.post("/api/files/upload")
-async def upload_files(request: Request, user_id: str = Form(default=""), session_id: str = Form(default=""), files: list[UploadFile] = File(...)):
-    authorized_user_id = _require_request_user_if_present(request, user_id)
-    service = _scoped_workspace_service(authorized_user_id, session_id)
-
-    async def save_streamed_uploads() -> list[tuple[Path, str]]:
-        if len(files) > MAX_UPLOAD_FILES:
-            raise ValueError(f"单次最多上传 {MAX_UPLOAD_FILES} 个文件。")
-        saved: list[tuple[Path, str]] = []
-        total_size = 0
-        chunk_size = 1024 * 1024
-        try:
-            for file in files:
-                original = file.filename or "uploaded.bin"
-                target = service.manager.upload_dir / service.manager._unique_storage_name(original)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                file_size = 0
-                with target.open("wb") as out:
-                    while True:
-                        chunk = await file.read(chunk_size)
-                        if not chunk:
-                            break
-                        file_size += len(chunk)
-                        total_size += len(chunk)
-                        if total_size > MAX_UPLOAD_BYTES:
-                            raise ValueError(f"单次上传总大小不能超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB。")
-                        out.write(chunk)
-                if file_size:
-                    saved.append((target, original))
-                else:
-                    target.unlink(missing_ok=True)
-            return saved
-        except Exception:
-            for path, _ in saved:
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            try:
-                if "target" in locals():
-                    target.unlink(missing_ok=True)
-            except Exception:
-                pass
-            raise
-
-    async def run_async():
-        payload = await save_streamed_uploads()
-        if not payload:
-            raise HTTPException(status_code=400, detail="没有读取到有效上传文件。")
-        try:
-            messages = service.upload_saved_files_batch(payload)
-        except Exception:
-            for path, _ in payload:
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            raise
-        result = {"ok": True, "count": len(payload), "messages": messages}
-        dashboard_data = _decorate_dashboard(service, user_id=authorized_user_id)
-        outcome = build_task_outcome("upload", result, dashboard=dashboard_data)
-        return {**result, "dashboard": dashboard_data, "task_outcome": outcome, "outcome_markdown": format_task_outcome_markdown(outcome)}
-
-    try:
-        return await run_async()
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/api/local-library")
-def list_local_library(
-    query: str = Query(default=""),
-    category: str = Query(default=""),
-    data_type: str = Query(default=""),
-    include_disabled: bool = Query(default=False),
-    include_source_docs: bool = Query(default=False),
-):
-    return guard(lambda: local_library.list_items(query=query, category=category, data_type=data_type, include_disabled=include_disabled, include_source_docs=include_source_docs))
-
-
-@app.post("/api/local-library/rescan")
-def rescan_local_library():
-    return guard(lambda: local_library.rescan())
-
-
-@app.post("/api/local-library/import")
-def import_local_library(body: LocalLibraryImportIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        if not body.item_ids:
-            raise ValueError("请选择至少一个本地文件库条目。")
-        service = _scoped_workspace_service(user_id)
-        messages: list[str] = []
-        for item in local_library.resolve_paths(body.item_ids):
-            messages.append(service.import_local_library_item(item))
-        result = {"ok": True, "count": len(messages), "messages": messages}
-        dashboard_data = _decorate_dashboard(service, user_id=user_id)
-        outcome = build_task_outcome("upload", result, dashboard=dashboard_data)
-        return {**result, "dashboard": dashboard_data, "task_outcome": outcome, "outcome_markdown": format_task_outcome_markdown(outcome)}
-
-    return guard(run)
-
-
-@app.get("/api/admin/capabilities/{resource_type}")
-def list_capability_resources(resource_type: Literal["knowledge", "tool_cards", "products", "assets"], request: Request, include_disabled: bool = False):
-    def run():
-        _require_capability_admin(request)
-        return {
-            "schema_version": "capability-management-view/v1",
-            "registry_version": CAPABILITY_CONFIG_VERSION,
-            "resource_type": resource_type,
-            "items": _capability_store().list_resources(resource_type, include_disabled=include_disabled),
-        }
-    return guard(run)
-
-
-@app.post("/api/admin/capabilities/knowledge")
-def upsert_capability_knowledge(body: dict[str, Any], request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().upsert_knowledge(body), "registry_version": CAPABILITY_CONFIG_VERSION}
-    return guard(run)
-
-
-@app.post("/api/admin/capabilities/knowledge/upload")
-async def upload_capability_knowledge(
-    request: Request,
-    file: UploadFile = File(...),
-    knowledge_id: str = Form(""),
-    title: str = Form(""),
-    source: str = Form("admin_upload"),
-    language: str = Form("zh-CN"),
-    tags: str = Form(""),
-    applicable_scope: str = Form(""),
-    reliability: str = Form("medium"),
-    version: str = Form("v1"),
-    status: str = Form("draft"),
-):
-    try:
-        _require_capability_admin(request)
-        content, filename = await _extract_capability_document_text(file)
-        safe_id = knowledge_id.strip() or re.sub(r"[^A-Za-z0-9_.:-]+", "_", Path(filename).stem).strip("._:-") or "knowledge_doc"
-        payload = {
-            "knowledge_id": safe_id,
-            "title": title.strip() or Path(filename).stem,
-            "source": source,
-            "language": language,
-            "tags": [item.strip() for item in tags.split(",") if item.strip()],
-            "applicable_scope": applicable_scope.strip() or "general",
-            "reliability": reliability,
-            "version": version,
-            "status": status,
-            "content": content,
-            "original_filename": filename,
-        }
-        return {"ok": True, "item": _capability_store().upsert_knowledge(payload), "registry_version": CAPABILITY_CONFIG_VERSION}
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-@app.post("/api/admin/capabilities/tool-cards")
-def upsert_capability_tool_card(body: dict[str, Any], request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().upsert_tool_card(body), "registry_version": CAPABILITY_CONFIG_VERSION}
-    return guard(run)
-
-
-@app.post("/api/admin/capabilities/products")
-def upsert_capability_product(body: dict[str, Any], request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().upsert_product(body), "registry_version": CAPABILITY_CONFIG_VERSION}
-    return guard(run)
-
-
-@app.post("/api/admin/capabilities/assets")
-def upsert_capability_asset(body: dict[str, Any], request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().upsert_asset(body), "registry_version": CAPABILITY_CONFIG_VERSION}
-    return guard(run)
-
-
-class CapabilityStatusIn(BaseModel):
-    status: str = "pending_review"
-    actor: str = ""
-    summary: str = ""
-
-
-@app.post("/api/admin/capabilities/{resource_type}/{item_id}/status")
-def update_capability_status(resource_type: Literal["knowledge", "tool_cards", "products", "assets"], item_id: str, body: CapabilityStatusIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().set_status(resource_type, item_id, body.status, actor=body.actor, summary=body.summary), "registry_version": CAPABILITY_CONFIG_VERSION}
-    return guard(run)
-
-
-class CapabilityRollbackIn(BaseModel):
-    version: str
-    actor: str = ""
-    summary: str = ""
-
-
-@app.post("/api/admin/capabilities/{resource_type}/{item_id}/rollback")
-def rollback_capability_resource(resource_type: Literal["knowledge", "tool_cards", "products", "assets"], item_id: str, body: CapabilityRollbackIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {"ok": True, "item": _capability_store().rollback(resource_type, item_id, body.version, actor=body.actor, summary=body.summary), "registry_version": CAPABILITY_CONFIG_VERSION}
-    return guard(run)
-
-
-@app.get("/api/admin/capabilities/audit/events")
-def list_capability_audit_events(request: Request, limit: int = 100):
-    def run():
-        _require_capability_admin(request)
-        return {
-            "schema_version": "capability-audit-view/v1",
-            "events": _capability_store().list_audit_events(limit=limit),
-        }
-    return guard(run)
-
-
-@app.get("/api/admin/dataset-availability")
-def list_dataset_availability_profiles(request: Request, include_inactive: bool = False):
-    def run():
-        _require_capability_admin(request)
-        return {
-            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
-            "items": _dataset_availability_store().list_profiles(include_inactive=include_inactive),
-        }
-    return guard(run)
-
-
-@app.post("/api/admin/dataset-availability")
-def upsert_dataset_availability_profile(body: dict[str, Any], request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {
-            "ok": True,
-            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
-            "item": _dataset_availability_store().upsert_profile(body),
-        }
-    return guard(run)
-
-
-@app.post("/api/admin/dataset-availability/{product_id}/status")
-def update_dataset_availability_status(product_id: str, body: CapabilityStatusIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        return {
-            "ok": True,
-            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
-            "item": _dataset_availability_store().set_status(product_id, body.status, actor=body.actor, summary=body.summary),
-        }
-    return guard(run)
-
-
-class DatasetAvailabilityScanIn(BaseModel):
-    scan_method: str = "catalog_metadata"
-    actor: str = ""
-    summary: str = ""
-
-
-@app.post("/api/admin/dataset-availability/{product_id}/scan")
-def scan_dataset_availability_profile(product_id: str, body: DatasetAvailabilityScanIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        draft = scan_dataset_availability(product_id, scan_method=body.scan_method, actor=body.actor, summary=body.summary)
-        return {
-            "ok": True,
-            "schema_version": DATASET_AVAILABILITY_SCHEMA_VERSION,
-            "item": _dataset_availability_store().upsert_profile(draft),
-        }
-    return guard(run)
-
-
-@app.get("/api/admin/compat-usage/report")
-def compatibility_usage_report(request: Request):
-    def run():
-        _require_capability_admin(request)
-        return _compat_usage_store().report(exclude_actor_types={"automated_test"})
-    return guard(run)
-
-
-@app.get("/api/admin/trial-monitoring/report")
-def trial_monitoring_report(request: Request):
-    def run():
-        _require_capability_admin(request)
-        return _trial_monitoring_store().report(exclude_actor_types={"automated_test"})
-    return guard(run)
-
-
-class AdminSystemResetIn(BaseModel):
-    mode: Literal["keep_accounts", "full_reset"]
-    confirm_text: str = ""
-
-
-@app.post("/api/admin/system-reset")
-def admin_system_reset(body: AdminSystemResetIn, request: Request):
-    def run():
-        global commercial_service
-        _require_capability_admin(request)
-        _workspace_services.clear()
-        result = reset_system_workspace(
-            workdir=base_settings.workdir,
-            commercial_service=commercial_service,
-            mode=body.mode,
-            confirm_text=body.confirm_text,
-        )
-        commercial_service = result.pop("commercial_service")
-        base_settings.ensure_dirs()
-        return result
-    return guard(run)
-
-
-class AdminStorageCleanupIn(BaseModel):
-    candidate_ids: list[str] = []
-    confirm_text: str = ""
-
-
-class AdminPlatformAccountIn(BaseModel):
-    source_key: str = "gscloud"
-    username: str = ""
-    password: str = ""
-    label: str = ""
-    daily_limit: int = 50
-    monthly_limit: int = 1000
-
-
-class AdminPlatformLoginIn(BaseModel):
-    timeout_seconds: int = 300
-    headless: bool = False
-
-
-class AdminPlatformStatusIn(BaseModel):
-    status: Literal["active", "disabled"] = "disabled"
-
-
-def _admin_platform_account_with_health(account: dict[str, Any]) -> dict[str, Any]:
-    account_id = str((account or {}).get("account_id") or "")
-    private: dict[str, Any] = {}
-    try:
-        private = commercial_service.get_platform_account_private(account_id)
-    except Exception:
-        private = {}
-    public = commercial_service._platform_public(private) if private else dict(account or {})
-    health = inspect_storage_state(str(private.get("storage_state_path") or ""))
-    public["login_health"] = health
-    public["has_storage_state"] = bool(private.get("storage_state_path"))
-    public.pop("storage_state_path", None)
-    return public
-
-
-@app.get("/api/admin/platform-accounts")
-def list_admin_platform_accounts(request: Request, source_key: str = Query(default="gscloud"), include_inactive: bool = Query(default=True)):
-    def run():
-        _require_capability_admin(request)
-        accounts = commercial_service.list_platform_accounts(source_key=source_key, include_inactive=include_inactive)
-        return {
-            "schema_version": "platform-account-management/v1",
-            "accounts": [_admin_platform_account_with_health(item) for item in accounts],
-        }
-    return guard(run)
-
-
-@app.post("/api/admin/platform-accounts")
-def upsert_admin_platform_account(body: AdminPlatformAccountIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        account = commercial_service.upsert_platform_account(
-            source_key=body.source_key,
-            username=body.username,
-            password=body.password,
-            label=body.label,
-            daily_limit=body.daily_limit,
-            monthly_limit=body.monthly_limit,
-        )
-        commercial_service.write_audit_event(
-            action="admin.platform_account.upsert",
-            status="ok",
-            resource_type="platform_account",
-            resource_id=str(account.get("account_id") or ""),
-            detail={"source_key": body.source_key, "label": body.label or body.source_key},
-        )
-        return {"ok": True, "account": _admin_platform_account_with_health(account)}
-    return guard(run)
-
-
-@app.post("/api/admin/platform-accounts/{account_id}/login")
-def start_admin_platform_login(account_id: str, body: AdminPlatformLoginIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        account = commercial_service.get_platform_account_private(account_id)
-        source_key = str(account.get("source_key") or "gscloud").strip().lower()
-        if source_key != "gscloud":
-            raise ValueError("当前登录窗口只支持 GSCloud 平台账号。")
-        state_path = gscloud_platform_state_path(base_settings.workdir, account_id, source_key)
-        login_job = start_gscloud_login_process(
-            workdir=base_settings.workdir,
-            subject_type="platform_account",
-            subject_id=account_id,
-            state_path=state_path,
-            timeout_seconds=body.timeout_seconds,
-            headless=body.headless,
-        )
-        commercial_service.write_audit_event(
-            action="admin.platform_account.login_started",
-            status="ok",
-            resource_type="platform_account",
-            resource_id=account_id,
-            detail={"source_key": source_key, "login_job_id": login_job.get("login_job_id")},
-        )
-        safe_job = {
-            "login_job_id": login_job.get("login_job_id"),
-            "state": login_job.get("state"),
-            "message": login_job.get("message"),
-            "timeout_seconds": login_job.get("timeout_seconds"),
-            "created_at": login_job.get("created_at"),
-            "updated_at": login_job.get("updated_at"),
-        }
-        return {"ok": True, "login_job": safe_job, "account": _admin_platform_account_with_health(commercial_service.get_platform_account_private(account_id))}
-    return guard(run)
-
-
-@app.get("/api/admin/platform-accounts/{account_id}/health")
-def check_admin_platform_login_health(account_id: str, request: Request):
-    def run():
-        _require_capability_admin(request)
-        account = commercial_service.get_platform_account_private(account_id)
-        health = inspect_storage_state(str(account.get("storage_state_path") or ""))
-        commercial_service.write_audit_event(
-            action="admin.platform_account.login_health",
-            status="ok" if health.get("ok") else "warning",
-            resource_type="platform_account",
-            resource_id=account_id,
-            detail={"source_key": account.get("source_key"), "ok": bool(health.get("ok")), "reason": health.get("reason")},
-        )
-        return {"ok": True, "account_id": account_id, "login_health": health}
-    return guard(run)
-
-
-@app.post("/api/admin/platform-accounts/{account_id}/status")
-def update_admin_platform_account_status(account_id: str, body: AdminPlatformStatusIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        account = commercial_service.set_platform_account_status(account_id, body.status)
-        commercial_service.write_audit_event(
-            action="admin.platform_account.status",
-            status="ok",
-            resource_type="platform_account",
-            resource_id=account_id,
-            detail={"status": body.status, "source_key": account.get("source_key")},
-        )
-        return {"ok": True, "account": _admin_platform_account_with_health(account)}
-    return guard(run)
-
-
-@app.get("/api/admin/storage-cleanup/scan")
-def admin_storage_cleanup_scan(request: Request):
-    def run():
-        _require_capability_admin(request)
-        return scan_storage_cleanup_candidates(base_settings.workdir)
-    return guard(run)
-
-
-@app.post("/api/admin/storage-cleanup/delete")
-def admin_storage_cleanup_delete(body: AdminStorageCleanupIn, request: Request):
-    def run():
-        _require_capability_admin(request)
-        return cleanup_storage_candidates(base_settings.workdir, candidate_ids=body.candidate_ids, confirm_text=body.confirm_text)
-    return guard(run)
-
-
-@app.get("/api/admin/capabilities/knowledge/search/test")
-def test_capability_knowledge_search(request: Request, query: str, limit: int = 5, language: str = "", scope: str = ""):
-    def run():
-        _require_capability_admin(request)
-        return {
-            "schema_version": "knowledge-retrieval-test/v1",
-            "registry_version": CAPABILITY_CONFIG_VERSION,
-            "query": query,
-            "items": _capability_store().retrieve_knowledge(query, limit=limit, language=language, scope=scope),
-        }
-    return guard(run)
-
-
-@app.get("/api/workspace/dashboard")
-def dashboard(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        data = _decorate_dashboard(_scoped_workspace_service(authorized_user_id, session_id), user_id=authorized_user_id)
-        data["local_library"] = local_library.list_items()
-        return data
-
-    return guard(run)
-
-
-@app.get("/api/workspace/mentions")
-def workspace_mentions(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id, session_id)
-        return _build_workspace_mentions(service.manager.list_datasets())
-
-    return guard(run)
-
-
-@app.post("/api/workspace/export")
-def export_workspace(body: ExportIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        service = _scoped_workspace_service(user_id, body.session_id)
-        result = service.export_results(mode=body.mode)
-        result["download_url"] = artifact_download_url(str(result.get("artifact_id") or ""), user_id=user_id, session_id=service.current_session_id)
-        _audit(request, user_id=user_id, action="workspace.export", resource_type="artifact", resource_id=str(result.get("zip_path") or ""), detail={"mode": body.mode, "file_count": result.get("file_count")})
-        return result
-
-    return guard(run)
-
-
-@app.post("/api/workspace/artifacts/delete")
-def delete_workspace_artifact(body: ArtifactDeleteIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        service = _scoped_workspace_service(user_id, body.session_id)
-        result = service.manager.delete_result_file(artifact_id=body.artifact_id, path=body.path)
-        result["dashboard"] = _decorate_dashboard(service, user_id=user_id)
-        _audit(
-            request,
-            user_id=user_id,
-            action="artifact.delete",
-            resource_type="artifact",
-            resource_id=body.artifact_id or body.path,
-            detail={k: result.get(k) for k in ("path", "deleted_files", "deleted_artifacts", "deleted_datasets")},
-        )
-        return result
-
-    return guard(run)
-
-
 def _public_artifact_or_error(service: GISWorkspaceService, artifact_id: str, user_id: str = "", session_id: str = "") -> dict:
     artifact = service.manager.assert_artifact_access(user_id, session_id or service.current_session_id, artifact_id)
     return public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=user_id, session_id=session_id)
-
-
-@app.get("/api/artifacts/{artifact_id}")
-def artifact_metadata(artifact_id: str, request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id, session_id)
-        return _public_artifact_or_error(service, artifact_id, user_id=authorized_user_id, session_id=session_id)
-
-    return guard(run)
-
-
-@app.delete("/api/artifacts/{artifact_id}")
-def delete_artifact(artifact_id: str, request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), delete_file: bool = Query(default=True)):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id, session_id)
-        service.manager.assert_artifact_access(authorized_user_id, session_id or service.current_session_id, artifact_id)
-        result = service.manager.delete_result_file(artifact_id=artifact_id if delete_file else "", path="")
-        status = "deleted" if result.get("deleted_files") or result.get("deleted_artifacts") or result.get("deleted_datasets") else "not_found"
-        _audit(
-            request,
-            user_id=authorized_user_id,
-            action="artifact.delete",
-            resource_type="artifact",
-            resource_id=artifact_id,
-            detail={k: result.get(k) for k in ("deleted_files", "deleted_artifacts", "deleted_datasets")},
-        )
-        return {
-            "ok": status == "deleted",
-            "artifact_id": artifact_id,
-            "status": status,
-            "file_deleted": bool(result.get("deleted_files")),
-            "deleted_files": result.get("deleted_files", []),
-            "deleted_artifacts": result.get("deleted_artifacts", []),
-            "deleted_datasets": result.get("deleted_datasets", []),
-        }
-
-    return guard(run)
-
-
-@app.get("/api/artifacts/{artifact_id}/download")
-def artifact_download(artifact_id: str, request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user_if_present(request, user_id)
-        service = _scoped_workspace_service(authorized_user_id, session_id)
-        artifact = service.manager.assert_artifact_access(authorized_user_id, session_id or service.current_session_id, artifact_id)
-        public = public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=authorized_user_id, session_id=session_id)
-        target = assert_artifact_path_allowed(service.manager.workdir, str(artifact.get("path") or ""))
-        if target.suffix.lower() == ".shp":
-            target = shapefile_zip_path(service.manager.workdir, target, artifact_id)
-        if not target.exists() or not target.is_file():
-            raise FileNotFoundError("文件已清理、无访问权限或下载链接已失效。")
-        if target.stat().st_size <= 0:
-            raise FileNotFoundError("文件已清理、无访问权限或下载链接已失效。")
-        _audit(request, user_id=authorized_user_id, action="artifact.download", resource_type="artifact", resource_id=artifact_id)
-        return FileResponse(
-            str(target),
-            media_type=str(public.get("mime_type") or "application/octet-stream"),
-            filename=safe_download_filename(str(public.get("filename") or target.name)),
-            headers={"Content-Disposition": content_disposition_attachment(str(public.get("filename") or target.name))},
-        )
-
-    return guard(run)
-
-
-@app.get("/api/files/artifact")
-def artifact(request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), path: str = Query(...)):
-    raise HTTPException(
-        status_code=410,
-        detail="Deprecated artifact path downloads are disabled. Use /api/artifacts/{artifact_id}/download.",
-    )
-
-
-@app.post("/api/payments/simulate")
-def simulate_payment(body: PaymentIn, request: Request):
-    def run():
-        user_id = _require_admin_or_mock_payment_user(request, body.user_id)
-        preset = PLAN_PRESETS.get(body.plan, PLAN_PRESETS["pro"])
-        amount = int(preset.get("price_cents", 2000)) if "price_cents" in preset else {"basic": 900, "pro": 2000, "team": 5900}.get(body.plan, 2000)
-        result = commercial_service.simulate_payment(
-            user_id=user_id,
-            plan=body.plan,
-            amount_cents=amount,
-            platform_quota=int(preset.get("platform_monthly_quota", 30)),
-            days=int(preset.get("days", 30)),
-            note="Web 前端模拟支付",
-        )
-        _audit(request, user_id=user_id, action="payment.simulate", resource_type="payment", resource_id=str((result.get("payment") or {}).get("payment_id") or ""), detail={"plan": body.plan})
-        return result
-
-    return guard(run)
-
-
-@app.post("/api/downloads/submit")
-def submit_download(body: DownloadIn, request: Request):
-    def run():
-        user_id = _require_request_user(request, body.user_id)
-        if body.session_id:
-            _scoped_workspace_service(user_id, body.session_id)
-        payload = body.model_dump()
-        payload["user_id"] = user_id
-        job = commercial_service.submit_job(**payload)
-        auto = _maybe_start_gscloud_auto_download(job, region=body.region)
-        _audit(request, user_id=user_id, action="download.submit", resource_type="download_job", resource_id=job["job_id"], detail={"source_key": job.get("source_key"), "resource_type": job.get("resource_type"), "auto_started": auto.get("auto_started")})
-        payload = _attach_download_tool_result({"job": commercial_service.get_job(job["job_id"]), **auto})
-        if body.include_raw:
-            payload["deprecated_raw_job_api"] = True
-            _compat_usage_store().record("deprecated_raw_job_api_used", source="POST /api/downloads/submit", caller=str(request.headers.get("user-agent") or ""), request_id=str(job.get("job_id") or ""), actor_type=_compat_actor_type(request))
-            _compat_usage_store().record("include_raw", source="POST /api/downloads/submit", caller=str(request.headers.get("user-agent") or ""), request_id=str(job.get("job_id") or ""), actor_type=_compat_actor_type(request))
-            return payload
-        return {
-            "ok": payload.get("ok", True),
-            "auto_supported": payload.get("auto_supported"),
-            "auto_started": payload.get("auto_started"),
-            "reason": payload.get("reason"),
-            "management_view": payload.get("management_view"),
-            "presentation_result": payload.get("presentation_result"),
-            "execution_summary": payload.get("execution_summary"),
-            "artifact_refs": (payload.get("management_view") or {}).get("artifact_refs") if isinstance(payload.get("management_view"), dict) else [],
-            "available_actions": (payload.get("management_view") or {}).get("available_actions") if isinstance(payload.get("management_view"), dict) else [],
-            "deprecated_raw_job_api": False,
-        }
-
-    return guard(run)
-
-
-@app.post("/api/downloads/preflight")
-def preflight_download(body: DownloadPreflightIn, request: Request):
-    def run():
-        _require_request_user(request, body.user_id)
-        if str(body.source_key or "").lower() != "gscloud":
-            raise ValueError("当前预检接口仅支持 GSCloud 场景表产品。")
-        product_key = _gscloud_product_key_from_resource(body.product_key or body.resource_type)
-        if product_key not in GSCLOUD_PRODUCTS:
-            raise ValueError(f"不支持预检的 GSCloud 产品: {body.product_key or body.resource_type}")
-        region = resolve_download_region(body.request_text, body.region)
-        if not region.get("ok"):
-            return {
-                "state": "NEEDS_REGION",
-                "ok": False,
-                "product_key": product_key,
-                "region_resolution": region,
-                "message": region["message"],
-            }
-        state_path = _resolve_preflight_storage_state(body)
-        login_health = inspect_storage_state(state_path)
-        if not login_health.get("ok"):
-            return {
-                "state": "NEEDS_LOGIN",
-                "ok": False,
-                "product_key": product_key,
-                "login_health": login_health,
-                "message": "当前 GSCloud 登录态不可用，请先重新登录或更新平台账号 Cookie。",
-            }
-        result = verify_gscloud_scene_download(
-            product_key=product_key,
-            storage_state_path=state_path,
-            download_dir=base_settings.workdir / "gscloud_download_verification",
-            execute_download=False,
-            max_pages=max(1, int(body.max_pages or 1)),
-            timeout_seconds=600,
-            headless=True,
-            options={
-                "region": region["region"],
-                "start_date": body.start_date,
-                "end_date": body.end_date,
-                "cloud_max": body.cloud_max,
-                "processing_level": body.processing_level,
-            },
-        )
-        return {"ok": True, **result, "region_resolution": region}
-
-    return guard(run)
-
-
-@app.get("/api/downloads/login-health")
-def download_login_health(request: Request, user_id: str = Query(...), source_key: str = Query(default="gscloud"), account_mode: str = Query(default="platform")):
-    def run():
-        authorized_user_id = _require_request_user(request, user_id)
-        source = str(source_key or "gscloud").lower()
-        mode = str(account_mode or "platform").lower()
-        if mode == "own":
-            state_path = commercial_service.get_user_storage_state_path(authorized_user_id, source)
-        else:
-            check = commercial_service._select_platform_account(source)
-            if not check.ok or not check.account_id:
-                raise PermissionError(check.reason or "没有可用平台账号。")
-            account = commercial_service.get_platform_account_private(check.account_id)
-            state_path = str(account.get("storage_state_path") or "")
-        health = inspect_storage_state(state_path)
-        _audit(request, user_id=authorized_user_id, action="download.login_health", resource_type="storage_state", detail={"source_key": source, "account_mode": mode, "ok": health.get("ok")})
-        return {"source_key": source, "account_mode": mode, "login_health": health}
-
-    return guard(run)
-
-
-@app.get("/api/downloads/jobs")
-def list_jobs(request: Request, user_id: str = "", session_id: str = "", include_raw: bool = Query(default=False)):
-    def run():
-        authorized_user_id = _require_request_user(request, user_id)
-        if session_id:
-            _scoped_workspace_service(authorized_user_id, session_id)
-        jobs = commercial_service.list_jobs(user_id=authorized_user_id, session_id=session_id)
-        scene_by_job: dict[str, dict] = {}
-        if list_gscloud_scene_jobs is not None:
-            for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100):
-                jid = str(item.get("job_id") or "")
-                if jid and jid not in scene_by_job:
-                    scene_by_job[jid] = item
-        for job in jobs:
-            if isinstance(job, dict):
-                scene = scene_by_job.get(str(job.get("job_id") or ""))
-                if scene:
-                    job["scene_status"] = scene
-                    for key in (
-                        "pages_scanned",
-                        "candidate_count",
-                        "selected_count",
-                        "downloaded_count",
-                        "current_scene",
-                        "scan_stop_reason",
-                        "failure_diagnostic",
-                        "login_health",
-                        "region_resolution",
-                        "artifact_quality",
-                    ):
-                        if scene.get(key) is not None:
-                            job[key] = scene.get(key)
-                for target in (job.get("zip_path"), job.get("output_path")):
-                    url = _relative_shared_download_url(str(target or ""), user_id=authorized_user_id, job_id=str(job.get("job_id") or ""), session_id=str(job.get("session_id") or ""))
-                    if url:
-                        job["download_url"] = url
-                        break
-        for job in jobs:
-            if isinstance(job, dict):
-                job["tool_result"] = _download_tool_result_for_job(job, user_id=authorized_user_id)
-                job["management_view"] = download_job_to_management_view(job, tool_result=job["tool_result"])
-        management_views = [job["management_view"] for job in jobs if isinstance(job, dict) and isinstance(job.get("management_view"), dict)]
-        payload = {
-            "management_views": management_views,
-            "artifact_refs": [
-                artifact
-                for view in management_views
-                for artifact in (view.get("artifact_refs") if isinstance(view.get("artifact_refs"), list) else [])
-                if isinstance(artifact, dict)
-            ],
-            "available_actions": sorted({action for view in management_views for action in (view.get("available_actions") if isinstance(view.get("available_actions"), list) else [])}),
-            "deprecated_raw_job_api": bool(include_raw),
-        }
-        if include_raw:
-            _compat_usage_store().record("deprecated_raw_job_api_used", source="GET /api/downloads/jobs", caller=str(request.headers.get("user-agent") or ""), request_id=authorized_user_id, actor_type=_compat_actor_type(request))
-            _compat_usage_store().record("include_raw", source="GET /api/downloads/jobs", caller=str(request.headers.get("user-agent") or ""), request_id=authorized_user_id, actor_type=_compat_actor_type(request))
-            payload["jobs"] = jobs
-        return payload
-    return guard(run)
-
-
-@app.get("/api/downloads/jobs/log")
-def download_job_log(request: Request, user_id: str = Query(...), job_id: str = Query(...), session_id: str = Query(default=""), include_raw: bool = Query(default=False)):
-    def run():
-        authorized_user_id = _require_request_user(request, user_id)
-        if session_id:
-            _scoped_workspace_service(authorized_user_id, session_id)
-        job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
-        _assert_download_job_session(job, session_id)
-        tile_jobs = []
-        scene_jobs = []
-        if list_gscloud_tile_jobs is not None:
-            tile_jobs = [item for item in list_gscloud_tile_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
-        if list_gscloud_scene_jobs is not None:
-            scene_jobs = [item for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
-        payload = _attach_download_tool_result({
-            "job": job,
-            "scene_jobs": scene_jobs,
-            "tile_jobs": tile_jobs,
-            "audit_events": commercial_service.list_audit_events(user_id=authorized_user_id, limit=20),
-        })
-        if not include_raw:
-            return {
-                "management_view": payload.get("management_view"),
-                "diagnostic_event_views": payload.get("diagnostic_event_views"),
-                "artifact_refs": (payload.get("management_view") or {}).get("artifact_refs") if isinstance(payload.get("management_view"), dict) else [],
-                "available_actions": (payload.get("management_view") or {}).get("available_actions") if isinstance(payload.get("management_view"), dict) else [],
-                "deprecated_raw_job_api": False,
-            }
-        payload["deprecated_raw_job_api"] = True
-        _compat_usage_store().record("deprecated_raw_job_api_used", source="GET /api/downloads/jobs/log", caller=str(request.headers.get("user-agent") or ""), request_id=job_id, actor_type=_compat_actor_type(request))
-        _compat_usage_store().record("include_raw", source="GET /api/downloads/jobs/log", caller=str(request.headers.get("user-agent") or ""), request_id=job_id, actor_type=_compat_actor_type(request))
-        return payload
-
-    return guard(run)
-
-
-@app.get("/api/downloads/jobs/log-download")
-def download_job_log_file(request: Request, user_id: str = Query(...), job_id: str = Query(...), session_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user(request, user_id)
-        if session_id:
-            _scoped_workspace_service(authorized_user_id, session_id)
-        job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
-        _assert_download_job_session(job, session_id)
-        tile_jobs = []
-        scene_jobs = []
-        if list_gscloud_tile_jobs is not None:
-            tile_jobs = [item for item in list_gscloud_tile_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
-        if list_gscloud_scene_jobs is not None:
-            scene_jobs = [item for item in list_gscloud_scene_jobs(commercial_service.workdir, limit=100) if item.get("job_id") == job_id]
-        audit_events = commercial_service.list_audit_events(user_id=authorized_user_id, limit=20)
-        text = _format_download_job_log_text(job, scene_jobs, tile_jobs, audit_events)
-        _audit(request, user_id=authorized_user_id, action="download.log_download", resource_type="download_job", resource_id=job_id)
-        return PlainTextResponse(
-            text,
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": content_disposition_attachment(f"{job_id}_log.txt")},
-        )
-
-    return guard(run)
-
-
-@app.post("/api/downloads/jobs/delete")
-def delete_download_job(body: DownloadDeleteIn, request: Request):
-    def run():
-        user_id = _require_request_user(request, body.user_id)
-        if body.session_id:
-            _scoped_workspace_service(user_id, body.session_id)
-            job = require_resource_owner(commercial_service.get_job(body.job_id), user_id=user_id, resource_name="download job")
-            _assert_download_job_session(job, body.session_id)
-        result = commercial_service.delete_job(body.job_id, user_id=user_id)
-        jobs = commercial_service.list_jobs(user_id=user_id, session_id=body.session_id)
-        management_views = [
-            download_job_to_management_view(job, tool_result=_download_tool_result_for_job(job))
-            for job in jobs
-            if isinstance(job, dict)
-        ]
-        _audit(request, user_id=user_id, action="download.delete", resource_type="download_job", resource_id=body.job_id)
-        return {
-            **result,
-            "management_views": management_views,
-            "available_actions": sorted({action for view in management_views for action in (view.get("available_actions") if isinstance(view.get("available_actions"), list) else [])}),
-            "deprecated_raw_job_api": False,
-        }
-
-    return guard(run)
-
-
-@app.post("/api/downloads/jobs/cancel")
-def cancel_download_job(body: DownloadActionIn, request: Request):
-    def run():
-        user_id = _require_request_user(request, body.user_id)
-        if body.session_id:
-            _scoped_workspace_service(user_id, body.session_id)
-            job = require_resource_owner(commercial_service.get_job(body.job_id), user_id=user_id, resource_name="download job")
-            _assert_download_job_session(job, body.session_id)
-        result = commercial_service.cancel_job(body.job_id, user_id=user_id, reason=body.reason)
-        jobs = commercial_service.list_jobs(user_id=user_id, session_id=body.session_id)
-        _audit(request, user_id=user_id, action="download.cancel", resource_type="download_job", resource_id=body.job_id)
-        payload = _attach_download_tool_result({**result, "job": result, "jobs": jobs})
-        return {
-            "ok": payload.get("ok"),
-            "management_view": payload.get("management_view"),
-            "management_views": payload.get("management_views"),
-            "available_actions": sorted({action for view in (payload.get("management_views") if isinstance(payload.get("management_views"), list) else []) for action in (view.get("available_actions") if isinstance(view.get("available_actions"), list) else [])}),
-            "deprecated_raw_job_api": False,
-        }
-
-    return guard(run)
-
-
-@app.post("/api/downloads/jobs/retry")
-def retry_download_job(body: DownloadActionIn, request: Request):
-    def run():
-        user_id = _require_request_user(request, body.user_id)
-        if body.session_id:
-            _scoped_workspace_service(user_id, body.session_id)
-            job = require_resource_owner(commercial_service.get_job(body.job_id), user_id=user_id, resource_name="download job")
-            _assert_download_job_session(job, body.session_id)
-        retry = commercial_service.retry_job(body.job_id, user_id=user_id, session_id=body.session_id)
-        auto = _maybe_start_gscloud_auto_download(retry, region=str(retry.get("region") or ""))
-        jobs = commercial_service.list_jobs(user_id=user_id, session_id=body.session_id)
-        _audit(request, user_id=user_id, action="download.retry", resource_type="download_job", resource_id=retry["job_id"], detail={"retried_from": body.job_id, "auto_started": auto.get("auto_started")})
-        payload = _attach_download_tool_result({"job": commercial_service.get_job(retry["job_id"]), **auto, "jobs": jobs})
-        return {
-            "ok": payload.get("ok", True),
-            "auto_supported": payload.get("auto_supported"),
-            "auto_started": payload.get("auto_started"),
-            "reason": payload.get("reason"),
-            "management_view": payload.get("management_view"),
-            "management_views": payload.get("management_views"),
-            "available_actions": sorted({action for view in (payload.get("management_views") if isinstance(payload.get("management_views"), list) else []) for action in (view.get("available_actions") if isinstance(view.get("available_actions"), list) else [])}),
-            "deprecated_raw_job_api": False,
-        }
-
-    return guard(run)
-
-
-@app.get("/api/downloads/artifact")
-def download_job_artifact(request: Request, user_id: str = Query(...), job_id: str = Query(...), path: str = Query(...), session_id: str = Query(default="")):
-    def run():
-        authorized_user_id = _require_request_user(request, user_id)
-        if session_id:
-            _scoped_workspace_service(authorized_user_id, session_id)
-        job = require_resource_owner(commercial_service.get_job(job_id), user_id=authorized_user_id, resource_name="download job")
-        _assert_download_job_session(job, session_id)
-        target = resolve_child_path(base_settings.workdir, path)
-        target = assert_artifact_path_allowed(base_settings.workdir, target)
-        allowed = {str(job.get("zip_path") or ""), str(job.get("output_path") or "")}
-        if str(target.resolve()) not in {str(Path(item).resolve()) for item in allowed if item}:
-            _audit(request, user_id=authorized_user_id, action="download.artifact", status="denied", resource_type="download_job", resource_id=job_id, detail={"path": path})
-            raise PermissionError("下载路径不属于该任务。")
-        _audit(request, user_id=authorized_user_id, action="download.artifact", resource_type="download_job", resource_id=job_id, detail={"path": path})
-        return FileResponse(str(target), filename=target.name, headers={"Content-Disposition": content_disposition_attachment(target.name)})
-    return guard(run)
 
 
 SHANDIAN_WORKFLOW_PROMPT = """
@@ -3198,13 +1240,3 @@ SHANDIAN_WORKFLOW_PROMPT = """
 """.strip()
 
 
-@app.post("/api/workflows/shandian-soil-moisture")
-def shandian_soil_moisture_workflow(body: WorkflowIn, request: Request):
-    def run():
-        user_id = _require_request_user_if_present(request, body.user_id)
-        if body.run_now:
-            service = _scoped_workspace_service(user_id, body.session_id)
-            return service.ask(SHANDIAN_WORKFLOW_PROMPT)
-        return {"prompt": SHANDIAN_WORKFLOW_PROMPT}
-
-    return guard(run)

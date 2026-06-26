@@ -40,6 +40,8 @@ class ModelResultDiscoveryTests(unittest.TestCase):
             self.assertIn("model_results", dashboard)
             result = dashboard["model_results"][0]
             self.assertEqual(result["model"], "XGBoost")
+            self.assertEqual(result["schema_version"], "model-result/v1")
+            self.assertEqual(result["artifact_version"], "model-artifact/v1")
             self.assertRegex(result["model_result_id"], r"^legacy_model_")
             self.assertEqual(result["metrics_dataset"], "soil_demo_xgb_metrics")
             self.assertEqual(result["importance_dataset"], "soil_demo_xgb_importance")

@@ -260,7 +260,7 @@ class UnifiedBackgroundWorker:
             ).to_dict()
             return self.store.update_status(job_id, "failed", progress=100, error_code="WORKER_PLAN_HAS_NO_STEPS", error_message="Plan has no executable steps.", result={"tool_result": failed})
         token = CancellationToken(self.store, job_id)
-        self.store.update_status(job_id, "running", progress=1)
+        self.store.update_status(job_id, "running", progress=1, phase="starting", current_step="准备后台任务执行")
         started = time.monotonic()
         results: list[dict[str, Any]] = []
         completed: dict[str, dict[str, Any]] = {}
@@ -269,7 +269,15 @@ class UnifiedBackgroundWorker:
                 token.raise_if_cancelled()
                 if time.monotonic() - started > self.limits.max_runtime_seconds:
                     raise TimeoutError("worker runtime exceeded")
-                self.store.update_status(job_id, "running", progress=max(1, int(index / max(len(steps), 1) * 90)))
+                step_id = str(step.get("step_id") or f"step_{index + 1}")
+                tool_name = str(step.get("tool_name") or "")
+                self.store.update_status(
+                    job_id,
+                    "running",
+                    progress=max(1, int(index / max(len(steps), 1) * 90)),
+                    phase="tool_execution",
+                    current_step=tool_name or step_id,
+                )
                 kwargs = {"completed_results": completed, "context": self.runtime_context}
                 try:
                     if "cancellation_token" in inspect.signature(self.step_executor).parameters:
@@ -298,6 +306,8 @@ class UnifiedBackgroundWorker:
                 job_id,
                 durable_status,
                 progress=100 if durable_status in {"succeeded", "failed", "awaiting_confirmation"} else 90,
+                phase="complete" if durable_status == "succeeded" else final_status,
+                current_step="后台任务执行结束",
                 result={
                     "execution_trace": trace.model_dump(mode="json"),
                     "normalized_results": [item.model_dump(mode="json") for item in trace.results],
@@ -313,7 +323,17 @@ class UnifiedBackgroundWorker:
                 error_title="任务运行超时",
                 user_message="后台任务超过允许运行时间，已停止。",
             ).to_dict()
-            return self.store.update_status(job_id, "failed", progress=100, error_code="WORKER_RUNTIME_LIMIT_EXCEEDED", error_message="Worker runtime exceeded.", result={"tool_result": failed})
+            return self.store.update_status(
+                job_id,
+                "failed",
+                progress=100,
+                phase="timeout",
+                current_step="后台任务运行超时",
+                error_code="WORKER_RUNTIME_LIMIT_EXCEEDED",
+                error_message="Worker runtime exceeded.",
+                timeout_reason=f"超过最大运行时间 {self.limits.max_runtime_seconds} 秒",
+                result={"tool_result": failed},
+            )
         except Exception as exc:
             failed = tool_result_error(
                 UNIFIED_WORKER_JOB_TYPE,
@@ -322,7 +342,7 @@ class UnifiedBackgroundWorker:
                 user_message="后台任务执行失败，未生成成功结果。",
                 technical_detail=f"{type(exc).__name__}: {exc}",
             ).to_dict()
-            return self.store.update_status(job_id, "failed", progress=100, error_code="WORKER_EXECUTION_FAILED", error_message="Worker execution failed.", result={"tool_result": failed})
+            return self.store.update_status(job_id, "failed", progress=100, phase="error", current_step="后台任务执行失败", error_code="WORKER_EXECUTION_FAILED", error_message="Worker execution failed.", result={"tool_result": failed})
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():

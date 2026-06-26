@@ -18,6 +18,7 @@ from core.tool_contracts import (
 
 class UnifiedToolResultContractTests(unittest.TestCase):
     def assert_canonical(self, result: dict, status: str) -> None:
+        self.assertEqual(result["schema_version"], "tool-result/v1")
         self.assertEqual(result["status"], status)
         self.assertIn("success", result)
         self.assertIn("outputs", result)
@@ -97,6 +98,54 @@ class UnifiedToolResultContractTests(unittest.TestCase):
         self.assertFalse(aggregate["success"])
         self.assertEqual(aggregate["error_code"], "FIELD_NOT_FOUND")
         self.assertEqual(aggregate["outputs"]["tool_results"][1]["status"], "failed")
+
+    def test_normalize_tool_result_accepts_legacy_result_ref_aliases(self) -> None:
+        result = normalize_tool_result(
+            {
+                "status": "ok",
+                "tool_name": "legacy_gis_tool",
+                "task_id": "legacy_1",
+                "artifact_refs": [{"artifact_id": "artifact_dem", "title": "DEM.tif", "type": "raster"}],
+                "files": [{"id": "artifact_report", "filename": "report.md", "kind": "report"}],
+                "map_layer_refs": [{"layer_id": "layer_dem", "name": "DEM"}],
+                "layers": [{"id": "layer_boundary", "title": "研究区边界"}],
+                "table_refs": [{"table_id": "table_stats", "title": "统计表"}],
+                "image_refs": [{"artifact_id": "artifact_preview", "title": "预览图"}],
+                "suggestions": ["查看地图图层。"],
+            }
+        )
+
+        self.assert_canonical(result, "succeeded")
+        self.assertEqual([item["artifact_id"] for item in result["artifacts"]], ["artifact_dem", "artifact_report"])
+        self.assertEqual([item["layer_id"] for item in result["map_layers"]], ["layer_dem", "layer_boundary"])
+        self.assertEqual(result["tables"][0]["table_id"], "table_stats")
+        self.assertEqual(result["images"][0]["artifact_id"], "artifact_preview")
+        self.assertEqual(result["next_actions"], ["查看地图图层。"])
+
+    def test_aggregate_tool_results_preserves_all_result_surfaces(self) -> None:
+        first = normalize_tool_result(
+            {
+                "status": "succeeded",
+                "tool_name": "make_dem",
+                "artifacts": [{"artifact_id": "artifact_dem", "title": "DEM.tif", "type": "raster"}],
+                "map_layers": [{"layer_id": "layer_dem", "name": "DEM"}],
+            }
+        )
+        second = normalize_tool_result(
+            {
+                "status": "succeeded",
+                "tool_name": "summarize_dem",
+                "tables": [{"table_id": "table_stats", "title": "统计表"}],
+                "images": [{"artifact_id": "artifact_chart", "title": "图表"}],
+            }
+        )
+
+        aggregate = aggregate_tool_results([first, second], tool_name="workflow")
+
+        self.assert_canonical(aggregate, "succeeded")
+        self.assertEqual([item["layer_id"] for item in aggregate["map_layers"]], ["layer_dem"])
+        self.assertEqual([item["table_id"] for item in aggregate["tables"]], ["table_stats"])
+        self.assertEqual([item["artifact_id"] for item in aggregate["images"]], ["artifact_chart"])
 
 
 if __name__ == "__main__":

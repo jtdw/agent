@@ -283,12 +283,12 @@ class GenericDownloadPlanningTests(unittest.TestCase):
         self.assertIn("时间", result["plan"]["clarification_question"])
 
     def test_multi_product_time_range_validates_independent_requests(self) -> None:
-        context = _context("下载闪电河流域2020年6月至8月的EVI、地表反射率和Sentinel数据")
-        time_range = {"start": "2020-06-01", "end": "2020-08-31"}
+        context = _context("分别下载闪电河流域2016年5月11日的EVI、2010年8月16日的地表反射率和2020年6月1日的Sentinel数据")
+        evi_time_range = {"start": "2016-05-11", "end": "2016-05-11"}
         requests = [
-            ("gscloud_evi_250m_10day", "250m"),
-            ("gscloud_surface_reflectance_1km", "1km"),
-            ("gscloud_sentinel2_msi", "10m"),
+            ("gscloud_evi_250m_10day", "250m", evi_time_range),
+            ("gscloud_surface_reflectance_1km", "1km", {"start": "2010-08-16", "end": "2010-08-16"}),
+            ("gscloud_sentinel2_msi", "10m", {"start": "2020-06-01", "end": "2020-06-01"}),
         ]
         plan = _download_plan(
             primary_goal="下载闪电河流域多产品",
@@ -296,19 +296,19 @@ class GenericDownloadPlanningTests(unittest.TestCase):
             area_source="user_selected_default_library",
             product_id="gscloud_evi_250m_10day",
             resolved_resolution="250m",
-            time_range=time_range,
+            time_range=evi_time_range,
         )
         plan["download_requests"] = []
         plan["requested_downloads"] = []
         plan["workflow_steps"] = []
-        for product_id, resolution in requests:
+        for product_id, resolution, request_time_range in requests:
             req = {
                 "area_asset_id": "library:basin:shandianhe",
                 "area_source": "user_selected_default_library",
                 "product_id": product_id,
                 "requested_resolution": resolution,
                 "resolved_resolution": resolution,
-                "time_range": time_range,
+                "time_range": request_time_range,
                 "download_parameters": {},
                 "source_attribution": {"area": "user_selected_default_library", "product": "product_catalog"},
                 "expected_outputs": ["download_job", "artifact"],

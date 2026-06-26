@@ -55,6 +55,41 @@ class ModelResultRegistryTests(unittest.TestCase):
             self.assertIsNotNone(artifact)
             self.assertEqual(artifact["model_result_id"], "model_result_xgb_001")
 
+    def test_register_model_result_applies_version_contract_to_result_and_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.manager.set_runtime_scope("u_model", "s_model")
+            metrics_path = service.manager.derived_dir / "versioned_metrics.csv"
+            metrics_path.write_text("scope,RMSE\noverall,0.12\n", encoding="utf-8")
+
+            registered = service.manager.register_model_result(
+                model_result_id="model_result_versioned",
+                task_id="task_versioned",
+                dataset_id="dataset_versioned",
+                model_name="XGBoost",
+                output_prefix="versioned",
+                artifacts=[
+                    {
+                        "artifact_id": "artifact_versioned_metrics",
+                        "path": str(metrics_path),
+                        "type": "metrics",
+                    }
+                ],
+            )
+
+            self.assertEqual(registered["schema_version"], "model-result/v1")
+            self.assertEqual(registered["artifact_version"], "model-artifact/v1")
+            self.assertEqual(registered["owner_user_id"], "u_model")
+            self.assertEqual(registered["session_id"], "s_model")
+
+            fetched = service.manager.get_model_result("model_result_versioned")
+            self.assertIsNotNone(fetched)
+            self.assertEqual(fetched["schema_version"], "model-result/v1")
+            self.assertEqual(fetched["artifact_version"], "model-artifact/v1")
+            self.assertEqual(fetched["artifacts"][0]["meta"]["schema_version"], "model-artifact/v1")
+            self.assertEqual(fetched["artifacts"][0]["meta"]["model_result_schema_version"], "model-result/v1")
+            self.assertEqual(fetched["artifacts"][0]["meta"]["model_result_id"], "model_result_versioned")
+
     def test_artifact_registry_merges_with_legacy_file_scan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))

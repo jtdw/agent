@@ -50,7 +50,7 @@ _TEMPLATES: tuple[WorkflowTemplate, ...] = (
     WorkflowTemplate(
         "table_to_points",
         "表格转点数据",
-        ("表格转点", "经纬度", "坐标字段", "points"),
+        ("表格转点", "转点", "经纬度", "坐标字段", "lon", "lat", "points"),
         ("detect_coordinate_fields", "table_to_points"),
         "识别坐标字段并生成点图层。",
     ),

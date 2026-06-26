@@ -15,6 +15,7 @@ from core.tool_preconditions import (
     validate_model_target,
     validate_required_fields,
 )
+from core.workflow_priority import LOW_RISK_WORKFLOW_ALLOWLIST
 from core.workflows.registry import build_executable_workflow, match_workflow_template
 
 
@@ -1536,7 +1537,7 @@ def _attach_executable_registered_workflow(plan: dict[str, Any], prompt: str, co
         return
     executable = build_executable_workflow(workflow_id, _registered_workflow_params(workflow_id, prompt, context, plan))
     plan["executable_workflow"] = executable
-    if executable.get("status") == "ready" and not plan.get("workflow_plan"):
+    if workflow_id in LOW_RISK_WORKFLOW_ALLOWLIST and executable.get("status") == "ready" and not plan.get("workflow_plan"):
         plan["workflow_plan"] = executable.get("workflow_plan") or []
 
 
@@ -1574,7 +1575,21 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
         plan["required_inputs"].append("referenced object")
         plan["referenced_object"] = referenced_object
 
-    if confidence < 0.55:
+    _apply_registered_workflow_priority(plan, text, context)
+    _attach_executable_registered_workflow(plan, text, context)
+    if _as_dict(plan.get("executable_workflow")).get("status") == "ready":
+        plan["route_confidence"] = max(confidence, 0.86)
+        if confidence < 0.55:
+            plan["required_inputs"] = list(dict.fromkeys(plan.get("required_inputs", [])))
+            plan["missing_inputs"] = []
+            plan["recommended_tools"] = list(dict.fromkeys(plan.get("recommended_tools", [])))
+            plan["expected_outputs"] = list(dict.fromkeys([*plan.get("expected_outputs", []), "确定性工作流结果"]))
+            plan["should_ask_clarification"] = False
+            plan["clarification_question"] = ""
+            _attach_tool_preconditions(plan)
+            return plan
+
+    if confidence < 0.55 and _as_dict(plan.get("executable_workflow")).get("status") != "ready":
         _add_missing_inputs(
             plan,
             ["clear task"],
@@ -1601,6 +1616,9 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             "请先上传或导入一个可用数据集，或说明要使用工作区中的哪个数据集。",
         )
         plan["required_inputs"].append("dataset")
+        plan["recommended_tools"] = []
+        plan["workflow_plan"] = []
+        plan["executable_workflow"] = {}
         return plan
 
     if task_type == "data_upload_analysis":

@@ -28,7 +28,7 @@ def _request(product_id: str, status: str, *, time_range: dict | None = None) ->
         "product_id": product_id,
         "requested_resolution": "",
         "resolved_resolution": "250m" if "evi" in product_id else "10m",
-        "time_range": time_range or {"start": "2020-06-01", "end": "2020-08-31"},
+        "time_range": time_range or {"start": "2010-08-16", "end": "2010-08-16"},
         "download_parameters": {"fixture_status": status, "account_mode": "own"},
         "source_attribution": {"area": "user_selected_default_library", "product": "product_catalog"},
         "expected_outputs": ["download_job", "artifact"],
@@ -89,7 +89,7 @@ class GenericDownloadExecutionTests(unittest.TestCase):
                     _request("gscloud_sentinel2_msi", "waiting_login"),
                 ],
                 "study_area": "library:basin:shandianhe",
-                "time_range": {"start": "2020-06-01", "end": "2020-08-31"},
+                "time_range": {"start": "2010-08-16", "end": "2010-08-16"},
                 "spatial_resolution": "",
                 "candidate_tools": ["submit_commercial_download_job"],
                 "selected_tools": ["submit_commercial_download_job"],
@@ -147,7 +147,7 @@ class GenericDownloadExecutionTests(unittest.TestCase):
             )
             area = {"name": "成都市", "asset_id": "admin:city:四川省:成都市"}
             request = {
-                "time_range": {"start": "2020-06-01", "end": "2020-08-31"},
+                "time_range": {"start": "2010-08-16", "end": "2010-08-16"},
                 "download_parameters": {"max_scenes": 2, "cloud_max": 25, "headless": True, "auto_load": False},
             }
 
@@ -157,8 +157,8 @@ class GenericDownloadExecutionTests(unittest.TestCase):
                 resource_type="landsat8_oli_tirs",
                 account_mode="platform",
                 region="成都市",
-                start_date="2020-06-01",
-                end_date="2020-08-31",
+                start_date="2010-08-16",
+                end_date="2010-08-16",
                 request_text="下载 Landsat 8 OLI_TIRS",
                 output_name="landsat_fixture",
             )
@@ -169,8 +169,8 @@ class GenericDownloadExecutionTests(unittest.TestCase):
                 resource_type="mod021km_surface_reflectance",
                 account_mode="platform",
                 region="成都市",
-                start_date="2020-06-01",
-                end_date="2020-08-31",
+                start_date="2010-08-16",
+                end_date="2010-08-16",
                 request_text="下载 MOD021KM 地表反射率",
                 output_name="mod021km_fixture",
             )
@@ -377,7 +377,7 @@ class GenericDownloadExecutionTests(unittest.TestCase):
                 "download_requests": [request],
                 "requested_downloads": [request],
                 "study_area": "library:basin:shandianhe",
-                "time_range": {"start": "2020-06-01", "end": "2020-08-31"},
+                "time_range": {"start": "2010-08-16", "end": "2010-08-16"},
                 "spatial_resolution": "250m",
                 "candidate_tools": ["submit_commercial_download_job"],
                 "selected_tools": ["submit_commercial_download_job"],
@@ -395,7 +395,7 @@ class GenericDownloadExecutionTests(unittest.TestCase):
                 "core.service.build_llm_task_plan",
                 return_value={"status": "ready", "mode": "active", "executes_tools": True, "plan": plan_payload},
             ):
-                result = service.ask("下载闪电河流域2020年6月至8月的EVI数据")
+                result = service.ask("下载闪电河流域2010年8月16日的EVI数据")
 
             self.assertEqual(result["mode"], "validated_download_executor")
             self.assertIn("presentation_result", result)

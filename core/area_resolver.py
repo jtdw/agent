@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import geopandas as gpd
 
 from core.capability_config import configured_assets
+from core.workflow_cache import WorkflowCache
 
 
 AREA_RESOLVER_VERSION = "area-resolver/v1"
@@ -298,14 +300,67 @@ def _dynamic_admin_candidates(query: str, manager: Any, *, limit: int = 8) -> li
     return candidates
 
 
+def _area_cache(manager: Any) -> WorkflowCache | None:
+    try:
+        return WorkflowCache(Path(str(getattr(manager, "temp_dir", "") or getattr(manager, "workdir", ""))) / "workflow_cache.db")
+    except Exception:
+        return None
+
+
+def _admin_archive_signatures(manager: Any) -> list[dict[str, Any]]:
+    try:
+        from core.admin_boundary import _candidate_admin_archives
+    except Exception:
+        return []
+    signatures: list[dict[str, Any]] = []
+    for archive in _candidate_admin_archives(manager):
+        path = Path(str(archive))
+        try:
+            stat = path.stat()
+            signatures.append({"path": str(path.resolve(strict=False)), "size_bytes": int(stat.st_size), "mtime_ns": int(stat.st_mtime_ns)})
+        except Exception:
+            signatures.append({"path": str(path.resolve(strict=False)), "size_bytes": 0, "mtime_ns": 0})
+    return signatures
+
+
+def _dynamic_area_cache_key(query: str, limit: int, manager: Any) -> dict[str, Any]:
+    return {
+        "query": str(query or "").strip(),
+        "normalized_query": _normalize(query),
+        "limit": max(1, int(limit or 1)),
+        "admin_archives": _admin_archive_signatures(manager),
+        "resolver_version": AREA_RESOLVER_VERSION,
+    }
+
+
 def resolve_area_candidates(query: str = "", *, limit: int = 8, manager: Any | None = None) -> list[dict[str, Any]]:
     text = _normalize(query)
     static = _static_area_candidates(query, limit=limit)
     if static and static[0].get("asset_id") == "library:basin:shandianhe":
         return static[:limit]
     if manager is not None:
+        cache = _area_cache(manager)
+        cache_key = _dynamic_area_cache_key(query, limit, manager)
+        if cache:
+            cached = cache.get(
+                user_id=str(getattr(manager, "current_user_id", "") or ""),
+                session_id=str(getattr(manager, "current_session_id", "") or ""),
+                namespace="dynamic_area_candidates",
+                key_parts=cache_key,
+            )
+            if isinstance(cached, dict) and isinstance(cached.get("candidates"), list):
+                return cached["candidates"][:limit]
         dynamic = _dynamic_admin_candidates(query, manager, limit=limit)
         if dynamic:
+            if cache:
+                cache.set(
+                    user_id=str(getattr(manager, "current_user_id", "") or ""),
+                    session_id=str(getattr(manager, "current_session_id", "") or ""),
+                    namespace="dynamic_area_candidates",
+                    key_parts=cache_key,
+                    value={"candidates": dynamic[:limit]},
+                    ttl_seconds=3600,
+                )
             return dynamic[:limit]
     return static[:limit]
 

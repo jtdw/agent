@@ -10,6 +10,7 @@ from uuid import uuid4
 
 
 CANONICAL_STATUSES = {"succeeded", "failed", "running", "awaiting_confirmation", "blocked"}
+TOOL_RESULT_SCHEMA_VERSION = "tool-result/v1"
 SUCCESS_STATUSES = {"succeeded"}
 NON_TERMINAL_STATUSES = {"running", "awaiting_confirmation"}
 PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][^\s`'\"<>]+|workspace[\\/][^\s`'\"<>]+)", re.IGNORECASE)
@@ -172,6 +173,13 @@ def _normalize_artifacts(items: Any, warnings: list[str]) -> list[dict[str, Any]
         if not isinstance(item, dict):
             continue
         artifact = dict(item)
+        artifact_id = str(artifact.get("artifact_id") or artifact.get("id") or "").strip()
+        if artifact_id:
+            artifact["artifact_id"] = artifact_id
+        if not artifact.get("title"):
+            artifact["title"] = str(artifact.get("filename") or artifact.get("name") or artifact_id)
+        if not artifact.get("type"):
+            artifact["type"] = str(artifact.get("kind") or artifact.get("artifact_type") or "")
         path = str(artifact.get("path") or artifact.get("absolute_path") or "")
         if path:
             exists = Path(path).exists()
@@ -181,6 +189,69 @@ def _normalize_artifacts(items: Any, warnings: list[str]) -> list[dict[str, Any]
         else:
             artifact.setdefault("status", "unresolved")
         out.append(artifact)
+    return out
+
+
+def _legacy_artifact_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for key in ("artifacts", "artifact_refs", "files"):
+        for item in _as_list(payload.get(key)):
+            if isinstance(item, dict):
+                candidates.append(dict(item))
+    return candidates
+
+
+def _normalize_map_layers(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in ("map_layers", "map_layer_refs", "layers"):
+        for item in _as_list(payload.get(key)):
+            if not isinstance(item, dict):
+                continue
+            layer = dict(item)
+            layer_id = str(layer.get("layer_id") or layer.get("id") or layer.get("name") or "").strip()
+            if not layer_id or layer_id in seen:
+                continue
+            seen.add(layer_id)
+            layer["layer_id"] = layer_id
+            layer.setdefault("name", str(layer.get("title") or layer_id))
+            out.append(layer)
+    return out
+
+
+def _normalize_tables(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in ("tables", "table_refs"):
+        for item in _as_list(payload.get(key)):
+            if not isinstance(item, dict):
+                continue
+            table = dict(item)
+            table_id = str(table.get("table_id") or table.get("id") or table.get("name") or "").strip()
+            if not table_id or table_id in seen:
+                continue
+            seen.add(table_id)
+            table["table_id"] = table_id
+            table.setdefault("title", str(table.get("name") or table_id))
+            out.append(table)
+    return out
+
+
+def _normalize_images(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for key in ("images", "image_refs"):
+        for item in _as_list(payload.get(key)):
+            if not isinstance(item, dict):
+                continue
+            image = dict(item)
+            artifact_id = str(image.get("artifact_id") or image.get("id") or "").strip()
+            if not artifact_id or artifact_id in seen:
+                continue
+            seen.add(artifact_id)
+            image["artifact_id"] = artifact_id
+            image.setdefault("title", str(image.get("name") or artifact_id))
+            out.append(image)
     return out
 
 
@@ -237,7 +308,7 @@ def normalize_tool_result(
     success = status in SUCCESS_STATUSES
     task_id = str(payload.get("task_id") or payload.get("execution_id") or _new_task_id(resolved_tool))
     warnings = [item for item in _as_list(payload.get("warnings")) if str(item).strip()]
-    artifacts = _normalize_artifacts(payload.get("artifacts"), warnings)
+    artifacts = _normalize_artifacts(_legacy_artifact_candidates(payload), warnings)
     errors = _normalize_errors(payload, status)
     error_code = str(payload.get("error_code") or (_as_dict(errors[0]).get("code") if errors else ""))
     error_title = str(payload.get("error_title") or (_as_dict(errors[0]).get("title") if errors else ""))
@@ -247,8 +318,18 @@ def normalize_tool_result(
     finished_at = str(payload.get("finished_at") or "")
     if not finished_at and status not in NON_TERMINAL_STATUSES:
         finished_at = _now()
+    next_actions = [
+        str(item)
+        for item in [
+            *_as_list(payload.get("next_actions")),
+            *_as_list(payload.get("suggestions")),
+            *_as_list(payload.get("recommended_next_actions")),
+        ]
+        if str(item).strip()
+    ]
 
     normalized = {
+        "schema_version": TOOL_RESULT_SCHEMA_VERSION,
         "ok": success,
         "success": success,
         "status": status,
@@ -264,14 +345,14 @@ def normalize_tool_result(
         "inputs": _as_dict(payload.get("inputs")),
         "outputs": _as_dict(payload.get("outputs")),
         "artifacts": artifacts,
-        "map_layers": [item for item in _as_list(payload.get("map_layers")) if isinstance(item, dict)],
-        "tables": [item for item in _as_list(payload.get("tables")) if isinstance(item, dict)],
-        "images": [item for item in _as_list(payload.get("images")) if isinstance(item, dict)],
+        "map_layers": _normalize_map_layers(payload),
+        "tables": _normalize_tables(payload),
+        "images": _normalize_images(payload),
         "summary": str(payload.get("summary") or ""),
         "diagnostics": diagnostics,
         "warnings": _dedupe_mixed(warnings),
         "errors": errors,
-        "next_actions": [str(item) for item in _as_list(payload.get("next_actions")) if str(item).strip()],
+        "next_actions": list(dict.fromkeys(next_actions)),
         "error_code": error_code,
         "error_title": error_title,
         "user_message": user_message,
@@ -468,11 +549,17 @@ def workflow_step_to_tool_result(step: Any) -> dict[str, Any]:
 def aggregate_tool_results(results: list[Any], *, tool_name: str = "tool_executor", workflow_id: str = "", plan_id: str = "") -> dict[str, Any]:
     normalized = [normalize_tool_result(item, workflow_id=workflow_id, plan_id=plan_id) for item in results if item is not None]
     artifacts: list[dict[str, Any]] = []
+    map_layers: list[dict[str, Any]] = []
+    tables: list[dict[str, Any]] = []
+    images: list[dict[str, Any]] = []
     warnings: list[Any] = []
     errors: list[dict[str, Any]] = []
     next_actions: list[str] = []
     for item in normalized:
         artifacts.extend(_as_list(item.get("artifacts")))
+        map_layers.extend(layer for layer in _as_list(item.get("map_layers")) if isinstance(layer, dict))
+        tables.extend(table for table in _as_list(item.get("tables")) if isinstance(table, dict))
+        images.extend(image for image in _as_list(item.get("images")) if isinstance(image, dict))
         warnings.extend(w for w in _as_list(item.get("warnings")) if str(w).strip())
         errors.extend(error for error in _as_list(item.get("errors")) if isinstance(error, dict))
         next_actions.extend(str(action) for action in _as_list(item.get("next_actions")) if str(action).strip())
@@ -488,6 +575,9 @@ def aggregate_tool_results(results: list[Any], *, tool_name: str = "tool_executo
         "inputs": {"executed_tools": [item.get("tool_name") for item in normalized]},
         "outputs": {"tool_results": normalized, "executed_tools": [item.get("tool_name") for item in normalized]},
         "artifacts": artifacts,
+        "map_layers": _dedupe_mixed(map_layers),
+        "tables": _dedupe_mixed(tables),
+        "images": _dedupe_mixed(images),
         "summary": "Executed deterministic GIS tool plan." if status == "succeeded" else "Deterministic GIS tool plan did not complete successfully.",
         "diagnostics": {"tool_count": len(normalized), "failed_tool": source.get("tool_name") or ""},
         "warnings": _dedupe_mixed(warnings),

@@ -21,7 +21,7 @@ import rasterio
 
 from .archive_utils import safe_extract_zip
 from .data_quality import validate_output_artifact, validate_zip_upload
-from .model_results import generate_model_result_id
+from .model_results import MODEL_ARTIFACT_SCHEMA_VERSION, MODEL_RESULT_SCHEMA_VERSION, generate_model_result_id
 from .workspace_db import WorkspaceDatabase
 
 
@@ -1015,8 +1015,16 @@ class DataManager:
             artifact_payload.setdefault("task_id", task_id)
             artifact_payload.setdefault("model_result_id", resolved_model_result_id)
             artifact_payload.setdefault("dataset_id", dataset_id)
+            artifact_meta = dict(artifact_payload.get("meta") or {})
+            artifact_meta.setdefault("schema_version", MODEL_ARTIFACT_SCHEMA_VERSION)
+            artifact_meta.setdefault("model_result_schema_version", MODEL_RESULT_SCHEMA_VERSION)
+            artifact_meta.setdefault("model_result_id", resolved_model_result_id)
+            artifact_meta.setdefault("model_name", model_name)
+            artifact_payload["meta"] = artifact_meta
             synced_artifacts.append(self.register_artifact(**artifact_payload))
         payload = {
+            "schema_version": MODEL_RESULT_SCHEMA_VERSION,
+            "artifact_version": MODEL_ARTIFACT_SCHEMA_VERSION,
             "model_result_id": resolved_model_result_id,
             "task_id": task_id,
             "dataset_id": dataset_id,
@@ -1033,7 +1041,7 @@ class DataManager:
             "metrics": metrics or {},
             "diagnostics": diagnostics or {},
         }
-        return self.database.upsert_model_result(payload)
+        return self._normalize_model_result_versions(self.database.upsert_model_result(payload))
 
     def register_artifact(
         self,
@@ -1285,11 +1293,11 @@ class DataManager:
         result = self.database.get_model_result(model_result_id)
         if not result or not self._model_result_visible_in_current_session(result):
             return None
-        return self._attach_registered_model_artifacts(result)
+        return self._attach_registered_model_artifacts(self._normalize_model_result_versions(result))
 
     def list_model_results(self, limit: int = 50) -> list[dict[str, Any]]:
         return [
-            self._attach_registered_model_artifacts(item)
+            self._attach_registered_model_artifacts(self._normalize_model_result_versions(item))
             for item in self.database.list_model_results(limit=limit)
             if self._model_result_visible_in_current_session(item)
         ]
@@ -1301,10 +1309,16 @@ class DataManager:
         return not result_session or result_session == self.current_session_id
 
     def _attach_registered_model_artifacts(self, result: dict[str, Any] | None) -> dict[str, Any]:
-        item = dict(result or {})
+        item = self._normalize_model_result_versions(result or {})
         model_result_id = str(item.get("model_result_id") or "")
         registered = self.list_registered_artifacts(model_result_id=model_result_id, limit=100) if model_result_id else []
         if model_result_id:
             item["artifacts"] = registered
             item["artifact_ids"] = [str(artifact.get("artifact_id") or "") for artifact in registered if artifact.get("artifact_id")]
+        return item
+
+    def _normalize_model_result_versions(self, result: dict[str, Any] | None) -> dict[str, Any]:
+        item = dict(result or {})
+        item.setdefault("schema_version", MODEL_RESULT_SCHEMA_VERSION)
+        item.setdefault("artifact_version", MODEL_ARTIFACT_SCHEMA_VERSION)
         return item

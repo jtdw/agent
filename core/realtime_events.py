@@ -50,7 +50,12 @@ class TaskProgressEvent(BaseModel):
     message_id: str = ""
     status: str = ""
     progress: int | None = None
+    phase: str = ""
     current_step: str = ""
+    heartbeat_at: str = ""
+    started_at: str = ""
+    elapsed_ms: int = 0
+    timeout_reason: str = ""
     message: str = ""
     delta: str = ""
     management_view: dict[str, Any] = Field(default_factory=dict)
@@ -93,6 +98,13 @@ class RealtimeEventHub:
         task_id: str = "",
         message_id: str = "",
         status: str = "",
+        progress: int | None = None,
+        phase: str = "",
+        current_step: str = "",
+        heartbeat_at: str = "",
+        started_at: str = "",
+        elapsed_ms: int = 0,
+        timeout_reason: str = "",
         message: str = "",
         delta: str = "",
         management_view: dict[str, Any] | None = None,
@@ -112,6 +124,13 @@ class RealtimeEventHub:
             task_id=str(task_id or ""),
             message_id=str(message_id or ""),
             status=str(status or ""),
+            progress=None if progress is None else max(0, min(100, int(progress))),
+            phase=str(phase or "")[:120],
+            current_step=str(current_step or "")[:240],
+            heartbeat_at=str(heartbeat_at or _now()),
+            started_at=str(started_at or ""),
+            elapsed_ms=max(0, int(elapsed_ms or 0)),
+            timeout_reason=str(timeout_reason or "")[:500],
             message=str(message or "")[:1200],
             delta=str(delta or "")[:2000],
             management_view=_as_dict(management_view),
@@ -176,7 +195,12 @@ class TaskEventStore:
                     kind TEXT NOT NULL,
                     status TEXT,
                     progress INTEGER,
+                    phase TEXT,
                     current_step TEXT,
+                    heartbeat_at TEXT,
+                    started_at TEXT,
+                    elapsed_ms INTEGER,
+                    timeout_reason TEXT,
                     message TEXT,
                     delta TEXT,
                     management_view_json TEXT,
@@ -190,6 +214,15 @@ class TaskEventStore:
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(task_progress_events)").fetchall()}
             if "task_update_json" not in columns:
                 conn.execute("ALTER TABLE task_progress_events ADD COLUMN task_update_json TEXT")
+            for name, definition in {
+                "phase": "TEXT",
+                "heartbeat_at": "TEXT",
+                "started_at": "TEXT",
+                "elapsed_ms": "INTEGER",
+                "timeout_reason": "TEXT",
+            }.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE task_progress_events ADD COLUMN {name} {definition}")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS task_event_checkpoints (
@@ -213,7 +246,12 @@ class TaskEventStore:
         message_id: str = "",
         status: str = "",
         progress: int | None = None,
+        phase: str = "",
         current_step: str = "",
+        heartbeat_at: str = "",
+        started_at: str = "",
+        elapsed_ms: int = 0,
+        timeout_reason: str = "",
         message: str = "",
         delta: str = "",
         management_view: dict[str, Any] | None = None,
@@ -237,7 +275,12 @@ class TaskEventStore:
             "kind": clean_kind,
             "status": clean_status,
             "progress": value,
+            "phase": str(phase or "")[:120],
             "current_step": str(current_step or "")[:240],
+            "heartbeat_at": str(heartbeat_at or _now()),
+            "started_at": str(started_at or ""),
+            "elapsed_ms": max(0, int(elapsed_ms or 0)),
+            "timeout_reason": str(timeout_reason or "")[:500],
             "message": str(message or "")[:1200],
             "delta": str(delta or "")[:2000],
             "management_view_json": json.dumps(_as_dict(management_view), ensure_ascii=False),
@@ -265,7 +308,12 @@ class TaskEventStore:
             "message_id": str(row.get("message_id") or ""),
             "status": str(row.get("status") or ""),
             "progress": row.get("progress"),
+            "phase": str(row.get("phase") or ""),
             "current_step": str(row.get("current_step") or ""),
+            "heartbeat_at": str(row.get("heartbeat_at") or ""),
+            "started_at": str(row.get("started_at") or ""),
+            "elapsed_ms": int(row.get("elapsed_ms") or 0),
+            "timeout_reason": str(row.get("timeout_reason") or ""),
             "message": str(row.get("message") or ""),
             "delta": str(row.get("delta") or ""),
             "management_view": _loads(row.get("management_view_json")),

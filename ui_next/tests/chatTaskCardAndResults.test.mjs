@@ -8,6 +8,11 @@ const panel = readFileSync(resolve(root, 'src/components/ChatPanel.tsx'), 'utf8'
 const api = readFileSync(resolve(root, 'src/lib/api.ts'), 'utf8');
 
 assert.match(renderer, /function TaskStatusCard/, 'ChatMessageRenderer must render tool work through one unified task card');
+assert.match(renderer, /function AgentProcessTimeline/, 'Task card must render a detailed user-readable agent process timeline');
+assert.match(renderer, /function buildAgentProcessSteps/, 'Task card must derive detailed process steps from task metadata');
+assert.match(renderer, /处理过程/, 'Task card must label the visible agent process section in Chinese');
+assert.match(renderer, /正在检查输入数据/, 'Task card must explain input/data validation as a visible step');
+assert.match(renderer, /注册成果与地图图层/, 'Task card must explain artifact and map layer registration');
 assert.match(renderer, /GIS 任务/, 'TaskStatusCard must present a user-readable GIS task header');
 assert.match(renderer, /任务结果/, 'ResultGroups must present a user-readable result section');
 assert.match(renderer, /下一步建议/, 'ResultGroups must render canonical next_action_suggestions');
@@ -36,6 +41,11 @@ assert.ok(toolModeIndex >= 0 && toolModeIndex < composerIndex, 'Tool mode button
 assert.match(panel, /function ThinkingStatusCard/, 'ChatPanel must show a real-time status card while the assistant is working');
 assert.match(panel, /RealtimeSyncIndicator/, 'ChatPanel must expose realtime connection state');
 assert.match(panel, /applyRealtimeEvent/, 'ChatPanel must merge realtime events into existing messages');
+assert.match(panel, /phase: event\.phase/, 'Realtime task events must preserve backend phase for the visible process timeline');
+assert.match(panel, /current_step: event\.current_step/, 'Realtime task events must preserve backend current_step for the visible process timeline');
+assert.match(panel, /progress: event\.progress/, 'Realtime task events must preserve backend progress for the visible process timeline');
+assert.match(api, /phase\?: string/, 'RealtimeChatEvent must type backend phase updates');
+assert.match(api, /heartbeat_at\?: string/, 'RealtimeChatEvent must type backend heartbeat updates');
 assert.match(panel, /api\.streamChat/, 'ChatPanel must use the POST SSE chat stream');
 assert.match(panel, /api\.openChatEventStream/, 'ChatPanel must subscribe to session task SSE events');
 assert.match(panel, /messageMatchesRealtimeEvent/, 'Realtime events must target an existing assistant message');

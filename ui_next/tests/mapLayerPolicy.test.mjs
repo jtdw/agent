@@ -30,4 +30,26 @@ assert.equal(policy.isLocalSecureContext('http:', 'localhost'), true);
 assert.equal(policy.isLocalSecureContext('https:', '192.168.1.8'), true);
 assert.equal(policy.isLocalSecureContext('http:', '192.168.1.8'), false);
 
+const demoLayers = [
+  { id: 'dem_a', name: 'DEM A', kind: 'dem', type: 'raster' },
+  { id: 'soil_a', name: 'Soil A', kind: 'soil', type: 'vector' }
+];
+const mergedState = policy.mergeResultLayerState(demoLayers, {
+  dem_a: { visible: false, removed: false, palette: 'terrain' },
+  stale: { visible: false, removed: true, palette: 'viridis' }
+});
+assert.equal(mergedState.dem_a.visible, false);
+assert.equal(mergedState.dem_a.palette, 'terrain');
+assert.equal(mergedState.soil_a.visible, true);
+assert.equal(mergedState.soil_a.palette, 'moisture');
+assert.equal(mergedState.stale.removed, true);
+assert.deepEqual(policy.visibleResultLayers(demoLayers, { dem_a: { visible: false, removed: false, palette: 'terrain' } }), [demoLayers[1]]);
+assert.deepEqual(policy.resultLayerPalette('terrain').colors, ['#2d5a27', '#8fbf5a', '#f6e27f', '#c77c3a', '#f8fafc']);
+assert.equal(policy.nextPaletteName('terrain', 0), 'magma');
+assert.equal(policy.mergeResultLayerState([{ id: 'dem_b', kind: 'dem' }], {}, { dem: 'magma' }).dem_b.palette, 'magma');
+assert.equal(policy.mergeResultLayerState([{ id: 'soil_b', kind: 'soil' }], {}, { all: 'rainbow' }).soil_b.palette, 'rainbow');
+assert.equal(policy.mergeResultLayerState([{ id: 'dem_c', kind: 'dem' }], { dem_c: { visible: true, removed: false, palette: 'cyan' } }, { dem: 'magma' }).dem_c.palette, 'cyan');
+assert.equal(policy.isReferenceMapLayer({ id: 'local_library_shandianhe_basin_boundary', kind: 'boundary', meta: { source: 'local_library' } }), true);
+assert.equal(policy.isReferenceMapLayer({ id: 'dataset_user_dem', kind: 'dem', meta: { source: 'upload' } }), false);
+
 console.log('map layer policy tests passed');

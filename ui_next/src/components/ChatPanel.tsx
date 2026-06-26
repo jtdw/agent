@@ -434,6 +434,13 @@ export function ChatWorkspace({
       task_id: event.task_id || '',
       job_id: event.job_id || '',
       status: event.status || '',
+      progress: event.progress,
+      phase: event.phase,
+      current_step: event.current_step,
+      heartbeat_at: event.heartbeat_at,
+      started_at: event.started_at,
+      elapsed_ms: event.elapsed_ms,
+      timeout_reason: event.timeout_reason,
       realtime_sync: realtimeSyncState,
       streaming: event.kind === 'model_token',
       ...taskUpdate,
@@ -517,12 +524,12 @@ export function ChatWorkspace({
       if (lastKnownUserIdRef.current) {
         lastKnownUserIdRef.current = '';
         lastSuccessfulSessionUserIdRef.current = '';
-        setSessions([]);
-        setCurrentSessionId('');
-        onSessionChange?.('');
-        setMessages([]);
-        return;
       }
+      setSessions([]);
+      setCurrentSessionId('');
+      onSessionChange?.('');
+      setMessages([]);
+      return;
     }
     if (requestedUserId) lastKnownUserIdRef.current = requestedUserId;
     let r = await api.chatSessions(requestedUserId);

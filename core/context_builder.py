@@ -336,6 +336,10 @@ def build_conversation_context(
 
 
 def format_context_for_agent(context: dict[str, Any]) -> str:
+    def _limit_text(value: Any, limit: int = 360) -> str:
+        text = str(value or "")
+        return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
     def _compact_knowledge_snippets(value: Any) -> list[dict[str, Any]]:
         snippets: list[dict[str, Any]] = []
         for item in _as_list(value):
@@ -347,13 +351,57 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
                     "knowledge_id": item.get("knowledge_id") or item.get("id") or "",
                     "knowledge_version": item.get("knowledge_version") or item.get("version") or "",
                     "title": item.get("title") or "",
-                    "content": item.get("content") or "",
+                    "content": _limit_text(item.get("content"), 420),
                     "source": item.get("source") or "",
                     "applicable_scope": item.get("applicable_scope") or item.get("scope") or "",
                     "reliability": item.get("reliability") or item.get("trust_level") or "",
                 }
             )
         return snippets
+
+    def _compact_tool_cards(value: Any) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        for item in _as_list(value):
+            if not isinstance(item, dict):
+                continue
+            cards.append(
+                {
+                    "tool_name": item.get("tool_name") or "",
+                    "capability": _limit_text(item.get("capability"), 260),
+                    "applicable_tasks": item.get("applicable_tasks") or [],
+                    "required_inputs": item.get("required_inputs") or [],
+                    "optional_inputs": item.get("optional_inputs") or [],
+                    "input_asset_roles": item.get("input_asset_roles") or [],
+                    "preconditions": item.get("preconditions") or [],
+                    "output_types": item.get("output_types") or [],
+                    "confirmation_required": bool(item.get("confirmation_required", False)),
+                    "common_failure_cases": item.get("common_failure_cases") or [],
+                    "forbidden_uses": item.get("forbidden_uses") or [],
+                    "result_schema": item.get("result_schema") or "",
+                }
+            )
+        return cards
+
+    def _compact_download_candidates(value: Any) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for item in _as_list(value):
+            if not isinstance(item, dict):
+                continue
+            candidates.append(
+                {
+                    "product_id": item.get("product_id") or "",
+                    "product_key": item.get("product_key") or "",
+                    "name": item.get("name") or item.get("display_name_zh") or "",
+                    "resource_type": item.get("resource_type") or "",
+                    "supported_resolutions": item.get("supported_resolutions") or [],
+                    "temporal_requirement": item.get("temporal_requirement") or "",
+                    "confirmation_required": bool(item.get("confirmation_required", False)),
+                    "tool_card": item.get("tool_card") or "",
+                    "download_adapter": item.get("download_adapter") or "",
+                    "matched_query": bool(item.get("matched_query", False)),
+                }
+            )
+        return candidates
 
     payload = {
         "intent": _as_dict(context.get("intent")).get("intent"),
@@ -378,8 +426,8 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         "likely_target_fields": context.get("likely_target_fields"),
         "likely_mapping_fields": context.get("likely_mapping_fields"),
         "knowledge_snippets": _compact_knowledge_snippets(context.get("knowledge_snippets")),
-        "candidate_tool_cards": context.get("candidate_tool_cards"),
-        "download_candidates": context.get("download_candidates"),
+        "candidate_tool_cards": _compact_tool_cards(context.get("candidate_tool_cards")),
+        "download_candidates": _compact_download_candidates(context.get("download_candidates")),
         "area_candidates": context.get("area_candidates"),
         "capability_trace": context.get("capability_trace"),
     }

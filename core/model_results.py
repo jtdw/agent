@@ -8,6 +8,10 @@ from typing import Any
 from uuid import uuid4
 
 
+MODEL_RESULT_SCHEMA_VERSION = "model-result/v1"
+MODEL_ARTIFACT_SCHEMA_VERSION = "model-artifact/v1"
+
+
 def _safe_part(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip().lower())
     return re.sub(r"_+", "_", text).strip("_") or "model"
@@ -28,6 +32,8 @@ class ModelResult:
     task_id: str
     dataset_id: str
     model_name: str
+    schema_version: str = MODEL_RESULT_SCHEMA_VERSION
+    artifact_version: str = MODEL_ARTIFACT_SCHEMA_VERSION
     output_prefix: str = ""
     result_dataset: str = ""
     metrics_dataset: str = ""

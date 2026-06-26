@@ -4,12 +4,13 @@ import { Database, MessageCircle, PanelRightOpen, Sparkles } from 'lucide-react'
 import { MapControls } from './components/MapControls';
 import { SplashScreen } from './components/SplashScreen';
 import { useTheme } from './hooks/useTheme';
-import { api, type CommercialUser, type ResultPanel } from './lib/api';
+import { api, type CommercialUser, type ResultMapLayer, type ResultPanel } from './lib/api';
 import { clearStoredAuth, readStoredUser, writeStoredUser } from './lib/authStorage';
 import { mergeChatContext, type ChatContextPayload } from './lib/chatContext';
 import type { MapCommand, MapCommandType } from './components/mapCommands';
 import type { ParsedMapTextCommand } from './components/mapTextCommands';
 import type { WorkflowAction } from './components/researchWorkflow';
+import { mergeResultLayerState, nextPaletteName, resultLayerKey, type ResultLayerLike, type ResultLayerPaletteName, type ResultLayerPalettePreferences, type ResultLayerPaletteTarget, type ResultLayerStateMap } from './components/mapLayerPolicy';
 
 const MapStage = lazy(() => import('./components/MapStage').then((m) => ({ default: m.MapStage })));
 const ChatPanel = lazy(() => import('./components/ChatPanel').then((m) => ({ default: m.ChatPanel })));
@@ -41,6 +42,12 @@ function PanelFallback({ side }: { side: 'left' | 'right' }) {
   );
 }
 
+function resultLayerMatchesTarget(layer: ResultLayerLike, target: ResultLayerPaletteTarget) {
+  return target === 'all'
+    || String(layer.kind || '').toLowerCase() === target
+    || String(layer.name || '').toLowerCase().includes(String(target).toLowerCase());
+}
+
 export default function App() {
   const { theme, toggle } = useTheme();
   const [splash, setSplash] = useState(true);
@@ -51,6 +58,9 @@ export default function App() {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [drawMode, setDrawMode] = useState(false);
   const [layerVisibility, setLayerVisibility] = useState({ dem: true, boundary: true, stations: true, soil: true });
+  const [resultLayers, setResultLayers] = useState<ResultMapLayer[]>([]);
+  const [resultLayerState, setResultLayerState] = useState<ResultLayerStateMap>({});
+  const [resultLayerPalettePreferences, setResultLayerPalettePreferences] = useState<ResultLayerPalettePreferences>({});
   const [mapCommand, setMapCommand] = useState<MapCommand | null>(null);
   const [externalPrompt, setExternalPrompt] = useState<{ id: number; prompt: string } | null>(null);
   const [latestResultPanel, setLatestResultPanel] = useState<ResultPanel | null>(null);
@@ -68,7 +78,44 @@ export default function App() {
       return command.reply;
     }
     if (command.kind === 'layer') {
-      setLayerVisibility((v) => ({ ...v, [command.layer]: command.visible }));
+      if (command.layer === 'stations' || command.layer === 'boundary') {
+        setLayerVisibility((v) => ({ ...v, [command.layer]: command.visible }));
+      }
+      setResultLayerState((current) => {
+        const merged = mergeResultLayerState(resultLayers, current, resultLayerPalettePreferences);
+        const next = { ...merged };
+        resultLayers.forEach((layer, index) => {
+          if (layer.kind !== command.layer) return;
+          const key = resultLayerKey(layer, String(index));
+          next[key] = { ...next[key], visible: command.visible };
+        });
+        return next;
+      });
+      return command.reply;
+    }
+    if (command.kind === 'style') {
+      const target = command.target;
+      const targetLayer = resultLayers.find((layer) => resultLayerMatchesTarget(layer, target));
+      const targetKey = targetLayer ? resultLayerKey(targetLayer, String(resultLayers.indexOf(targetLayer))) : '';
+      const currentPalette = targetKey ? resultLayerState[targetKey]?.palette : undefined;
+      const selectedPalette = command.palette || nextPaletteName(currentPalette, Math.floor(Math.random() * 5) + 1);
+      const nextPreferences: ResultLayerPalettePreferences = { ...resultLayerPalettePreferences, [target]: selectedPalette };
+      setResultLayerPalettePreferences(nextPreferences);
+      setResultLayerState((current) => {
+        const merged = mergeResultLayerState(resultLayers, current, nextPreferences);
+        const next = { ...merged };
+        resultLayers.forEach((layer, index) => {
+          const key = resultLayerKey(layer, String(index));
+          const matches = resultLayerMatchesTarget(layer, target);
+          if (!matches) return;
+          next[key] = {
+            visible: next[key]?.visible ?? true,
+            removed: next[key]?.removed ?? false,
+            palette: selectedPalette
+          };
+        });
+        return next;
+      });
       return command.reply;
     }
     if (command.kind === 'draw') {
@@ -129,11 +176,28 @@ export default function App() {
     if (!user) setCurrentSessionId('');
   }, [user]);
 
+  const syncResultLayers = (layers: ResultMapLayer[]) => {
+    setResultLayers(layers);
+    setResultLayerState((current) => mergeResultLayerState(layers, current, resultLayerPalettePreferences));
+  };
+
+  const updateResultLayer = (layerId: string, patch: Partial<{ visible: boolean; removed: boolean; palette: ResultLayerPaletteName }>) => {
+    setResultLayerState((current) => ({
+      ...current,
+      [layerId]: {
+        visible: current[layerId]?.visible ?? true,
+        removed: current[layerId]?.removed ?? false,
+        palette: current[layerId]?.palette || 'cyan',
+        ...patch
+      }
+    }));
+  };
+
   return (
     <div className="relative isolate h-screen w-screen overflow-hidden text-slate-950 transition-colors duration-500 dark:text-slate-50">
       <SplashScreen visible={splash} />
       <Suspense fallback={<MapFallback />}>
-        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} mapCommand={mapCommand} onChatContextChange={updateChatContext} />
+        <MapStage theme={theme} basemap={basemap} userId={user?.user_id || ''} sessionId={currentSessionId} drawMode={drawMode} setDrawMode={setDrawMode} layerVisibility={layerVisibility} resultLayerState={resultLayerState} mapCommand={mapCommand} onResultLayersChange={syncResultLayers} onChatContextChange={updateChatContext} />
       </Suspense>
       <Suspense fallback={chatOpen ? <PanelFallback side="left" /> : null}>
         <AnimatePresence>
@@ -150,8 +214,11 @@ export default function App() {
               setBasemap={setBasemap}
               onClose={() => setToolsOpen(false)}
               layerVisibility={layerVisibility}
+              resultLayers={resultLayers}
+              resultLayerState={resultLayerState}
               onLayerToggle={(id) => setLayerVisibility((v) => ({ ...v, [id]: !v[id as keyof typeof v] }))}
-              onLayerLocate={() => dispatchMapCommand('locate')}
+              onResultLayerChange={updateResultLayer}
+              onLayerLocate={(id) => setMapCommand({ type: 'locateLayer', id: Date.now(), layerId: id })}
               onRunWorkflowAction={runWorkflowAction}
             />
           )}

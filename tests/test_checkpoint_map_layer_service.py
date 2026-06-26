@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import geopandas as gpd
 import numpy as np
@@ -114,6 +115,62 @@ class CheckpointMapLayerServiceTests(unittest.TestCase):
             dataset = service.manager.get(layer["dataset_name"])
             self.assertEqual(dataset.path.resolve(), path.resolve())
             self.assertEqual(list(service.manager.upload_dir.glob("*.tif")), [])
+
+    def test_raster_preview_palette_generates_distinct_pngs(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            path = service.manager.derived_dir / "palette_dem.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                height=3,
+                width=3,
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(104.0, 31.0, 0.1, 0.1),
+            ) as dst:
+                dst.write(np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]], dtype="float32"), 1)
+            dataset_name = service.manager.register_raster_reference(path, name="palette_dem")
+            layer_service = MapLayerService(service)
+
+            terrain = layer_service.ensure_raster_preview(dataset_name, palette="terrain")
+            magma = layer_service.ensure_raster_preview(dataset_name, palette="magma")
+
+            self.assertIn("palette=terrain", terrain["preview_url"])
+            self.assertIn("palette=magma", magma["preview_url"])
+            self.assertNotEqual(terrain["preview_path"], magma["preview_path"])
+            self.assertNotEqual(Path(terrain["preview_path"]).read_bytes(), Path(magma["preview_path"]).read_bytes())
+
+    def test_raster_preview_reuses_cached_metadata_without_reopening_source(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            path = service.manager.derived_dir / "cached_dem.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                height=2,
+                width=2,
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(104.0, 31.0, 0.1, 0.1),
+            ) as dst:
+                dst.write(np.array([[1, 2], [3, 4]], dtype="float32"), 1)
+            dataset_name = service.manager.register_raster_reference(path, name="cached_dem")
+            layer_service = MapLayerService(service)
+            first = layer_service.ensure_raster_preview(dataset_name, user_id="u1", session_id="s1", palette="terrain")
+
+            with mock.patch("rasterio.open", side_effect=AssertionError("cached preview should not reopen raster source")):
+                second = layer_service.ensure_raster_preview(dataset_name, user_id="u1", session_id="s1", palette="terrain")
+
+            self.assertEqual(second["preview_path"], first["preview_path"])
+            self.assertEqual(second["bounds"], first["bounds"])
+            self.assertEqual(second["meta"], first["meta"])
 
     def test_refresh_raster_artifact_references_existing_file_without_upload_copy(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

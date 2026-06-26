@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from core.ml.modeling_profile import build_modeling_profile
+from core.workflow_cache import WorkflowCache
 
 
 def _safe_stat(path: Path) -> dict[str, Any]:
@@ -16,6 +17,31 @@ def _safe_stat(path: Path) -> dict[str, Any]:
     except Exception:
         return {"file_name": path.name, "size_bytes": 0}
     return {"file_name": path.name, "size_bytes": int(stat.st_size)}
+
+
+def _path_mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except Exception:
+        return 0
+
+
+def _profile_cache(manager: Any) -> WorkflowCache | None:
+    try:
+        cache_path = Path(str(getattr(manager, "temp_dir", "") or getattr(manager, "workdir", ""))) / "workflow_cache.db"
+        return WorkflowCache(cache_path)
+    except Exception:
+        return None
+
+
+def _profile_cache_key(record: Any, path: Path, stat_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "dataset": str(getattr(record, "name", "")),
+        "data_type": str(getattr(record, "data_type", "")),
+        "path": str(path.resolve(strict=False)),
+        "size_bytes": int(stat_payload.get("size_bytes") or 0),
+        "mtime_ns": _path_mtime_ns(path),
+    }
 
 
 def _jsonable(value: Any) -> Any:
@@ -147,11 +173,23 @@ def _profile_archive(path: Path) -> dict[str, Any]:
 def profile_dataset(manager: Any, dataset_name: str) -> dict[str, Any]:
     record = manager.get(dataset_name)
     path = Path(str(record.path))
+    stat_payload = _safe_stat(path)
+    cache = _profile_cache(manager)
+    cache_key = _profile_cache_key(record, path, stat_payload)
+    if cache:
+        cached = cache.get(
+            user_id=str(getattr(manager, "current_user_id", "") or ""),
+            session_id=str(getattr(manager, "current_session_id", "") or ""),
+            namespace="dataset_profile",
+            key_parts=cache_key,
+        )
+        if cached:
+            return cached
     profile: dict[str, Any] = {
         "name": record.name,
         "data_type": record.data_type,
         "path": str(record.path),
-        **_safe_stat(path),
+        **stat_payload,
     }
     data_type = str(record.data_type or "").lower()
     if data_type == "table":
@@ -164,4 +202,13 @@ def profile_dataset(manager: Any, dataset_name: str) -> dict[str, Any]:
         profile.update(_profile_archive(path))
     else:
         profile.setdefault("role_inference", {"basis": "metadata_only", "roles": [], "evidence": []})
+    if cache:
+        cache.set(
+            user_id=str(getattr(manager, "current_user_id", "") or ""),
+            session_id=str(getattr(manager, "current_session_id", "") or ""),
+            namespace="dataset_profile",
+            key_parts=cache_key,
+            value=profile,
+            ttl_seconds=600,
+        )
     return profile

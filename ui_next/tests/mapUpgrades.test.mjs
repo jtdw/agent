@@ -18,6 +18,7 @@ const geometry = await loadTs('src/components/mapGeometry.ts');
 const commands = await loadTs('src/components/mapTextCommands.ts');
 const mapStageSource = await readFile('src/components/MapStage.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
+const appSource = await readFile('src/App.tsx', 'utf8');
 
 assert.equal(Math.round(geometry.distanceMeters([0, 0], [0, 1])), 111195);
 assert.equal(geometry.drawGeoJson([[0, 0], [0, 1], [1, 1]], 'polygon').features.length, 5);
@@ -37,6 +38,12 @@ assert.equal(layerPanelSource.includes('layerOpacity'), false);
 assert.equal(mapStageSource.includes('LayerOpacity'), false);
 assert.equal(mapStageSource.includes('layerOpacity'), false);
 assert.equal(mapStageSource.includes('setLayerPaintIfPresent'), false);
+assert.equal(mapStageSource.includes('visibility[kind]'), false);
+assert.match(mapStageSource, /isReferenceMapLayer\(layer\)/);
+assert.match(mapStageSource, /function rasterPreviewUrl/);
+assert.equal(mapStageSource.includes('raster-hue-rotate'), false);
+assert.match(appSource, /resultLayerPalettePreferences/);
+assert.match(appSource, /mergeResultLayerState\(layers, current, resultLayerPalettePreferences\)/);
 assert.match(layerPanelSource, /GlowSwitch/);
 assert.equal(layerPanelSource.includes('图层透明度'), false);
 assert.equal(layerPanelSource.includes('图例'), false);
@@ -44,6 +51,11 @@ assert.match(geometry.measurementLabel([[0, 0], [0, 1]], 'line'), /^长度/);
 assert.match(geometry.measurementLabel([[0, 0], [0, 1], [1, 1]], 'polygon'), /^面积/);
 
 assert.deepEqual(commands.parseMapTextCommand('隐藏 DEM'), { kind: 'layer', layer: 'dem', visible: false, reply: '已隐藏 DEM 图层。' });
+assert.deepEqual(commands.parseMapTextCommand('给 DEM 换一种配色'), { kind: 'style', target: 'dem', reply: '已为 DEM 图层随机切换配色。' });
+assert.deepEqual(commands.parseMapTextCommand('高程换一种配色'), { kind: 'style', target: 'dem', reply: '已为 DEM 图层随机切换配色。' });
+assert.deepEqual(commands.parseMapTextCommand('DEM 改成蓝色配色'), { kind: 'style', target: 'dem', palette: 'cyan', reply: '已将 DEM 图层配色切换为 Cyan。' });
+assert.deepEqual(commands.parseMapTextCommand('DEM 改成地形配色'), { kind: 'style', target: 'dem', palette: 'terrain', reply: '已将 DEM 图层配色切换为 Terrain。' });
+assert.deepEqual(commands.parseMapTextCommand('把所有结果改成黄橙红配色'), { kind: 'style', target: 'all', palette: 'yellow-orange-red', reply: '已将 结果 图层配色切换为 Yellow-Orange-Red。' });
 assert.deepEqual(commands.parseMapTextCommand('放大地图'), { kind: 'map', command: 'zoomIn', reply: '已放大地图。' });
 assert.deepEqual(commands.parseMapTextCommand('清空绘制'), { kind: 'draw', action: 'clear', reply: '已清空绘制内容。' });
 assert.equal(
