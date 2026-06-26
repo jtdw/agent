@@ -4,7 +4,7 @@ import { AlertTriangle, Check, ChevronsLeft, FileUp, Map as MapIcon, MessageSqua
 import { api, ChatMessage, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
-import { parseMapTextCommand, type ParsedMapTextCommand } from './mapTextCommands';
+import type { ParsedMapTextCommand } from './mapTextCommands';
 import { assistantErrorContent, assistantReplyContent, normalizeChatMessages } from './chatMessageContent';
 import type { ChatContextPayload } from '@/lib/chatContext';
 import { ChatComposer } from './ChatComposer';
@@ -34,6 +34,7 @@ import { useChatInteractionModeAction } from './chat/useChatInteractionModeActio
 import { useChatNewSessionAction } from './chat/useChatNewSessionAction';
 import { useChatSwitchSessionAction } from './chat/useChatSwitchSessionAction';
 import { useChatDeleteSessionAction } from './chat/useChatDeleteSessionAction';
+import { useChatMapCommandAction } from './chat/useChatMapCommandAction';
 
 export type ExternalPromptCommand = { id: number; prompt: string };
 type ChatWorkspaceMode = 'floating' | 'page';
@@ -533,6 +534,10 @@ export function ChatWorkspace({
     messageMatchesJob,
     mergeTaskCardUpdate,
   });
+  const { handleMapCommand } = useChatMapCommandAction({
+    onMapTextCommand,
+    setMessages,
+  });
 
   const chooseClarification = (value: string, label: string) => {
     if (value === 'upload_boundary') {
@@ -558,12 +563,7 @@ export function ChatWorkspace({
     }
     setInput('');
     setError('');
-    const mapCommand = parseMapTextCommand(text);
-    if (mapCommand && onMapTextCommand) {
-      const reply = onMapTextCommand(mapCommand);
-      setMessages((v) => [...v, { role: 'user', content: text }, { role: 'assistant', content: reply || '地图操作已完成。' }]);
-      return;
-    }
+    if (handleMapCommand(text)) return;
     const draft = buildSendPromptDraft({ text, realtimeSyncState });
     const controller = new AbortController();
     const { taskId, optimisticUserMessage, streamingAssistantMessage } = draft;

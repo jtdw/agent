@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const source = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const sendPromptSource = source.match(/const sendPrompt = async[\s\S]*?\n  const send =/)?.[0] || '';
 const chatSessionsHookSource = await readFile('src/components/chat/useChatSessions.ts', 'utf8');
 const workspaceMentionsHookSource = await readFile('src/components/chat/useChatWorkspaceMentions.ts', 'utf8');
 const resizeHookSource = await readFile('src/components/chat/useChatPanelResize.ts', 'utf8');
@@ -13,6 +14,7 @@ const interactionModeActionHookSource = await readFile('src/components/chat/useC
 const newSessionActionHookSource = await readFile('src/components/chat/useChatNewSessionAction.ts', 'utf8');
 const switchSessionActionHookSource = await readFile('src/components/chat/useChatSwitchSessionAction.ts', 'utf8');
 const deleteSessionActionHookSource = await readFile('src/components/chat/useChatDeleteSessionAction.ts', 'utf8');
+const mapCommandActionHookSource = await readFile('src/components/chat/useChatMapCommandAction.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
@@ -82,6 +84,11 @@ assert.match(deleteSessionActionHookSource, /export function useChatDeleteSessio
 assert.match(deleteSessionActionHookSource, /api\.deleteChatSession\(currentSessionId, userId\)/, 'delete-session hook should preserve the session-scoped delete API call');
 assert.match(deleteSessionActionHookSource, /api\.clearChatSession\(currentSessionId, userId\)/, 'delete-session hook should preserve the single-session clear API call');
 assert.match(deleteSessionActionHookSource, /onSessionDeleted\(response\)/, 'delete-session hook should hand responses back to ChatPanel for existing session reconciliation');
+assert.match(source, /useChatMapCommandAction/, 'ChatPanel should delegate map text command handling to a focused hook');
+assert.doesNotMatch(sendPromptSource, /parseMapTextCommand/, 'sendPrompt should not parse map text commands inline after hook extraction');
+assert.match(mapCommandActionHookSource, /export function useChatMapCommandAction/, 'useChatMapCommandAction hook should be exported');
+assert.match(mapCommandActionHookSource, /parseMapTextCommand\(text\)/, 'map command hook should preserve map text parsing');
+assert.match(mapCommandActionHookSource, /onMapTextCommand\(mapCommand\)/, 'map command hook should preserve the map command callback');
 assert.equal(source.includes('MessageSourceBadge'), true);
 assert.equal(source.includes('lastFailedPrompt'), true);
 assert.equal(source.includes('重试'), true);
@@ -90,7 +97,6 @@ assert.equal(source.includes('准备下载数据'), true);
 assert.equal(layerPanelSource.includes('if (!user) {'), true);
 assert.equal(layerPanelSource.includes('setJobs([]);'), true);
 
-const sendPromptSource = source.match(/const sendPrompt = async[\s\S]*?\n  const send =/)?.[0] || '';
 const refreshSessionsSource = chatSessionsHookSource.match(/const refreshSessions = useCallback[\s\S]*?\n  useEffect/)?.[0] || '';
 assert.match(refreshSessionsSource, /if \(!requestedUserId\) \{[\s\S]*?setSessions\(\[\]\);[\s\S]*?setCurrentSessionId\(''\);[\s\S]*?onMessagesCleared\(\);[\s\S]*?return;/, 'useChatSessions must not load anonymous chat history before login');
 const missingUserBranch = refreshSessionsSource.slice(
