@@ -6,6 +6,7 @@ const apiSource = await readFile('src/lib/api.ts', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 const productConsoleSource = await readFile('src/components/ProductConsole.tsx', 'utf8');
 const rendererSource = await readFile('src/components/ChatMessageRenderer.tsx', 'utf8');
+const taskCardSource = await readFile('src/components/chat/task-card/TaskStatusCard.tsx', 'utf8');
 
 assert.match(appSource, /currentSessionId/, 'App must own the current workspace chat session id');
 assert.match(appSource, /onSessionChange=\{setCurrentSessionId\}/, 'App must receive session changes from ChatPanel');
@@ -33,6 +34,6 @@ assert.match(productConsoleSource, /api\.preflightDownload\(\{\s*user_id: user\.
 assert.match(productConsoleSource, /api\.cancelDownloadJob\(job\.job_id, userId, .*sessionId\)/, 'ProductConsole cancel must pass sessionId');
 
 assert.doesNotMatch(rendererSource, /data-testid="technical-details"[\s\S]*Object\.keys\(debug\)\.length > 0/, 'technical details must not render for ordinary users by default');
-assert.match(rendererSource, /gis-agent-developer-mode|VITE_SHOW_TECHNICAL_DETAILS/, 'technical details must be gated by developer mode');
+assert.match(taskCardSource, /gis-agent-developer-mode|VITE_SHOW_TECHNICAL_DETAILS/, 'technical details must be gated by developer mode');
 
 console.log('sessionScopedActions.test.mjs passed');

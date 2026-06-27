@@ -4,6 +4,7 @@ import ts from 'typescript';
 
 const chatPanelSource = readFileSync('src/components/ChatPanel.tsx', 'utf8');
 const chatRendererSource = readFileSync('src/components/ChatMessageRenderer.tsx', 'utf8');
+const taskCardSource = readFileSync('src/components/chat/task-card/TaskStatusCard.tsx', 'utf8');
 const chatUploadsHookSource = readFileSync('src/components/chat/useChatUploads.ts', 'utf8');
 const apiSource = readFileSync('src/lib/api.ts', 'utf8');
 
@@ -24,10 +25,10 @@ assert.match(apiSource, /outcome_markdown\?: string/, 'upload/import responses m
 assert.match(apiSource, /result_panel\?: ResultPanel/, 'chat responses must expose result_panel for the right-side result panel');
 assert.match(chatPanelSource, /onResultPanel\?\.\(response\.result_panel\)/, 'ChatPanel must forward chat result_panel to the app shell');
 assert.match(chatUploadsHookSource, /r\.outcome_markdown/, 'Chat upload hook must show backend task outcome guidance');
-assert.match(chatRendererSource, /buildTaskCardPresentation/, 'task cards should use the shared presentation model');
-assert.match(chatRendererSource, /task-thinking-summary/, 'task cards should expose public thinking summaries');
-assert.match(chatRendererSource, /公开过程|执行过程|思考/, 'task cards should label public thinking without exposing hidden reasoning');
-
+assert.match(chatRendererSource, /from ['"]\.\/chat\/task-card['"]/, 'ChatMessageRenderer should consume the extracted task card boundary');
+assert.match(taskCardSource, /buildTaskCardPresentation/, 'task cards should use the shared presentation model');
+assert.match(taskCardSource, /task-thinking-summary/, 'task cards should expose public thinking summaries');
+assert.match(taskCardSource, /公开过程|执行过程|思考/, 'task cards should label public thinking without exposing hidden reasoning');
 const apiModule = await loadApiModule();
 assert.equal(
   apiModule.formatApiError(403, 'Forbidden', 'platform quota exhausted').message,
