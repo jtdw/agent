@@ -7,8 +7,6 @@ type InteractionMode = 'chat_only' | 'tool_enabled';
 
 type ChatComposerFooterProps = {
   isPage: boolean;
-  quickPrompts: string[];
-  sendPrompt: (prompt: string) => void;
   currentInteractionMode: InteractionMode;
   setInteractionMode: (mode: InteractionMode) => void;
   interactionModeLabel: string;
@@ -29,8 +27,6 @@ type ChatComposerFooterProps = {
 
 export function ChatComposerFooter({
   isPage,
-  quickPrompts,
-  sendPrompt,
   currentInteractionMode,
   setInteractionMode,
   interactionModeLabel,
@@ -51,24 +47,10 @@ export function ChatComposerFooter({
   return (
     <div
       data-testid="chat-composer-footer"
-      className={cn('chat-composer-footer', isPage && 'lg:col-start-2 lg:row-start-3')}
+      className={cn('chat-composer-footer', isPage ? 'is-page' : 'is-floating', isPage && 'lg:col-start-2 lg:row-start-3')}
       style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
     >
       <div className="chat-composer-footer-meta">
-        <div className="chat-quick-prompt-row" aria-label="常用指令">
-          <span className="chat-composer-footer-label">常用指令</span>
-          {quickPrompts.slice(0, 2).map((prompt) => (
-            <button
-              key={prompt}
-              type="button"
-              onClick={() => sendPrompt(prompt)}
-              className="chat-quick-prompt"
-              title={prompt}
-            >
-              {prompt.slice(0, 18)}...
-            </button>
-          ))}
-        </div>
         <div className="chat-composer-mode-panel" aria-label="会话交互模式">
           <div className="chat-interaction-mode-switch" aria-label="会话模式">
             <button

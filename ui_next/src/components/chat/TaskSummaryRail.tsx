@@ -53,6 +53,14 @@ function realtimeLabel(realtimeState: TaskSummaryRailProps['realtimeState']) {
   return '轮询同步';
 }
 
+
+function taskSyncLabel(syncState: string, fallback: TaskSummaryRailProps['realtimeState']) {
+  if (syncState === 'live') return realtimeLabel('live');
+  if (syncState === 'connecting') return realtimeLabel('connecting');
+  if (syncState === 'polling') return realtimeLabel('polling');
+  return syncState || realtimeLabel(fallback);
+}
+
 export function TaskSummaryRail({ taskSummaryItems, realtimeState, messageCount }: TaskSummaryRailProps) {
   const activeCount = taskSummaryItems.filter((item) => ['planning', 'queued', 'running', 'awaiting_confirmation', 'waiting_login', 'paused'].includes(item.status)).length;
   return (
@@ -113,7 +121,7 @@ export function TaskSummaryRail({ taskSummaryItems, realtimeState, messageCount 
               <div data-testid="chat-task-process-lane" className="mt-3 rounded-xl border border-slate-100 bg-slate-50/88 px-2.5 py-2 dark:border-slate-800 dark:bg-slate-950/42">
                 <div className="mb-1 flex items-center justify-between gap-2 text-[10px] font-black text-slate-400 dark:text-slate-500">
                   <span>公开过程</span>
-                  <span>{item.syncState || realtimeLabel(realtimeState)}</span>
+                  <span>{taskSyncLabel(item.syncState, realtimeState)}</span>
                 </div>
                 {(item.progress !== null || item.currentStep) ? (
                   <>

@@ -27,6 +27,9 @@ assert.match(consoleSource, /api\.loginHealth\(userId,\s*'gscloud',\s*'own'\)/, 
 assert.match(consoleSource, /deleteWorkspaceArtifact/, 'ProductConsole must be able to delete workspace artifacts');
 assert.match(consoleSource, /console-artifact-image-preview/, 'ProductConsole must show visual artifact thumbnails');
 assert.match(consoleSource, /artifact\.kind === 'visual'/, 'ProductConsole must preview visual artifacts without changing downloads');
+assert.match(consoleSource, /hidden w-\[180px\] shrink-0/, 'ProductConsole desktop sidebar should be about 180px wide to leave more room for the workspace');
+assert.match(consoleSource, /activeTab === 'chat' \? 'overflow-hidden p-0' : 'overflow-y-auto p-3 sm:p-4'/, 'ProductConsole chat tab should fill the content area without a large surrounding gutter');
+assert.match(consoleSource, /<ChatWorkspace[\s\S]*fillHeight/, 'ProductConsole chat tab should ask ChatWorkspace to fill the available panel height');
 assert.match(consoleSource, /api\.artifactMetadata/, 'ProductConsole download actions must resolve artifact_id through the artifact resolver');
 assert.doesNotMatch(consoleSource, /job\.download_url/, 'ProductConsole main download management path must not consume raw job.download_url');
 assert.doesNotMatch(consoleSource, /if \(error\) return <StateMessage/, 'ProductConsole must not replace the whole page with a dashboard error banner');

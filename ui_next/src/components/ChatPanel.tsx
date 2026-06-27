@@ -51,6 +51,7 @@ export type ChatWorkspaceProps = {
   chatContext?: ChatContextPayload;
   mentionDatasets?: Array<Record<string, unknown> | WorkspaceMention>;
   mode?: ChatWorkspaceMode;
+  fillHeight?: boolean;
 };
 
 const EMPTY_MENTION_DATASETS: Array<Record<string, unknown> | WorkspaceMention> = [];
@@ -248,7 +249,8 @@ export function ChatWorkspace({
   onSessionChange,
   chatContext = {},
   mentionDatasets = EMPTY_MENTION_DATASETS,
-  mode = 'floating'
+  mode = 'floating',
+  fillHeight = false
 }: ChatWorkspaceProps) {
   const userId = user?.user_id || '';
   const streamLifecycle = useChatStreamLifecycle({ userId });
@@ -641,8 +643,6 @@ export function ChatWorkspace({
 
         <ChatComposerFooter
           isPage={isPage}
-          quickPrompts={QUICK_PROMPTS}
-          sendPrompt={sendPrompt}
           currentInteractionMode={currentInteractionMode}
           setInteractionMode={setInteractionMode}
           interactionModeLabel={interactionModeLabel}
@@ -683,7 +683,10 @@ export function ChatWorkspace({
     return (
       <section
         data-testid="chat-page-workspace"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white/82 shadow-[0_22px_60px_rgba(51,65,85,.10)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78 lg:grid lg:h-[calc(100vh-11rem)] lg:min-h-[620px] lg:grid-cols-[240px_minmax(0,1fr)_280px] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
+        className={cn(
+          'relative flex min-h-0 flex-col overflow-hidden bg-white/82 backdrop-blur dark:bg-slate-900/78 lg:grid lg:grid-cols-[180px_minmax(0,1fr)_280px] lg:grid-rows-[auto_minmax(0,1fr)_auto]',
+          fillHeight ? 'h-full rounded-none border-0 shadow-none lg:h-full lg:min-h-0' : 'h-full rounded-3xl border border-slate-200/90 shadow-[0_22px_60px_rgba(51,65,85,.10)] dark:border-slate-800 lg:h-[calc(100vh-11rem)] lg:min-h-[620px]'
+        )}
       >
         {workspaceBody}
       </section>
