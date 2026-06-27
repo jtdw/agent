@@ -1090,6 +1090,7 @@ export function ProductConsole({
       onSessionChange={onSessionChange}
       chatContext={chatContext}
       mentionDatasets={dashboard?.datasets || []}
+      fillHeight
     />
   );
 
@@ -1122,7 +1123,7 @@ export function ProductConsole({
 
   return (
     <div className="no-drag fixed inset-0 z-20 flex bg-[radial-gradient(circle_at_18%_10%,rgba(8,199,232,.16),transparent_24%),linear-gradient(135deg,#f8fbff_0%,#eef5fb_52%,#eaf3ff_100%)] text-slate-950 dark:bg-[radial-gradient(circle_at_18%_10%,rgba(8,199,232,.11),transparent_26%),linear-gradient(135deg,#020617_0%,#0f172a_58%,#111827_100%)] dark:text-slate-50">
-      <aside className="hidden w-64 shrink-0 border-r border-slate-200/80 bg-white/82 px-4 py-5 shadow-[12px_0_40px_rgba(15,23,42,.05)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/70 lg:block">
+      <aside className="hidden w-[180px] shrink-0 border-r border-slate-200/80 bg-white/82 px-2.5 py-5 shadow-[12px_0_40px_rgba(15,23,42,.05)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/70 lg:block">
         <div className="mb-7 flex items-center gap-3">
           <div className="grid h-10 w-10 place-items-center rounded-2xl bg-gradient-to-br from-blue-600 to-cyan-500 text-white shadow-[0_14px_30px_rgba(15,98,254,.26)]">
             <Bot size={20} strokeWidth={1.7} />
@@ -1186,7 +1187,7 @@ export function ProductConsole({
           </div>
         </header>
 
-        <main className={cn('min-h-0 flex-1 p-4 sm:p-6', activeTab === 'chat' ? 'overflow-hidden' : 'overflow-y-auto')}>
+        <main className={cn('min-h-0 flex-1', activeTab === 'chat' ? 'overflow-hidden p-0' : 'overflow-y-auto p-3 sm:p-4')}>
           {renderContent()}
         </main>
       </div>

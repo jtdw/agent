@@ -1,4 +1,4 @@
-import { AtSign, Database, FileText, Image, Layers3, Loader2, Mic, Paperclip, SendHorizontal, Square, Table2 } from 'lucide-react';
+import { AtSign, Database, FileText, Image, Layers3, Loader2, Mic, Plus, SendHorizontal, Square, Table2 } from 'lucide-react';
 import { DragEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/lib/cn';
 import type { WorkspaceMention } from '@/lib/api';
@@ -20,7 +20,7 @@ type ChatComposerProps = {
   mentionItems?: WorkspaceMention[];
 };
 
-const minComposerHeight = 56;
+const minComposerHeight = 44;
 const maxComposerHeight = 220;
 
 export function ChatComposer({
@@ -216,30 +216,7 @@ export function ChatComposer({
             title={uploading ? '正在上传文件' : '上传文件'}
             aria-label={uploading ? '正在上传文件' : '上传文件'}
           >
-            {uploading ? <Loader2 size={18} className="animate-spin" /> : <Paperclip size={18} />}
-          </button>
-          <button
-            data-testid="chat-mention-trigger"
-            type="button"
-            className={cn('chat-composer-tool', mentionOpen && 'is-active')}
-            onClick={toggleMentionMenu}
-            disabled={disabled}
-            title="引用工作区数据"
-            aria-label="引用工作区数据"
-          >
-            <AtSign size={18} />
-          </button>
-          <button
-            data-testid="chat-voice"
-            type="button"
-            data-optional="voice"
-            onClick={onVoiceToggle}
-            disabled={disabled || !onVoiceToggle || !voiceSupported}
-            className={cn('chat-composer-tool', listening && 'is-active')}
-            title={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
-            aria-label={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
-          >
-            <Mic size={18} />
+            {uploading ? <Loader2 size={18} className="animate-spin" /> : <Plus size={20} />}
           </button>
         </div>
         <div className="chat-composer-field">
@@ -260,6 +237,30 @@ export function ChatComposer({
           />
         </div>
         <div className="chat-composer-action-cluster">
+          <button
+            data-testid="chat-mention-trigger"
+            type="button"
+            className={cn('chat-composer-tool', mentionOpen && 'is-active')}
+            onClick={toggleMentionMenu}
+            disabled={disabled}
+            title="引用工作区数据"
+            aria-label="引用工作区数据"
+          >
+            <AtSign size={18} />
+          </button>
+          <button
+            data-testid="chat-voice"
+            type="button"
+            data-optional="voice"
+            onClick={onVoiceToggle}
+            disabled={disabled || !onVoiceToggle || !voiceSupported}
+            className={cn('chat-composer-tool is-voice', listening && 'is-active')}
+            title={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
+            aria-label={voiceSupported ? (listening ? '停止语音输入' : '语音输入') : voiceUnavailableReason}
+          >
+            <Mic size={17} />
+            <span className="chat-composer-voice-label">语音</span>
+          </button>
           {sending ? (
             <button
               data-testid="chat-stop"

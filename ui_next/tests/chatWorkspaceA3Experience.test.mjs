@@ -48,7 +48,9 @@ assert.match(useChatModelsSource, /visibleModels/, 'useChatModels should return 
 assert.match(useChatModelsSource, /modelNotice/, 'useChatModels should own transient model success notice');
 assert.match(useChatModelsSource, /modelError/, 'useChatModels should own model switching errors');
 assert.match(panel, /<TaskSummaryRail/, 'ChatPanel should render the task summary rail');
-assert.match(panel, /lg:grid-cols-\[240px_minmax\(0,1fr\)_280px\]/, 'Page chat layout should reserve a right rail on desktop');
+assert.match(panel, /lg:grid-cols-\[180px_minmax\(0,1fr\)_280px\]/, 'Page chat layout should keep an about-180px session rail and reserve more room for messages');
+assert.match(panel, /fillHeight\?: boolean/, 'ChatWorkspace should support an embedded full-height layout');
+assert.match(panel, /fillHeight \? 'h-full rounded-none border-0 shadow-none lg:h-full lg:min-h-0'/, 'Embedded page chat should fill its host without a card-like surrounding gutter');
 assert.match(rail, /export function TaskSummaryRail/, 'TaskSummaryRail should be an isolated component');
 assert.match(rail, /taskSummaryItems/, 'TaskSummaryRail should render derived task summary items');
 assert.match(rail, /data-testid="chat-task-summary-rail"/, 'TaskSummaryRail should keep a stable task rail test id');
