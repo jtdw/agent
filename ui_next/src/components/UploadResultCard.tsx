@@ -27,7 +27,7 @@ export function UploadResultCard({ summaries }: { summaries: UploadSummary[] }) 
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-bold text-slate-800 dark:text-slate-100">{item.filename}</div>
                 <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                  <span>{item.type || 'file'}</span>
+                  <span>{item.type || '文件'}</span>
                   <span>{formatFileSize(item.size_bytes)}</span>
                   {typeof item.row_count === 'number' && <span>{item.row_count} 行</span>}
                   {item.dataset_name && <span>数据集：{item.dataset_name}</span>}

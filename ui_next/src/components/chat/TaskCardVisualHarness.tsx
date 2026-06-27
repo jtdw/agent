@@ -25,15 +25,15 @@ const harnessMessage: ChatMessage = {
     },
     presentation_result: {
       artifact_refs: [
-        { artifact_id: 'artifact_harness_report', title: 'boundary_check_report.md', type: 'document' },
-        { artifact_id: 'artifact_harness_grid', title: 'target_grid_preview.tif', type: 'raster' }
+        { artifact_id: 'artifact_harness_report', title: '边界检查报告.md', type: 'document' },
+        { artifact_id: 'artifact_harness_grid', title: '目标栅格预览.tif', type: 'raster' }
       ],
       map_layer_refs: [
-        { layer_id: 'layer_harness_boundary', name: 'Boundary validation preview' }
+        { layer_id: 'layer_harness_boundary', name: '边界校验预览' }
       ],
       next_action_suggestions: [
-        'Review boundary check report',
-        'Add validation preview to map'
+        '查看边界检查报告',
+        '添加校验预览图层'
       ]
     },
     management_view: {
@@ -51,9 +51,9 @@ const harnessResult: PresentationResult = {
   data_sources: ['workspace_upload_boundary.geojson', 'workspace_dem_preview.tif'],
   next_action_suggestions: ['确认边界与栅格范围一致', '完成后注册地图图层与下载成果'],
   executed_steps: [
-    { step_id: 'read-context', tool_name: 'workspace_profile', status: 'succeeded' },
-    { step_id: 'validate-inputs', tool_name: 'vector_validate', status: 'running' },
-    { step_id: 'register-outputs', tool_name: 'artifact_register', status: 'queued' }
+    { step_id: 'read-context', tool_name: '工作区画像', status: 'succeeded' },
+    { step_id: 'validate-inputs', tool_name: '矢量校验', status: 'running' },
+    { step_id: 'register-outputs', tool_name: '成果注册', status: 'queued' }
   ],
   warnings: []
 };
@@ -65,7 +65,7 @@ export function TaskCardVisualHarness() {
       <section className="mx-auto flex h-[calc(100vh-2rem)] max-w-6xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,.16)] dark:border-slate-800 dark:bg-slate-900 lg:flex-row">
         <div className="flex min-h-0 min-w-0 flex-col">
           <header className="border-b border-slate-200/80 px-5 py-4 dark:border-slate-800">
-            <div className="text-xs font-black uppercase tracking-[0.12em] text-blue-600 dark:text-cyan-300">GIS Agent Visual Harness</div>
+            <div className="text-xs font-black text-blue-600 dark:text-cyan-300">GIS 智能体视觉验收</div>
             <h1 className="mt-1 text-lg font-black">实时任务卡与公开过程</h1>
           </header>
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto bg-gradient-to-b from-slate-50 to-white p-5 dark:from-slate-950/30 dark:to-slate-900/30">

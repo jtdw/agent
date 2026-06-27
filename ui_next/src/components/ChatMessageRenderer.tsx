@@ -63,7 +63,7 @@ const MARKDOWN_COMPONENTS = {
       ? child.props as { className?: string; children?: ReactNode }
       : {};
     const value = String(codeProps.children || '').replace(/\n$/, '');
-    const lang = /language-([\w-]+)/.exec(codeProps.className || '')?.[1] || 'code';
+    const lang = /language-([\w-]+)/.exec(codeProps.className || '')?.[1] || '代码';
     return (
       <div className="chat-code-block">
         <div className="chat-code-toolbar">
@@ -113,7 +113,7 @@ function presentationResultFromMessage(message: ChatMessage): PresentationResult
 }
 
 function artifactKey(artifact: ChatArtifact) {
-  return artifact.artifact_id || artifact.filename || artifact.title || 'artifact';
+  return artifact.artifact_id || artifact.filename || artifact.title || '成果文件';
 }
 
 function stableTextKey(prefix: string, value: unknown) {
@@ -487,7 +487,7 @@ function artifactFromRef(ref: { artifact_id: string; title?: string; type?: stri
     title: ref.title || ref.artifact_id,
     name: ref.title || ref.artifact_id,
     type: ref.type || kind,
-    kind: kind || ref.type || 'artifact',
+    kind: kind || ref.type || '成果文件',
     source: { tool_name: ref.source_tool, workflow_id: ref.source_step_id },
   };
 }
@@ -868,8 +868,8 @@ function PresentationResultCard({
         <div className="grid gap-2 sm:grid-cols-2">
           {result.executed_steps?.slice(0, 6).map((step, index) => (
             <div key={`${step.step_id || index}-${step.tool_name || ''}`} className="rounded-xl bg-slate-50 px-3 py-2 text-xs font-bold text-slate-700 dark:bg-slate-900 dark:text-slate-200">
-              <div>{step.step_id || step.tool_name || `step ${index + 1}`}</div>
-              <div className="mt-0.5 text-[11px] font-semibold text-slate-500">{step.tool_name || 'tool'} · {step.status || 'unknown'}</div>
+              <div>{step.step_id || step.tool_name || `步骤 ${index + 1}`}</div>
+              <div className="mt-0.5 text-[11px] font-semibold text-slate-500">{step.tool_name || '工具'} · {step.status ? statusLabel(step.status) : '未知状态'}</div>
             </div>
           ))}
         </div>

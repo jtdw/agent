@@ -213,8 +213,8 @@ export function ChatComposer({
             className="chat-composer-tool"
             onClick={() => fileInputRef.current?.click()}
             disabled={disabled || uploading}
-            title={uploading ? '上传中' : '上传文件'}
-            aria-label={uploading ? '上传中' : '上传文件'}
+            title={uploading ? '正在上传文件' : '上传文件'}
+            aria-label={uploading ? '正在上传文件' : '上传文件'}
           >
             {uploading ? <Loader2 size={18} className="animate-spin" /> : <Paperclip size={18} />}
           </button>
@@ -224,8 +224,8 @@ export function ChatComposer({
             className={cn('chat-composer-tool', mentionOpen && 'is-active')}
             onClick={toggleMentionMenu}
             disabled={disabled}
-            title="引用已上传的数据"
-            aria-label="引用已上传的数据"
+            title="引用工作区数据"
+            aria-label="引用工作区数据"
           >
             <AtSign size={18} />
           </button>
@@ -254,7 +254,7 @@ export function ChatComposer({
             onKeyDown={onKeyDown}
             disabled={disabled}
             rows={1}
-            aria-label="聊天输入框，Enter 发送，Shift+Enter 换行"
+            aria-label="聊天输入框，按 Enter 发送，按 Shift+Enter 换行"
             placeholder={placeholder}
             className="chat-composer-textarea"
           />
@@ -279,7 +279,7 @@ export function ChatComposer({
               onClick={submit}
               disabled={disabled || !value.trim()}
               className="chat-composer-submit"
-              title="发送，Shift+Enter 换行"
+              title="发送消息，按 Shift+Enter 换行"
               aria-label="发送"
             >
               <SendHorizontal size={18} />

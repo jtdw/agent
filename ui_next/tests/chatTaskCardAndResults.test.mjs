@@ -7,6 +7,7 @@ const renderer = readFileSync(resolve(root, 'src/components/ChatMessageRenderer.
 const panel = readFileSync(resolve(root, 'src/components/ChatPanel.tsx'), 'utf8');
 const conversationHeader = readFileSync(resolve(root, 'src/components/chat/ChatConversationHeader.tsx'), 'utf8');
 const messageList = readFileSync(resolve(root, 'src/components/chat/ChatMessageList.tsx'), 'utf8');
+const composerFooter = readFileSync(resolve(root, 'src/components/chat/ChatComposerFooter.tsx'), 'utf8');
 const realtimeHook = readFileSync(resolve(root, 'src/components/chat/useChatRealtimeEvents.ts'), 'utf8');
 const downloadsHook = readFileSync(resolve(root, 'src/components/chat/useChatDownloads.ts'), 'utf8');
 const promptStreamActionHook = readFileSync(resolve(root, 'src/components/chat/useChatPromptStreamAction.ts'), 'utf8');
@@ -43,9 +44,10 @@ assert.match(renderer, /canCancelTask/, 'Task card must expose cancel action for
 assert.doesNotMatch(renderer, /status === 'failed' && <button[^]*onClarification\?\.\('retry'/, 'Failed task retry must not be routed as a clarification free-text action');
 assert.doesNotMatch(renderer, /sendPrompt\(['"`]继续/, 'Confirmation button must not submit a free-text continue request');
 
-const chatModeIndex = panel.indexOf('interaction-mode-chat');
-const toolModeIndex = panel.indexOf('interaction-mode-tool');
-const composerIndex = panel.indexOf('<ChatComposer');
+const chatModeIndex = composerFooter.indexOf('interaction-mode-chat');
+const toolModeIndex = composerFooter.indexOf('interaction-mode-tool');
+const composerIndex = composerFooter.indexOf('<ChatComposer');
+assert.match(panel, /<ChatComposerFooter/, 'ChatPanel should render the composer footer component');
 assert.ok(chatModeIndex >= 0 && chatModeIndex < composerIndex, 'Mode segmented control must be rendered before the composer');
 assert.ok(toolModeIndex >= 0 && toolModeIndex < composerIndex, 'Tool mode button must be rendered before the composer');
 assert.match(messageList, /function ThinkingStatusCard/, 'ChatMessageList must show a real-time status card while the assistant is working');

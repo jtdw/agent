@@ -91,7 +91,7 @@ export function ArtifactDownloadCard({
   const [resolvedArtifact, setResolvedArtifact] = useState<ChatArtifact | null>(null);
   const [resolving, setResolving] = useState(false);
   const resolved = resolvedArtifact ? { ...artifact, ...resolvedArtifact } : artifact;
-  const filename = resolved.filename || resolved.name || resolved.title || 'artifact';
+  const filename = resolved.filename || resolved.name || resolved.title || '成果文件';
   const Icon = artifactIcon(resolved.kind || resolved.type, filename);
   const source = resolved.source?.tool_name || resolved.source?.workflow_id || 'GIS 处理结果';
   const missing = resolved.status === 'missing';
@@ -180,7 +180,7 @@ export function ArtifactDownloadCard({
       <div className="min-w-0 flex-1 overflow-hidden">
         <div className="flex min-w-0 items-center gap-2">
           <span className="artifact-file-name text-sm font-bold text-slate-800 dark:text-slate-100">{filename}</span>
-          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-300">{artifact.mime_type || artifact.kind || artifact.type || 'file'}</span>
+          <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold uppercase text-slate-500 dark:bg-slate-800 dark:text-slate-300">{artifact.mime_type || artifact.kind || artifact.type || '文件'}</span>
         </div>
         <div className="artifact-meta-line mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
           <span>{formatFileSize(resolved.size_bytes, resolved.size_kb)}</span>

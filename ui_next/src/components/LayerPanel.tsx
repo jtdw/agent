@@ -339,7 +339,7 @@ export function LayerPanel({
         path: artifact.path || ''
       });
       setDashboard(result.dashboard);
-      setNotice(`已删除结果文件：${artifact.filename || artifact.name || artifact.title || artifact.artifact_id || 'artifact'}`);
+      setNotice(`已删除结果文件：${artifact.filename || artifact.name || artifact.title || artifact.artifact_id || '成果文件'}`);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '删除结果文件失败');
     } finally {
@@ -498,7 +498,7 @@ export function LayerPanel({
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="truncate font-black text-slate-700 dark:text-slate-100">{jobTitle(job)}</div>
-                          <div className="mt-0.5 text-slate-500 dark:text-slate-400">{status || 'unknown'} · {jobStage(job)} · {Number(jobProgress(job) || 0)}%</div>
+                          <div className="mt-0.5 text-slate-500 dark:text-slate-400">{status || '未知状态'} · {jobStage(job)} · {Number(jobProgress(job) || 0)}%</div>
                         </div>
                         <div className="flex shrink-0 items-center gap-1.5">
                           {done && canJob(job, 'view_artifacts') && (
@@ -581,7 +581,7 @@ export function LayerPanel({
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-black">{item.layer.name || item.layer.id}</div>
                       <div className="truncate text-xs text-slate-500 dark:text-slate-400">
-                        {item.layer.kind || 'result'} · {item.layer.type} {item.layer.feature_count ? `· ${item.layer.feature_count} features` : ''}
+                        {item.layer.kind || '结果图层'} · {item.layer.type} {item.layer.feature_count ? `· ${item.layer.feature_count} 个要素` : ''}
                       </div>
                       <div className="mt-2 flex items-center gap-1.5">
                         <Palette size={13} className="text-slate-400" strokeWidth={1.7} />

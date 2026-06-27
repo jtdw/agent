@@ -27,7 +27,7 @@ assert.match(panelSource, /提交审核/, 'capability panel must expose submit-f
 assert.match(panelSource, /激活/, 'capability panel must expose active approval action');
 assert.match(panelSource, /status: 'pending_review'/, 'submit action must use pending_review');
 assert.match(panelSource, /updateStatus\(item, 'active'\)/, 'activation action must use active');
-assert.match(panelSource, /Test retrieval query/, 'capability panel must keep retrieval test input');
+assert.match(panelSource, /输入测试检索问题/, 'capability panel must keep retrieval test input');
 assert.match(panelSource, /resetConfirmText/, 'capability panel must require explicit reset confirmation text');
 assert.match(panelSource, /systemReset/, 'capability panel must call structured reset API');
 assert.match(panelSource, /keep_accounts/, 'capability panel must expose keep-accounts reset mode');
@@ -45,6 +45,6 @@ assert.match(panelSource, /数据集可用性扫描/, 'capability panel must ren
 assert.match(panelSource, /scanAvailabilityProfile/, 'dataset availability card must support scanning products');
 assert.match(panelSource, /loadAvailabilityProfiles/, 'dataset availability card must support listing profiles');
 assert.match(panelSource, /updateAvailabilityStatus/, 'dataset availability card must support review status updates');
-assert.match(panelSource, /生成 draft 档案/, 'dataset availability scan must explain draft review flow');
+assert.match(panelSource, /生成草稿档案/, 'dataset availability scan must explain draft review flow');
 
 console.log('capabilityManagement.test.mjs passed');

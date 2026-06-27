@@ -9,7 +9,7 @@ export function SettingsPanel() {
   const [open, setOpen] = useState(false);
   const rows = [
     { icon: Languages, label: '语言', value: '简体中文' },
-    { icon: Ruler, label: '距离单位', value: 'Metric' },
+    { icon: Ruler, label: '距离单位', value: '公制' },
     { icon: Globe2, label: '坐标系统', value: '按数据自动识别' }
   ];
   return (

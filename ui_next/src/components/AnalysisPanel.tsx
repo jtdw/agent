@@ -51,7 +51,7 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
     setDownloadingArtifactId(artifactId);
     setError('');
     try {
-      await api.downloadArtifactById(artifactId, label || 'artifact', userId);
+      await api.downloadArtifactById(artifactId, label || '成果文件', userId);
     } catch (e) {
       setError(e instanceof Error ? e.message : '文件已清理、无访问权限或下载链接已失效。');
     } finally {
@@ -104,7 +104,7 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
                             disabled={!view.bestModel?.modelResultId}
                             onClick={() => {
                               if (!view.bestModel?.modelResultId) return;
-                              onChatContextChange?.({ selected_model_result_id: view.bestModel.modelResultId, last_visible_panel: 'analysis', user_focus_hint: 'selected model result' });
+                              onChatContextChange?.({ selected_model_result_id: view.bestModel.modelResultId, last_visible_panel: 'analysis', user_focus_hint: '已选择模型结果' });
                             }}
                             className="mt-3 w-full rounded-2xl bg-cyan-glow/10 px-3 py-2 text-left text-xs leading-5 text-slate-600 transition hover:bg-cyan-glow/15 dark:text-slate-300"
                           >

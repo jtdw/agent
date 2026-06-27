@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 const panelSource = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const composerFooterSource = await readFile('src/components/chat/ChatComposerFooter.tsx', 'utf8');
 const hookSource = await readFile('src/components/chat/useChatStreamLifecycle.ts', 'utf8');
 const promptStreamActionHook = await readFile('src/components/chat/useChatPromptStreamAction.ts', 'utf8');
 
@@ -12,7 +13,9 @@ assert.doesNotMatch(panelSource, /const activeTaskIdRef = useRef<string>\(''\)/,
 assert.match(promptStreamActionHook, /await api\.streamChat\(/, 'Prompt stream hook should own the streaming API call');
 assert.match(promptStreamActionHook, /streamLifecycle\.startTask\(taskId,\s*controller\)/, 'Prompt stream hook should register active stream tasks through the lifecycle hook');
 assert.match(promptStreamActionHook, /streamLifecycle\.finishTask\(taskId,\s*controller\)/, 'Prompt stream hook should clear active stream tasks through the lifecycle hook');
-assert.match(panelSource, /onStop=\{streamLifecycle\.stopCurrentRequest\}/, 'ChatComposer should stop through the lifecycle hook');
+assert.match(panelSource, /<ChatComposerFooter/, 'ChatPanel should delegate footer rendering to the composer footer component');
+assert.match(panelSource, /stopCurrentRequest=\{streamLifecycle\.stopCurrentRequest\}/, 'ChatPanel should pass lifecycle stop into the composer footer');
+assert.match(composerFooterSource, /onStop=\{stopCurrentRequest\}/, 'ChatComposer should stop through the lifecycle hook');
 
 assert.match(hookSource, /export function useChatStreamLifecycle/, 'hook should export useChatStreamLifecycle');
 assert.match(hookSource, /const \[thinking,\s*setThinking\] = useState\(false\)/, 'hook should own thinking state');

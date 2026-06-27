@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 
 const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
 const chatPanel = await readFile('src/components/ChatPanel.tsx', 'utf8');
+const composerFooter = await readFile('src/components/chat/ChatComposerFooter.tsx', 'utf8');
 const voiceHook = await readFile('src/components/chat/useChatVoiceInput.ts', 'utf8');
 const css = await readFile('src/index.css', 'utf8');
 
@@ -17,6 +18,11 @@ assert.match(voiceHook, /export function useChatVoiceInput/, 'useChatVoiceInput 
 assert.match(voiceHook, /SpeechRecognition|webkitSpeechRecognition/, 'Voice hook should own browser speech recognition setup');
 assert.match(voiceHook, /isLocalSecureContext/, 'Voice hook should keep secure-context gating for microphone access');
 assert.match(composer, /data-testid="chat-mention-trigger"/, 'ChatComposer must keep the workspace mention action test id');
+assert.match(composer, /placeholder = '有问题，尽管问'/, 'Composer placeholder should stay Chinese');
+assert.match(composer, /aria-label="聊天输入框，按 Enter 发送，按 Shift\+Enter 换行"/, 'Composer textarea aria label should be Chinese');
+assert.match(composer, /title=\{uploading \? '正在上传文件' : '上传文件'\}/, 'Upload action title should be Chinese');
+assert.match(composer, /title="引用工作区数据"/, 'Mention action title should be Chinese');
+assert.match(composer, /title="发送消息，按 Shift\+Enter 换行"/, 'Send action title should be Chinese');
 assert.match(composer, /className="chat-composer-input-frame"/, 'Composer controls should be wrapped in a stable command-frame');
 assert.match(composer, /className="chat-composer-tool-group"/, 'Secondary tools should be grouped for stable spacing');
 assert.match(composer, /className="chat-composer-field"/, 'Textarea should sit in a dedicated flexible field');
@@ -33,5 +39,16 @@ assert.match(css, /\.chat-mention-menu\s*\{[\s\S]*max-width:\s*calc\(100vw - 1re
 assert.match(css, /\.chat-mention-list\s*\{[\s\S]*max-height:\s*min\(18rem,\s*42vh\)/, 'Mention list must be height constrained on small screens');
 assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.chat-composer-input-frame\s*\{[\s\S]*grid-template-columns:\s*auto minmax\(0,\s*1fr\) auto/, 'Mobile composer must retain upload/mention, input, and send columns');
 assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.chat-composer-tool-group\s*\{[\s\S]*\.chat-composer-tool-group \.chat-composer-tool\[data-optional="voice"\]/, 'Mobile layout should hide only the optional voice control');
+assert.match(chatPanel, /<ChatComposerFooter/, 'ChatPanel should render the bottom composer through a focused footer component');
+assert.doesNotMatch(chatPanel, /chat-quick-prompt/, 'ChatPanel should not own quick-prompt footer markup inline');
+assert.match(composerFooter, /export function ChatComposerFooter/, 'ChatComposerFooter should be exported');
+assert.match(composerFooter, /data-testid="chat-composer-footer"/, 'Composer footer should expose a stable root test id');
+assert.match(composerFooter, /常用指令/, 'Composer footer should label quick prompts in Chinese');
+assert.match(composerFooter, /会话模式/, 'Composer footer should label the mode switch in Chinese');
+assert.match(composerFooter, /data-testid="interaction-mode-chat"/, 'Composer footer must preserve chat mode test id');
+assert.match(composerFooter, /data-testid="interaction-mode-tool"/, 'Composer footer must preserve tool mode test id');
+assert.match(css, /\.chat-composer-footer\s*\{[\s\S]*border-top:/, 'Composer footer should have a stable bordered footer surface');
+assert.match(css, /\.chat-composer-footer-meta\s*\{[\s\S]*display:\s*flex/, 'Composer footer metadata row should be a flexible row');
+assert.match(css, /\.chat-interaction-mode-switch\s*\{[\s\S]*display:\s*inline-flex/, 'Mode switch should have a stable segmented-control style');
 
 console.log('chatComposerExperience.test.mjs passed');

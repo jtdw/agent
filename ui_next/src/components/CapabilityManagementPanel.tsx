@@ -2,6 +2,21 @@ import { useState } from 'react';
 import { api, type AdminSystemResetMode, type CapabilityResource, type CapabilityResourceType, type DatasetAvailabilityProfile, type PlatformAccount, type StorageCleanupCandidate } from '../lib/api';
 
 const RESOURCE_TYPES: CapabilityResourceType[] = ['knowledge', 'tool_cards', 'products', 'assets'];
+const RESOURCE_TYPE_LABELS: Record<CapabilityResourceType, string> = {
+  knowledge: '知识库',
+  tool_cards: '工具卡',
+  products: '产品目录',
+  assets: '默认资产'
+};
+const STATUS_LABELS: Record<string, string> = {
+  draft: '草稿',
+  pending_review: '待审核',
+  active: '已激活',
+  deprecated: '已弃用',
+  disabled: '已停用',
+  archived: '已归档',
+  enabled: '已启用'
+};
 const DOWNLOAD_PRODUCT_IDS = [
   'gscloud_dem_30m',
   'gscloud_dem_90m',
@@ -15,6 +30,10 @@ const DOWNLOAD_PRODUCT_IDS = [
 
 function resourceId(item: CapabilityResource) {
   return String(item.knowledge_id || item.tool_name || item.product_id || item.asset_id || item.title || item.name || '');
+}
+
+function displayStatus(status?: string) {
+  return STATUS_LABELS[String(status || '')] || status || '未知状态';
 }
 
 export function CapabilityManagementPanel() {
@@ -119,7 +138,7 @@ export function CapabilityManagementPanel() {
     try {
       const result = await api.startAdminPlatformAccountLogin(accountId, { timeout_seconds: 300, headless: false, admin_token: adminToken });
       setPlatformAccounts((prev) => prev.map((item) => item.account_id === accountId ? result.account : item));
-      setNotice(`已打开 GSCloud 登录窗口：${result.login_job?.login_job_id || 'login job'}。请在弹出的浏览器中完成登录，完成后点击“检查登录态”。`);
+      setNotice(`已打开 GSCloud 登录窗口：${result.login_job?.login_job_id || '登录任务'}。请在弹出的浏览器中完成登录，完成后点击“检查登录态”。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '打开登录窗口失败。');
     } finally {
@@ -147,7 +166,7 @@ export function CapabilityManagementPanel() {
     try {
       const result = await api.capabilityResources(resourceType, { include_disabled: true, admin_token: adminToken });
       setItems(result.items || []);
-      setNotice(`已加载 ${result.items?.length || 0} 条 ${resourceType} 记录。`);
+      setNotice(`已加载 ${result.items?.length || 0} 条${RESOURCE_TYPE_LABELS[resourceType]}记录。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '加载能力配置失败。');
     } finally {
@@ -161,7 +180,7 @@ export function CapabilityManagementPanel() {
     setNotice('');
     try {
       await api.uploadCapabilityKnowledge({ file, admin_token: adminToken, title: file.name, source: 'admin_upload', version: 'v1', status: 'draft' });
-      setNotice('知识文档已上传为 draft。请先检索测试，确认后提交审核并激活。');
+      setNotice('知识文档已上传为草稿。请先检索测试，确认后提交审核并激活。');
       if (resourceType === 'knowledge') await load();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '上传知识文档失败。');
@@ -200,7 +219,7 @@ export function CapabilityManagementPanel() {
             ? '前端审核通过并激活'
             : '前端停用';
       await api.updateCapabilityStatus(resourceType, id, status, adminToken, { actor, summary });
-      setNotice(status === 'active' ? '已激活为 active，Planner 可按需检索使用。' : status === 'pending_review' ? '已提交审核。' : '已停用。');
+      setNotice(status === 'active' ? '已激活，规划智能体可按需检索使用。' : status === 'pending_review' ? '已提交审核。' : '已停用。');
       await load();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '更新状态失败。');
@@ -288,7 +307,7 @@ export function CapabilityManagementPanel() {
   const scanAvailabilityProfile = async () => {
     const productId = availabilityProductId.trim();
     if (!productId) {
-      setNotice('请先选择或输入 Product Catalog 中的 product_id。');
+      setNotice('请先选择或输入产品目录中的产品 ID。');
       return;
     }
     setBusy(true);
@@ -301,7 +320,7 @@ export function CapabilityManagementPanel() {
         admin_token: adminToken
       });
       setAvailabilityProfiles((prev) => [result.item, ...prev.filter((item) => item.product_id !== result.item.product_id)]);
-      setNotice('扫描完成：已生成 draft 档案。请核对时间范围、格式和说明后提交审核并激活。');
+      setNotice('扫描完成：已生成草稿档案。请核对时间范围、格式和说明后提交审核并激活。');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '扫描产品可用性失败。');
     } finally {
@@ -321,7 +340,7 @@ export function CapabilityManagementPanel() {
             : '前端停用数据集可用性档案';
       const result = await api.updateDatasetAvailabilityStatus(productId, status, adminToken, { actor, summary });
       setAvailabilityProfiles((prev) => prev.map((item) => item.product_id === productId ? result.item : item));
-      setNotice(status === 'active' ? '已激活可用性档案，Validator 将按此约束校验下载时间。' : status === 'pending_review' ? '已提交审核。' : '已停用。');
+      setNotice(status === 'active' ? '已激活可用性档案，校验器将按此约束校验下载时间。' : status === 'pending_review' ? '已提交审核。' : '已停用。');
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '更新可用性档案状态失败。');
     } finally {
@@ -336,7 +355,7 @@ export function CapabilityManagementPanel() {
         return (
           <div key={`${id}:${item.version || ''}`} className="rounded-2xl border border-white/30 bg-white/45 px-3 py-2 text-xs dark:border-white/10 dark:bg-white/5">
             <div className="font-bold">{item.title || item.display_name_zh || item.name || id}</div>
-            <div className="mt-1 text-slate-500 dark:text-slate-400">{id} / {item.version || 'unversioned'} / {item.status || 'unknown'}</div>
+            <div className="mt-1 text-slate-500 dark:text-slate-400">{id} / {item.version || '未标注版本'} / {displayStatus(item.status)}</div>
             <div className="mt-2 flex flex-wrap gap-2">
               <button type="button" disabled={busy || item.status === 'pending_review' || item.status === 'active'} onClick={() => updateStatus(item, 'pending_review')} className="rounded-xl border border-slate-200 bg-white/70 px-2 py-1 font-bold text-slate-600 disabled:opacity-40 dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-300">提交审核</button>
               <button type="button" disabled={busy || item.status === 'active'} onClick={() => updateStatus(item, 'active')} className="rounded-xl bg-emerald-500 px-2 py-1 font-bold text-white disabled:opacity-40">激活</button>
@@ -352,7 +371,7 @@ export function CapabilityManagementPanel() {
     <div className="mt-4 rounded-[18px] border border-white/30 bg-white/35 p-3 dark:border-white/10 dark:bg-white/5">
       <div className="mb-3">
         <div className="text-sm font-black">知识与能力管理</div>
-        <div className="text-xs text-slate-500 dark:text-slate-400">管理员配置 Planner 可检索的知识、工具卡、产品目录和默认资产。</div>
+        <div className="text-xs text-slate-500 dark:text-slate-400">管理员配置规划智能体可检索的知识、工具卡、产品目录和默认资产。</div>
       </div>
       <div className="space-y-2">
         <input
@@ -369,7 +388,7 @@ export function CapabilityManagementPanel() {
             className="min-w-0 flex-1 rounded-2xl border border-slate-200 bg-white/75 px-3 py-2 text-sm outline-none focus:border-cyan-400 dark:border-slate-700 dark:bg-slate-950/70"
           >
             {RESOURCE_TYPES.map((type) => (
-              <option key={type} value={type}>{type}</option>
+              <option key={type} value={type}>{RESOURCE_TYPE_LABELS[type]}</option>
             ))}
           </select>
           <button type="button" onClick={load} disabled={busy} className="glass-button px-4 text-sm font-bold disabled:opacity-50">加载</button>
@@ -382,7 +401,7 @@ export function CapabilityManagementPanel() {
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Test retrieval query"
+            placeholder="输入测试检索问题"
             className="min-w-0 flex-1 rounded-2xl border border-slate-200 bg-white/75 px-3 py-2 text-sm outline-none focus:border-cyan-400 dark:border-slate-700 dark:bg-slate-950/70"
           />
           <button type="button" onClick={testSearch} disabled={busy} className="glass-button px-4 text-sm font-bold disabled:opacity-50">测试</button>
@@ -395,7 +414,7 @@ export function CapabilityManagementPanel() {
           <div>
             <div className="text-sm font-black text-indigo-900 dark:text-indigo-100">数据集可用性扫描</div>
             <div className="mt-1 text-xs leading-5 text-indigo-800/80 dark:text-indigo-100/80">
-              扫描当前 Product Catalog 与受控产品入口，生成 draft 档案；只有审核激活后才会约束下载时间、格式和可用性。
+              扫描当前产品目录与受控产品入口，生成草稿档案；只有审核激活后才会约束下载时间、格式和可用性。
             </div>
           </div>
           <button type="button" onClick={loadAvailabilityProfiles} disabled={busy} className="rounded-2xl border border-indigo-300 bg-white/80 px-3 py-2 text-xs font-black text-indigo-800 disabled:opacity-45 dark:border-indigo-900/70 dark:bg-slate-950/50 dark:text-indigo-100">加载档案</button>
@@ -405,7 +424,7 @@ export function CapabilityManagementPanel() {
             list="dataset-availability-product-ids"
             value={availabilityProductId}
             onChange={(event) => setAvailabilityProductId(event.target.value)}
-            placeholder="product_id，例如 gscloud_ndvi_500m_10day"
+            placeholder="产品 ID，例如 gscloud_ndvi_500m_10day"
             className="rounded-2xl border border-indigo-200 bg-white/80 px-3 py-2 text-xs outline-none focus:border-cyan-400 dark:border-indigo-900/60 dark:bg-slate-950/60"
           />
           <datalist id="dataset-availability-product-ids">
@@ -432,7 +451,7 @@ export function CapabilityManagementPanel() {
                     <div className="min-w-0">
                       <div className="font-black text-slate-800 dark:text-slate-100">{profile.display_name_zh || profile.product_id}</div>
                       <div className="mt-1 text-slate-500 dark:text-slate-400">
-                        {profile.product_id} · {profile.status || 'unknown'} · {profile.verification_method || 'unknown'} · 时间范围：{coverageText}
+                        {profile.product_id} · {displayStatus(profile.status)} · 校验方式：{profile.verification_method || '未标注'} · 时间范围：{coverageText}
                       </div>
                       <div className="mt-1 text-slate-500 dark:text-slate-400">
                         分辨率：{(profile.supported_resolutions || []).join(', ') || '未声明'} · 格式：{(profile.supported_formats || []).join(', ') || '未声明'}
@@ -506,7 +525,7 @@ export function CapabilityManagementPanel() {
                   <div className="min-w-0">
                     <div className="font-black text-slate-800 dark:text-slate-100">{account.label || account.account_id}</div>
                     <div className="mt-1 text-slate-500 dark:text-slate-400">
-                      {account.source_key} · {account.username_preview || '未保存用户名'} · {account.status || 'unknown'} · {healthLabel(account)}
+                      {account.source_key} · {account.username_preview || '未保存用户名'} · {displayStatus(account.status)} · {healthLabel(account)}
                     </div>
                     <div className="mt-1 text-slate-500 dark:text-slate-400">
                       今日 {Number(account.used_today || 0)} / {Number(account.daily_limit || 0)}，本月 {Number(account.used_month || 0)} / {Number(account.monthly_limit || 0)}

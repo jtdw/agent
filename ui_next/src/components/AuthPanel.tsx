@@ -20,7 +20,7 @@ type PlanMeta = {
 const PLAN_META: Record<'basic' | 'pro' | 'team', PlanMeta> = {
   basic: {
     key: 'basic',
-    label: 'BASIC',
+    label: '基础版',
     subtitle: '默认账号',
     price: '免费',
     quota: '平台额度 0',
@@ -28,7 +28,7 @@ const PLAN_META: Record<'basic' | 'pro' | 'team', PlanMeta> = {
   },
   pro: {
     key: 'pro',
-    label: 'PRO',
+    label: '专业版',
     subtitle: '个人高级版',
     price: '¥20 / 月',
     quota: '平台额度 50 次/月',
@@ -37,7 +37,7 @@ const PLAN_META: Record<'basic' | 'pro' | 'team', PlanMeta> = {
   },
   team: {
     key: 'team',
-    label: 'TEAM',
+    label: '团队版',
     subtitle: '团队协作版',
     price: '¥59 / 月',
     quota: '平台额度 300 次/月',
@@ -170,7 +170,7 @@ function UpgradeModal({ user, open, onClose, onUpgraded }: { user: CommercialUse
                         className={cn('primary-button mt-5 w-full gap-2 disabled:cursor-not-allowed disabled:opacity-55', plan === 'team' && 'bg-none')}
                         style={plan === 'team' ? { background: 'linear-gradient(135deg, #7c3aed, #22d3ee)' } : undefined}
                       >
-                        {isCurrent ? '当前套餐' : busyPlan === plan ? '处理中...' : currentPlan === 'pro' && plan === 'team' ? '升级到 TEAM' : `升级到 ${item.label}`}
+                        {isCurrent ? '当前套餐' : busyPlan === plan ? '处理中...' : currentPlan === 'pro' && plan === 'team' ? '升级到团队版' : `升级到${item.label}`}
                       </button>
                     </motion.div>
                   );
@@ -240,9 +240,9 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
   const quota = Math.max(0, Number(user?.platform_monthly_quota || 0) - Number(user?.platform_monthly_used || 0));
   const planHint = useMemo(() => {
     if (!user) return '';
-    if (plan === 'basic') return '默认 BASIC，可使用基础数据处理与任务登记。';
-    if (plan === 'pro') return `PRO 有效期至 ${formatExpire(user.plan_expires_at)}；剩余下载额度 ${quota}。`;
-    return `TEAM 有效期至 ${formatExpire(user.plan_expires_at)}；剩余下载额度 ${quota}。`;
+    if (plan === 'basic') return '当前为基础版，可使用基础数据处理与任务登记。';
+    if (plan === 'pro') return `专业版有效期至 ${formatExpire(user.plan_expires_at)}；剩余下载额度 ${quota}。`;
+    return `团队版有效期至 ${formatExpire(user.plan_expires_at)}；剩余下载额度 ${quota}。`;
   }, [user, plan, quota]);
 
   if (user) {
@@ -283,8 +283,8 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
                   <Sparkles size={22} strokeWidth={1.5} />
                 </div>
                 <div>
-                  <h2 className="text-xl font-black tracking-tight">{mode === 'login' ? '登录 GIS 智能体' : '创建 BASIC 账号'}</h2>
-                  <p className="text-sm text-slate-500 dark:text-slate-400">新注册账号默认为 BASIC，升级后可获得更多下载额度。</p>
+                  <h2 className="text-xl font-black tracking-tight">{mode === 'login' ? '登录 GIS 智能体' : '创建基础版账号'}</h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">新注册账号默认为基础版，升级后可获得更多下载额度。</p>
                 </div>
               </div>
               <div className="space-y-3">
@@ -299,7 +299,7 @@ export function AuthPanel({ user, setUser }: { user: CommercialUser | null; setU
               </div>
               {error && <div className="mt-3 rounded-xl border border-coral/20 bg-coral/10 px-3 py-2 text-sm text-coral">{error}</div>}
               <button data-testid="auth-submit" onClick={submit} disabled={busy || !email || !password} className="primary-button mt-5 w-full gap-2 disabled:opacity-50">
-                {mode === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />} {busy ? '处理中...' : mode === 'login' ? '登录' : '注册 BASIC 账号'}
+                {mode === 'login' ? <LogIn size={16} /> : <UserPlus size={16} />} {busy ? '处理中...' : mode === 'login' ? '登录' : '注册基础版账号'}
               </button>
               <button data-testid="auth-mode-toggle" onClick={() => setMode(mode === 'login' ? 'register' : 'login')} className="mt-4 w-full text-sm font-semibold text-slate-500 transition hover:text-ocean dark:text-slate-400">
                 {mode === 'login' ? '没有账号？立即注册' : '已有账号？返回登录'}

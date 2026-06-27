@@ -582,7 +582,7 @@ export function ProductConsole({
     }
     try {
       const metadata = await api.artifactMetadata(artifactId, userId, sessionId);
-      await api.downloadArtifactById(artifactId, metadata.filename || metadata.title || name || 'artifact', userId, sessionId);
+      await api.downloadArtifactById(artifactId, metadata.filename || metadata.title || name || '成果文件', userId, sessionId);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '文件已清理、无访问权限或下载链接已失效。');
     }
@@ -677,7 +677,7 @@ export function ProductConsole({
       <section className="overflow-hidden rounded-3xl border border-slate-200/90 bg-white/88 p-6 shadow-[0_18px_48px_rgba(15,23,42,.08)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78">
         <div className="grid gap-6 lg:grid-cols-[1.35fr_1fr]">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50">GIS Agent 智能体管理后台</h1>
+            <h1 className="text-2xl font-bold tracking-tight text-slate-950 dark:text-slate-50">GIS 智能体管理后台</h1>
             <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-600 dark:text-slate-300">
               面向科研数据任务的控制台：统一完成数据下载、参数预检、后台执行、日志诊断、结果查看和成果导出。
             </p>
@@ -935,12 +935,12 @@ export function ProductConsole({
               <InfoItem label="审计事件" value={logData.diagnostic_event_views?.audit_events?.length || 0} />
             </div>
             <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 shadow-inner dark:border-slate-700">
-              <div>task_id: {logData.management_view?.task_id || logData.job?.job_id || '--'}</div>
-              <div>status: {logData.management_view?.status || '--'}</div>
-              <div>stage: {logData.management_view?.action_state?.stage || '--'}</div>
-              <div>progress: {formatPercent(logData.management_view?.progress ?? 0)}%</div>
-              <div>source: {logData.management_view?.source_name || '--'}</div>
-              {logData.management_view?.user_message && <div className="text-rose-300">message: {logData.management_view.user_message}</div>}
+              <div>任务编号：{logData.management_view?.task_id || logData.job?.job_id || '--'}</div>
+              <div>任务状态：{logData.management_view?.status || '--'}</div>
+              <div>执行阶段：{logData.management_view?.action_state?.stage || '--'}</div>
+              <div>完成进度：{formatPercent(logData.management_view?.progress ?? 0)}%</div>
+              <div>数据来源：{logData.management_view?.source_name || '--'}</div>
+              {logData.management_view?.user_message && <div className="text-rose-300">提示信息：{logData.management_view.user_message}</div>}
             </div>
             <LogGroup title="场景日志" items={logData.diagnostic_event_views?.scene_jobs || []} empty="暂无场景日志" />
             <LogGroup title="分幅日志" items={logData.diagnostic_event_views?.tile_jobs || []} empty="暂无分幅日志" />
@@ -1128,7 +1128,7 @@ export function ProductConsole({
             <Bot size={20} strokeWidth={1.7} />
           </div>
           <div>
-            <div className="text-sm font-bold tracking-tight">GIS Agent</div>
+            <div className="text-sm font-bold tracking-tight">GIS 智能体</div>
             <div className="text-xs text-slate-500 dark:text-slate-400">科研任务控制台</div>
           </div>
         </div>
@@ -1291,7 +1291,7 @@ function LogGroup({ title, items, empty }: { title: string; items: DiagnosticEve
             <div key={`${item.timestamp || ''}-${item.phase || ''}-${index}`} className="rounded-xl border border-slate-200/70 bg-slate-50/86 px-3 py-2 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950/78 dark:text-slate-300">
               <span className="mr-3"><b>时间</b>: {item.timestamp || '--'}</span>
               <span className="mr-3"><b>阶段</b>: {item.phase || '--'}</span>
-              <span className="mr-3"><b>级别</b>: {item.level || 'info'}</span>
+              <span className="mr-3"><b>级别</b>: {item.level || '信息'}</span>
               <span className="mr-3"><b>摘要</b>: {item.summary || '--'}</span>
               {item.error_code ? <span className="mr-3"><b>错误码</b>: {item.error_code}</span> : null}
               {item.next_action ? <span className="mr-3"><b>下一步</b>: {item.next_action}</span> : null}

@@ -67,7 +67,7 @@ export function TaskSummaryRail({ taskSummaryItems, realtimeState, messageCount 
               <ListChecks size={16} className="text-emerald-600 dark:text-emerald-300" />
               GIS 任务工作台
             </div>
-            <div className="mt-1 text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">Live process rail</div>
+            <div className="mt-1 text-[10px] font-bold text-slate-400 dark:text-slate-500">实时过程流</div>
           </div>
           <span className="rounded-full bg-emerald-50 px-2 py-1 text-[10px] font-black text-emerald-700 ring-1 ring-emerald-100 dark:bg-emerald-950/28 dark:text-emerald-200 dark:ring-emerald-900/70">{taskSummaryItems.length} 项</span>
         </div>

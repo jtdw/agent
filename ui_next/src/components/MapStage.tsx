@@ -166,7 +166,7 @@ function stationPopupHtml(station: StationPoint) {
   const lng = Number(station.longitude);
   const lat = Number(station.latitude);
   const mean = station.mean_sm == null ? '--' : Number(station.mean_sm).toFixed(3);
-  const name = escapeHtml(String(station.name || station.station_id || 'station'));
+  const name = escapeHtml(String(station.name || station.station_id || '站点'));
   return `
     <div class="font-black text-sm mb-1">${name}</div>
     <div class="text-xs text-slate-500">2019 5 cm mean soil moisture: ${mean} m3/m3</div>

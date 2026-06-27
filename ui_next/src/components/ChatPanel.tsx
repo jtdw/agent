@@ -1,19 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Map as MapIcon, MessageSquare, SearchCheck, Sparkles, UploadCloud, Wrench, X } from 'lucide-react';
+import { Map as MapIcon, SearchCheck, Sparkles, UploadCloud, X } from 'lucide-react';
 import { api, ChatMessage, ChatSession, CommercialUser, RealtimeChatEvent, ResultPanel, WorkspaceMention } from '@/lib/api';
 import { GlassCard } from './GlassCard';
 import { cn } from '@/lib/cn';
 import type { ParsedMapTextCommand } from './mapTextCommands';
 import { assistantReplyContent, normalizeChatMessages } from './chatMessageContent';
 import type { ChatContextPayload } from '@/lib/chatContext';
-import { ChatComposer } from './ChatComposer';
 import { GSCloudAccountPanel } from './GSCloudAccountPanel';
 import { ModalPortal } from './ModalPortal';
 import { TaskSummaryRail } from './chat/TaskSummaryRail';
 import { ChatConversationHeader } from './chat/ChatConversationHeader';
 import { ChatSessionSidebar } from './chat/ChatSessionSidebar';
 import { ChatMessageList } from './chat/ChatMessageList';
+import { ChatComposerFooter } from './chat/ChatComposerFooter';
 import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
@@ -639,64 +639,27 @@ export function ChatWorkspace({
           onScroll={handleScroll}
         />
 
-        <div
-          className={cn('shrink-0 border-t border-slate-200/80 bg-white/86 px-4 pt-4 shadow-[0_-12px_34px_rgba(15,23,42,.04)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/82', isPage && 'lg:col-start-2 lg:row-start-3')}
-          style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}
-        >
-          <div className="mb-2 flex flex-wrap gap-2">
-            {QUICK_PROMPTS.slice(0, 2).map((p) => (
-              <button key={p} onClick={() => sendPrompt(p)} className="chat-quick-prompt">
-                {p.slice(0, 18)}...
-              </button>
-            ))}
-          </div>
-          <div className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center gap-2" aria-label="会话交互模式">
-              <div className="inline-flex rounded-2xl border border-slate-200 bg-white/80 p-1 shadow-sm dark:border-slate-700 dark:bg-slate-900/75">
-                <button
-                  type="button"
-                  data-testid="interaction-mode-chat"
-                  className={cn('inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black transition-colors', currentInteractionMode === 'chat_only' ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-950' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/10')}
-                  title="聊天模式：只回答问题，不操作数据"
-                  aria-pressed={currentInteractionMode === 'chat_only'}
-                  disabled={thinking || !userId}
-                  onClick={() => setInteractionMode('chat_only')}
-                >
-                  <MessageSquare size={14} /> 聊天
-                </button>
-                <button
-                  type="button"
-                  data-testid="interaction-mode-tool"
-                  className={cn('inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-black transition-colors', currentInteractionMode === 'tool_enabled' ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-white/10')}
-                  title="工具模式：经计划和校验后执行工具"
-                  aria-pressed={currentInteractionMode === 'tool_enabled'}
-                  disabled={thinking || !userId}
-                  onClick={() => setInteractionMode('tool_enabled')}
-                >
-                  <Wrench size={14} /> 工具
-                </button>
-              </div>
-              <div className="max-w-full text-[11px] leading-snug text-slate-500 dark:text-slate-400">{interactionModeLabel}</div>
-            </div>
-            <div className="min-w-0 flex-1">
-              <ChatComposer
-                value={input}
-                onChange={setInput}
-                onSend={send}
-                onUpload={uploadFiles}
-                onStop={streamLifecycle.stopCurrentRequest}
-                sending={thinking}
-                uploading={uploading}
-                disabled={!userId}
-                voiceSupported={voiceSupported}
-                listening={listening}
-                voiceUnavailableReason={voiceUnavailableReason}
-                onVoiceToggle={toggleVoice}
-                mentionItems={workspaceMentions}
-              />
-            </div>
-          </div>
-        </div>
+        <ChatComposerFooter
+          isPage={isPage}
+          quickPrompts={QUICK_PROMPTS}
+          sendPrompt={sendPrompt}
+          currentInteractionMode={currentInteractionMode}
+          setInteractionMode={setInteractionMode}
+          interactionModeLabel={interactionModeLabel}
+          thinking={thinking}
+          userId={userId}
+          input={input}
+          setInput={setInput}
+          send={send}
+          uploadFiles={uploadFiles}
+          stopCurrentRequest={streamLifecycle.stopCurrentRequest}
+          uploading={uploading}
+          voiceSupported={voiceSupported}
+          listening={listening}
+          voiceUnavailableReason={voiceUnavailableReason}
+          toggleVoice={toggleVoice}
+          workspaceMentions={workspaceMentions}
+        />
         {!isPage && <div {...dragHandle} className="absolute right-0 top-0 h-full w-2 cursor-ew-resize" />}
         <ModalPortal>
           <AnimatePresence>

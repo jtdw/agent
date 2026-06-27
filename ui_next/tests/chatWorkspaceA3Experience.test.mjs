@@ -62,9 +62,16 @@ assert.match(rail, /data-testid="chat-task-process-lane"/, 'TaskSummaryRail shou
 assert.match(rail, /data-testid="chat-task-result-strip"/, 'TaskSummaryRail should render a compact result strip for artifacts and map layers');
 assert.match(rail, /task-rail-spine/, 'TaskSummaryRail should include a visual status spine for the A3 workbench style');
 assert.match(rail, /GIS/, 'TaskSummaryRail copy should make the GIS workbench purpose visible');
+assert.match(rail, /实时过程流/, 'TaskSummaryRail subtitle should be Chinese');
+assert.doesNotMatch(rail, /Live process rail/, 'TaskSummaryRail should not show English rail subtitles');
+assert.match(harness, /GIS 智能体视觉验收/, 'Visual harness title should be Chinese');
+assert.doesNotMatch(harness, /GIS Agent Visual Harness/, 'Visual harness should not expose English title copy');
+assert.match(harness, /边界校验预览/, 'Visual harness map layer fixture should be Chinese');
+assert.match(harness, /查看边界检查报告/, 'Visual harness next action should be Chinese');
+assert.match(harness, /添加校验预览图层/, 'Visual harness map action should be Chinese');
 
 const messages = [
-  { id: 'u1', role: 'user', content: 'run analysis' },
+  { id: 'u1', role: 'user', content: '执行分析' },
   {
     id: 'task-1',
     role: 'assistant',
@@ -73,25 +80,25 @@ const messages = [
       task_id: 'task_harness_running',
       status: 'running',
       progress: 42,
-      current_step: 'Validating uploaded vector boundary',
+      current_step: '正在校验上传的矢量边界',
       realtime_sync: 'live',
       interaction_type: 'tool_task',
       task_card: {
-        title: 'Workspace validation',
-        current_step: 'Validating uploaded vector boundary'
+        title: '工作区数据校验',
+        current_step: '正在校验上传的矢量边界'
       },
       execution_summary: {
-        summary: 'Read workspace context, validate inputs, then register outputs.'
+        summary: '读取工作区上下文，校验输入数据，然后注册结果成果。'
       },
       presentation_result: {
         artifact_refs: [
-          { artifact_id: 'artifact_1', title: 'model_report.md', type: 'document' },
-          { artifact_id: 'artifact_2', title: 'prediction.tif', type: 'raster' }
+          { artifact_id: 'artifact_1', title: '模型报告.md', type: 'document' },
+          { artifact_id: 'artifact_2', title: '预测结果.tif', type: 'raster' }
         ],
         map_layer_refs: [
-          { layer_id: 'layer_1', name: 'Prediction map' }
+          { layer_id: 'layer_1', name: '预测结果图层' }
         ],
-        next_action_suggestions: ['Review model report', 'Add prediction layer to map']
+        next_action_suggestions: ['查看模型报告', '添加预测图层到地图']
       }
     }
   },
@@ -121,11 +128,11 @@ const runningItem = taskSummaryItems.find((item) => item.id === 'task_harness_ru
 assert.ok(runningItem, 'task rail should include the running synthetic task');
 assert.equal(runningItem.status, 'running');
 assert.equal(runningItem.progress, 42);
-assert.match(runningItem.summary, /Workspace validation|Validating uploaded vector boundary|Read workspace context/);
+assert.match(runningItem.summary, /工作区数据校验|正在校验上传的矢量边界|读取工作区上下文/);
 assert.equal(runningItem.artifactCount, 2, 'task rail should count registered artifacts');
 assert.equal(runningItem.mapLayerCount, 1, 'task rail should count generated map layers');
-assert.deepEqual(runningItem.nextActions, ['Review model report', 'Add prediction layer to map']);
-assert.match(runningItem.primaryResultLabel, /model_report\.md|prediction\.tif|Prediction map/, 'task rail should expose a human-readable primary result label');
+assert.deepEqual(runningItem.nextActions, ['查看模型报告', '添加预测图层到地图']);
+assert.match(runningItem.primaryResultLabel, /模型报告\.md|预测结果\.tif|预测结果图层/, 'task rail should expose a human-readable primary result label');
 
 const serialized = JSON.stringify(taskSummaryItems);
 assert.doesNotMatch(serialized, /C:\\|\.env|token=|cookie|storage_state|Traceback/i, 'task rail summaries must redact sensitive details');
