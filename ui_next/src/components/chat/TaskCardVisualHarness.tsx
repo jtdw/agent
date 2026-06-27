@@ -62,7 +62,7 @@ export function TaskCardVisualHarness() {
   const taskSummaryItems = buildChatTaskSummary([harnessMessage]);
   return (
     <main data-testid="task-card-visual-harness" className="min-h-screen bg-slate-100 p-4 text-slate-950 dark:bg-slate-950 dark:text-slate-50">
-      <section className="mx-auto grid h-[calc(100vh-2rem)] max-w-6xl overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,.16)] dark:border-slate-800 dark:bg-slate-900 lg:grid-cols-[minmax(0,1fr)_280px]">
+      <section className="mx-auto flex h-[calc(100vh-2rem)] max-w-6xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-[0_28px_80px_rgba(15,23,42,.16)] dark:border-slate-800 dark:bg-slate-900 lg:flex-row">
         <div className="flex min-h-0 min-w-0 flex-col">
           <header className="border-b border-slate-200/80 px-5 py-4 dark:border-slate-800">
             <div className="text-xs font-black uppercase tracking-[0.12em] text-blue-600 dark:text-cyan-300">GIS Agent Visual Harness</div>
@@ -85,7 +85,9 @@ export function TaskCardVisualHarness() {
             </div>
           </div>
         </div>
-        <TaskSummaryRail taskSummaryItems={taskSummaryItems} realtimeState="live" messageCount={2} />
+        <div className="hidden min-h-0 w-[280px] shrink-0 lg:block">
+          <TaskSummaryRail taskSummaryItems={taskSummaryItems} realtimeState="live" messageCount={2} />
+        </div>
       </section>
     </main>
   );

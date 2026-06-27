@@ -28,6 +28,8 @@ assert.match(harnessEntry, /createRoot/, 'Visual harness entry should mount inde
 assert.match(harnessEntry, /TaskCardVisualHarness/, 'Visual harness entry should render the task-card harness');
 assert.match(harness, /data-testid="task-card-visual-harness"/, 'Harness should expose a stable screenshot root');
 assert.match(harness, /<ChatMessageRenderer/, 'Harness should render the real task card component');
+assert.match(harness, /lg:flex-row/, 'Harness should use a stable flex layout for screenshot sizing');
+assert.doesNotMatch(harness, /lg:grid-cols-\[/, 'Harness should not use arbitrary grid columns that can squeeze the task card');
 assert.match(harness, /task_harness_running/, 'Harness should use a stable synthetic task id');
 assert.doesNotMatch(harness, /\.env|token=|cookie|storage_state|Traceback|C:\\\\/, 'Harness fixture must not contain sensitive implementation strings');
 
