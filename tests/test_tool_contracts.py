@@ -1117,6 +1117,83 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(result["artifacts"][0]["type"], "summary")
             self.assertTrue(result["next_actions"])
 
+    def test_raster_covariate_quality_check_applies_precipitation_type_defaults(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = Path(tmp) / "precip_day.tif"
+            data = np.array([[0.0, 1.5], [-2.0, 25.0]], dtype="float32")
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=data.shape[0],
+                width=data.shape[1],
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(0, 2, 1, 1),
+                nodata=-9999.0,
+            ) as dst:
+                dst.write(data, 1)
+            service.manager.put_raster_path("precip_20190715", raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["raster_covariate_quality_check"].invoke(
+                {
+                    "raster_names": "precip_20190715",
+                    "output_name": "precip_qa",
+                    "covariate_type": "precipitation_mm",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            summary = result["diagnostics"]["rasters"][0]
+            self.assertEqual(summary["covariate_type"], "precipitation_mm")
+            self.assertEqual(summary["expected_min"], 0.0)
+            self.assertEqual(summary["out_of_range_pixels"], 1)
+            self.assertEqual(summary["quality"], "failed")
+            self.assertIn("values_outside_expected_range", summary["reasons"])
+
+    def test_raster_covariate_quality_check_treats_landcover_as_categorical(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = Path(tmp) / "landcover.tif"
+            data = np.array([[1, 2, 3], [2, 3, 99]], dtype="int16")
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=data.shape[0],
+                width=data.shape[1],
+                count=1,
+                dtype="int16",
+                crs="EPSG:4326",
+                transform=from_origin(0, 2, 1, 1),
+                nodata=0,
+            ) as dst:
+                dst.write(data, 1)
+            service.manager.put_raster_path("landcover_2020", raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["raster_covariate_quality_check"].invoke(
+                {
+                    "raster_names": "landcover_2020",
+                    "output_name": "landcover_qa",
+                    "covariate_type": "landcover",
+                    "expected_categories": "1,2,3",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            summary = result["diagnostics"]["rasters"][0]
+            self.assertEqual(summary["data_model"], "categorical")
+            self.assertEqual(summary["unique_class_count"], 4)
+            self.assertEqual(summary["unexpected_category_pixels"], 1)
+            self.assertEqual(summary["unexpected_categories"], [99])
+            self.assertEqual(summary["quality"], "failed")
+
     def test_raster_covariate_quality_check_has_planner_tool_card(self) -> None:
         from core.tool_cards import candidate_tool_cards, list_tool_cards
 
@@ -1129,10 +1206,20 @@ class ToolContractTests(unittest.TestCase):
             card["tool_name"]
             for card in candidate_tool_cards("检查日数据 NDVI LST 缺失和有效像元比例", task_type="data_processing", limit=8)
         ]
+        precipitation_candidates = [
+            card["tool_name"]
+            for card in candidate_tool_cards("检查日降水 precipitation 缺失和负值质量", task_type="data_processing", limit=8)
+        ]
+        landcover_candidates = [
+            card["tool_name"]
+            for card in candidate_tool_cards("检查土地利用 landcover 分类编码质量", task_type="data_processing", limit=8)
+        ]
 
         self.assertIn("raster_covariate_quality_check", names)
         self.assertIn("raster_covariate_quality_check", candidates)
         self.assertEqual(chinese_candidates[0], "raster_covariate_quality_check")
+        self.assertEqual(precipitation_candidates[0], "raster_covariate_quality_check")
+        self.assertEqual(landcover_candidates[0], "raster_covariate_quality_check")
 
     def test_batch_register_invalid_mode_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

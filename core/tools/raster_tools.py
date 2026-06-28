@@ -74,6 +74,16 @@ _RASTER_ALGEBRA_NP_FUNCTIONS = {
     "tan",
 }
 
+_COVARIATE_TYPE_DEFAULT_RANGES: dict[str, tuple[float | None, float | None]] = {
+    "ndvi": (-1.0, 1.0),
+    "evi": (-1.0, 1.0),
+    "lst_celsius": (-80.0, 80.0),
+    "lst_kelvin": (180.0, 350.0),
+    "precipitation_mm": (0.0, None),
+}
+
+_CATEGORICAL_COVARIATE_TYPES = {"categorical", "landcover", "land_use", "soil_type"}
+
 
 def _validate_raster_algebra_ast(parsed: ast.Expression, *, variables: set[str]) -> None:
     allowed_nodes = (
@@ -137,8 +147,8 @@ def _validate_raster_algebra_ast(parsed: ast.Expression, *, variables: set[str])
             if not isinstance(node.func.value, ast.Name) or node.func.value.id != "np" or node.func.attr not in _RASTER_ALGEBRA_NP_FUNCTIONS:
                 raise ValueError(f"栅格表达式只允许调用白名单 NumPy 函数: np.{node.func.attr}")
 
-def _parse_expected_ranges(value: str) -> dict[str, tuple[float, float]]:
-    ranges: dict[str, tuple[float, float]] = {}
+def _parse_expected_ranges(value: str) -> dict[str, tuple[float | None, float | None]]:
+    ranges: dict[str, tuple[float | None, float | None]] = {}
     for item in str(value or "").replace(";", ",").split(","):
         token = item.strip()
         if not token:
@@ -152,6 +162,25 @@ def _parse_expected_ranges(value: str) -> dict[str, tuple[float, float]]:
             raise ValueError(f"expected range is missing raster name: {token}")
         ranges[clean_name] = (float(lower), float(upper))
     return ranges
+
+
+def _normalize_covariate_type(value: str) -> str:
+    return str(value or "generic").strip().lower() or "generic"
+
+
+def _coerce_category(value: float) -> int | float:
+    numeric = float(value)
+    return int(numeric) if numeric.is_integer() else numeric
+
+
+def _parse_expected_categories(value: str) -> set[int | float]:
+    categories: set[int | float] = set()
+    for item in str(value or "").replace(";", ",").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        categories.add(_coerce_category(float(token)))
+    return categories
 
 
 def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> list[Any]:
@@ -271,6 +300,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
         band: int = 1,
         min_valid_ratio: float = 0.6,
         expected_ranges: str = "",
+        covariate_type: str = "generic",
+        expected_categories: str = "",
     ) -> str:
         """Check daily raster covariates such as NDVI/LST for NoData coverage and value-range issues before modeling."""
         inputs = {
@@ -279,6 +310,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             "band": band,
             "min_valid_ratio": min_valid_ratio,
             "expected_ranges": expected_ranges,
+            "covariate_type": covariate_type,
+            "expected_categories": expected_categories,
         }
         raster_list = _parse_columns(raster_names)
         if not raster_list:
@@ -295,6 +328,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             band_value = int(band)
             threshold = float(min_valid_ratio)
             range_rules = _parse_expected_ranges(expected_ranges)
+            clean_covariate_type = _normalize_covariate_type(covariate_type)
+            category_rules = _parse_expected_categories(expected_categories)
         except Exception as exc:
             return tool_result_error(
                 "raster_covariate_quality_check",
@@ -302,8 +337,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 error_code="COVARIATE_QA_ARGS_INVALID",
                 error_title="Invalid covariate QA arguments",
                 user_message=str(exc),
-                diagnostics={"band": band, "min_valid_ratio": min_valid_ratio, "expected_ranges": expected_ranges},
-                next_actions=["Use band as an integer, min_valid_ratio between 0 and 1, and expected_ranges like ndvi=-1:1."],
+                diagnostics={"band": band, "min_valid_ratio": min_valid_ratio, "expected_ranges": expected_ranges, "expected_categories": expected_categories},
+                next_actions=["Use band as an integer, min_valid_ratio between 0 and 1, expected_ranges like ndvi=-1:1, and expected_categories like 1,2,3."],
             ).to_json()
         if not 0 <= threshold <= 1:
             return tool_result_error(
@@ -348,10 +383,21 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     nodata_pixels = int(total_pixels - valid_pixels)
                     valid_ratio = float(valid_pixels / total_pixels) if total_pixels else 0.0
                     missing_ratio = float(nodata_pixels / total_pixels) if total_pixels else 1.0
-                    lower, upper = range_rules.get(raster_name, (None, None))
+                    data_model = "categorical" if clean_covariate_type in _CATEGORICAL_COVARIATE_TYPES else "continuous"
+                    lower, upper = range_rules.get(raster_name, _COVARIATE_TYPE_DEFAULT_RANGES.get(clean_covariate_type, (None, None)))
                     out_of_range_pixels = 0
-                    if valid_pixels and lower is not None and upper is not None:
-                        out_of_range_pixels = int(np.count_nonzero((valid < float(lower)) | (valid > float(upper))))
+                    unexpected_category_pixels = 0
+                    unexpected_categories: list[int | float] = []
+                    unique_values: list[int | float] = []
+                    if valid_pixels and data_model == "categorical":
+                        unique_values = sorted({_coerce_category(value) for value in np.unique(valid).tolist()})
+                        if category_rules:
+                            unexpected_categories = [value for value in unique_values if value not in category_rules]
+                            unexpected_category_pixels = int(np.count_nonzero([_coerce_category(value) not in category_rules for value in valid]))
+                    elif valid_pixels:
+                        below = (valid < float(lower)) if lower is not None else np.zeros(valid.shape, dtype=bool)
+                        above = (valid > float(upper)) if upper is not None else np.zeros(valid.shape, dtype=bool)
+                        out_of_range_pixels = int(np.count_nonzero(below | above))
                     quality = "ok"
                     reasons: list[str] = []
                     if valid_ratio < threshold:
@@ -360,6 +406,9 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     if out_of_range_pixels > 0:
                         quality = "failed"
                         reasons.append("values_outside_expected_range")
+                    if unexpected_category_pixels > 0:
+                        quality = "failed"
+                        reasons.append("unexpected_categories")
                     if quality == "ok" and nodata_pixels > 0:
                         quality = "warning"
                         reasons.append("nodata_present")
@@ -368,6 +417,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     summaries.append(
                         {
                             "raster_name": raster_name,
+                            "covariate_type": clean_covariate_type,
+                            "data_model": data_model,
                             "band": band_value,
                             "quality": quality,
                             "reasons": reasons,
@@ -377,6 +428,9 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                             "valid_ratio": valid_ratio,
                             "missing_ratio": missing_ratio,
                             "out_of_range_pixels": out_of_range_pixels,
+                            "unexpected_category_pixels": unexpected_category_pixels,
+                            "unexpected_categories": unexpected_categories,
+                            "unique_class_count": int(len(unique_values)) if data_model == "categorical" else 0,
                             "expected_min": lower,
                             "expected_max": upper,
                             "min": float(np.nanmin(valid)) if valid_pixels else None,
@@ -398,12 +452,15 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             for item in summaries:
                 row = dict(item)
                 row["reasons"] = ",".join(str(reason) for reason in item.get("reasons", []))
+                row["unexpected_categories"] = ",".join(str(value) for value in item.get("unexpected_categories", []))
                 table_rows.append(row)
             summary_dataset = manager.put_table(output_name, pd.DataFrame(table_rows))
             summary_path = manager.derived_dir / f"{_artifact_safe_name(output_name)}_covariate_quality_summary.json"
             summary_payload = {
                 "overall_quality": overall_quality,
                 "min_valid_ratio": threshold,
+                "covariate_type": clean_covariate_type,
+                "expected_categories": sorted(category_rules),
                 "raster_count": int(len(summaries)),
                 "rasters": summaries,
                 "recommended_workflow": "Use temporal compositing or gap filling before modeling when quality is warning or failed.",
@@ -431,7 +488,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 artifacts=[artifact],
                 tables=[{"table_id": summary_dataset, "title": summary_dataset}],
                 summary=f"Checked {len(summaries)} raster covariate(s); overall quality is {overall_quality}.",
-                diagnostics={"rasters": summaries, "min_valid_ratio": threshold},
+                diagnostics={"rasters": summaries, "min_valid_ratio": threshold, "covariate_type": clean_covariate_type},
                 warnings=warnings,
                 next_actions=[
                     "Use temporal compositing for daily NDVI/LST rasters with low valid coverage.",

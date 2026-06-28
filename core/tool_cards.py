@@ -117,11 +117,11 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         ["data_processing", "raster_quality", "remote_sensing", "soil_moisture", "modeling"],
         ["raster_names", "output_name"],
         ["quality_summary", "table_dataset", "artifact"],
-        optional_inputs=["band", "min_valid_ratio", "expected_ranges"],
+        optional_inputs=["band", "min_valid_ratio", "expected_ranges", "covariate_type", "expected_categories"],
         input_asset_roles=["daily_ndvi_raster", "daily_lst_raster", "covariate_raster"],
         preconditions=["Rasters must be loaded", "expected_ranges uses raster=min:max"],
-        common_failure_cases=["NoData coverage too high", "values outside expected range", "band out of range"],
-        forbidden_uses=["Do not treat QA as gap filling or compositing", "Do not call low-valid-ratio daily products reliable"],
+        common_failure_cases=["NoData too high", "values outside range", "band out of range"],
+        forbidden_uses=["Do not treat QA as gap filling", "Do not call low-valid-ratio daily rasters reliable"],
     ),
     _card(
         "raster_zonal_stats",
@@ -377,9 +377,9 @@ def candidate_tool_cards(query: str, *, task_type: str = "", limit: int = 8) -> 
     terms = {token.lower() for token in raw_query.replace("_", " ").split() if token.strip()}
     lower_query = raw_query.lower()
     synonym_terms: list[str] = []
-    if any(token in lower_query for token in ("ndvi", "lst")) and (
+    if any(token in lower_query for token in ("ndvi", "lst", "precipitation", "landcover", "land use")) and (
         any(token in lower_query for token in ("missing", "nodata", "quality", "valid ratio", "valid pixel"))
-        or any(token in raw_query for token in ("缺失", "质量", "有效像元", "有效比例", "日数据"))
+        or any(token in raw_query for token in ("缺失", "质量", "有效像元", "有效比例", "日数据", "降水", "土地利用"))
     ):
         synonym_terms.extend(["raster_covariate_quality_check", "raster_quality", "remote_sensing", "quality_summary"])
     if any(token in raw_query for token in ("站点", "采样", "提取")) and ("栅格" in raw_query or "raster" in lower_query):
