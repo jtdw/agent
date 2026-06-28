@@ -1,0 +1,541 @@
+# Progress
+
+## 2026-06-27
+
+- Confirmed user request: generate a plan only, no code.
+- Read applicable planning and brainstorming skill instructions.
+- Checked repository state and relevant documentation directories.
+- Generated persistent planning files under `.planning/langchain_agent_redesign/`.
+- Generated formal Chinese plan document under `docs/superpowers/plans/`.
+- Verification note: `Format-Hex -Count` is unsupported in this PowerShell version; this did not affect generated files.
+- Started execution after user approval.
+- Baseline checks before implementation: `.venv\Scripts\python.exe -m pytest tests/test_api_helpers_lightweight.py tests/test_workflow_smoke.py -q` passed 13 tests.
+- GitNexus impact for `GISAgent`: MEDIUM risk, 4 direct import dependents, 0 affected processes. Proceeded with a minimal constructor-only attachment.
+- TDD RED: added `tests/test_agent_runtime_phase1.py`; it failed because `core.agent_runtime` and `GISAgent.agent_runtime` did not exist.
+- TDD GREEN: added `core/agent_runtime/` and attached `GISAgent.agent_runtime` without changing `ask()` behavior.
+- Verification after implementation: py_compile passed for changed files; 19 relevant tests passed.
+- GitNexus detect-changes after implementation: low risk, 0 affected processes.
+- Re-ran relevant tests during self-review: 19 tests passed again.
+- Continued with Phase 2 context boundary.
+- TDD RED: added tests requiring `AgentRuntimeContext` to preserve manager user/session/workspace, bridge to `ToolRuntimeContext`, and reject outside-workspace paths.
+- TDD GREEN: added `core/agent_runtime/context.py` and exported `AgentRuntimeContext`.
+- TDD RED/GREEN: required `GISAgent.agent_runtime.context` to reflect the manager scope, then wired `AgentRuntimeContext.from_manager(manager)` into `GISAgentRuntime`.
+- Verification after Phase 2 context start: py_compile passed; 27 related tests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- Continued with Phase 3 read-only tool adapter.
+- GitNexus impact for `build_tools`: CRITICAL, 100 impacted symbols, 13 direct dependents, 2 affected processes. Avoided editing `core/tools/registry.py`.
+- TDD RED: added tests for read-only `RuntimeToolSpec` generation, tool deduplication, risk classification, permissions, and `GISAgentRuntime.tool_specs`.
+- TDD GREEN: added `core/agent_runtime/tools.py` and wired `tool_specs` into `GISAgentRuntime` without changing execution.
+- Verification note: one attempted pytest target in `tests/test_tool_contracts.py` did not exist; reran valid related tests instead.
+- Verification after Phase 3 adapter start: py_compile passed; 29 related tests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- Continued Phase 3 read-only metadata and precheck layer.
+- TDD RED/GREEN: added `RuntimeToolSpec.to_metadata()` so planner/context-facing data does not expose the original tool object.
+- TDD RED/GREEN: added pure `precheck_tool_spec()` permission checks for high-risk download tools, without connecting it to live execution.
+- TDD RED/GREEN: added `GISAgentRuntime.tool_metadata()` for future planner/context use.
+- Verification after metadata/precheck layer: py_compile passed; 32 related tests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- User asked to continue automatically unless a choice is required.
+- TDD RED/GREEN: added `GISAgentRuntime.context_overlay()` to expose runtime status and tool metadata as a mergeable context fragment.
+- GitNexus impact for `build_conversation_context`: MEDIUM, 64 impacted symbols, 1 affected process. Avoided changing the main context-building flow.
+- GitNexus impact for `format_context_for_agent`: LOW, 3 direct dependents. Added compatible passthrough for optional `runtime` and `runtime_tool_metadata`.
+- Verification after context overlay passthrough: py_compile passed; 33 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- TDD RED/GREEN: added `GISAgentRuntime.get_tool_spec()` and `GISAgentRuntime.precheck_tool()` for runtime-side tool lookup and permission precheck.
+- Verification after runtime tool lookup/precheck: py_compile passed; 55 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- Continued automatic execution.
+- GitNexus impact for `GISWorkspaceService`: CRITICAL, 61 impacted symbols and 44 direct dependents. Avoided editing `core/service.py` main flow in this step.
+- TDD RED/GREEN: added `GISAgentRuntime.merge_context()` so disabled runtime remains a no-op copy while enabled/shadow runtime can merge overlay into context.
+- GitNexus could not locate `_get_agent` by symbol name, so no service edit was made without a clean impact result.
+- TDD RED/GREEN: added `GISAgentRuntime.refresh_context(manager)` so cached runtime instances can update user/session/workspace scope before any future service integration.
+- Verification after merge/refresh runtime support: py_compile passed; 58 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- Continued automatic execution with runtime shadow trace.
+- TDD RED/GREEN: added `RuntimeTraceBuffer`, `GISAgentRuntime.record_trace_event()`, `trace_snapshot()`, and `diagnostics()`.
+- TDD RED/GREEN: wired trace events into `merge_context()`, `precheck_tool()`, and `refresh_context()` without changing their public return shapes.
+- Verification after trace support: py_compile passed; 62 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- TDD RED/GREEN: added runtime tool risk summary and all-tool precheck summary for diagnostics.
+- Verification after risk/precheck summary: py_compile passed; 63 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- TDD RED/GREEN: updated `GISWorkspaceService._get_agent()` to refresh cached `agent_runtime` context before returning the agent. This is the first service-layer touch and does not change routing or responses.
+- Verification after cached runtime refresh: py_compile passed; 75 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- TDD RED/GREEN: added read-only `GISWorkspaceService.agent_runtime_diagnostics()` for cached agent runtime diagnostics. It does not add an API route and does not execute tools or chat.
+- Verification after service diagnostics: py_compile passed; 76 tests and 18 subtests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- User approved exposing diagnostics as an admin-only backend API without ordinary frontend UI.
+- GitNexus impact for `create_admin_operations_router`: LOW, 24 impacted symbols, 2 direct dependents, 0 affected processes.
+- TDD RED/GREEN: added `/api/admin/agent-runtime/diagnostics` under existing admin operations router with `x-admin-token` admin authorization.
+- Added recursive response sanitization for sensitive diagnostic keys and values: prompts, token/cookie/env/secret/password/storage_state/path/workspace_dir/absolute_path.
+- Wired `api_server.py` to provide diagnostics from the anonymous workspace service.
+- Added route-level and app-level tests for unauthorized denial and sanitized authorized response.
+- Verification after admin diagnostics API: py_compile passed; 27 targeted tests passed; GitNexus detect-changes remained low risk with 0 affected processes.
+- Continued Phase 4 planner/coordinator runtime adapter.
+- GitNexus impact: `build_llm_task_plan` MEDIUM, `build_shadow_llm_task_plan` MEDIUM, `build_coordinator_decision` HIGH. Avoided editing all three existing planner/coordinator functions.
+- TDD RED: added `tests/test_agent_runtime_planner_adapter.py`; it failed because `core.agent_runtime.planner` did not exist.
+- TDD GREEN: added `core/agent_runtime/planner.py` with `RuntimePlannerAdapter` for shadow task-plan diagnostics and coordinator decision diagnostics, both marked `executes_tools=False`.
+- Wired runtime diagnostics to report `planner_adapter` availability and exported `RuntimePlannerAdapter` from `core.agent_runtime`.
+- Preserved existing behavior: no changes to `service.ask()`, `build_llm_task_plan()`, `build_shadow_llm_task_plan()`, `build_coordinator_decision()`, or live tool execution.
+- Verification after Phase 4 adapter start: py_compile passed; 41 related tests passed; 7 admin/route/runtime tests passed; GitNexus detect-changes reported low risk with 0 affected processes.
+- Continued Phase 4 with service-side opt-in shadow planner diagnostics.
+- GitNexus impact before service edit: `GISWorkspaceService` CRITICAL, `_get_agent` LOW, `build_shadow_llm_task_plan` MEDIUM. Kept the edit to one helper and one existing call site.
+- TDD RED/GREEN: added service helper coverage requiring runtime-disabled behavior to use the legacy shadow planner path and runtime-enabled behavior to use `RuntimePlannerAdapter`.
+- Added `GISWorkspaceService._build_shadow_task_plan()` and replaced the direct shadow planner call in `ask()` with the helper. Runtime v2 disabled remains the legacy path and does not create an agent.
+- Verification after service-side Phase 4: py_compile passed; 47 related runtime/planner/admin tests passed; 17 chat/orchestration tests passed.
+- GitNexus detect-changes after service hook: medium risk, 1 affected flow (`Edit_user_message_and_retry`) because `ask()` changed. Follow-up chat/orchestration tests passed.
+- Continued Phase 5 LCEL chain boundary.
+- TDD RED/GREEN: added `tests/test_agent_runtime_chains.py` and `core/agent_runtime/chains.py`, with partial LCEL-style wrappers for answer-only context, retrieval context, and result-summary context. The wrappers use `langchain_core.runnables.RunnableLambda` when available and fallback to a callable wrapper.
+- Added runtime diagnostics `chain_adapter` with `status=partial`, `standard_lcel_status=partial`, and retrieval status fields. It does not replace answer-only, retrieval, or result-summary production paths.
+- Continued Phase 5 with vector RAG scaffold after checking dependencies: `sklearn`, `numpy`, and `langchain_core` are available; `faiss`, `chromadb`, and `langchain_community` are unavailable.
+- TDD RED/GREEN: added `tests/test_agent_runtime_vector_rag.py` and `core/agent_runtime/vector_rag.py`, implementing a local in-memory TF-IDF char n-gram vector index with sensitive metadata filtering. It is labelled `local_tfidf_scaffold` and `full_vector_rag=False`.
+- Verification after Phase 5 scaffold: py_compile passed; 6 chain/vector tests passed; 38 related runtime/planner/admin tests passed. GitNexus detect-changes remains medium with 1 affected flow from the earlier `ask()` helper hook.
+- Continued Phase 6 Context/RAG integration.
+- GitNexus impact for `build_conversation_context`: MEDIUM, 64 impacted symbols, 9 direct dependents, 1 affected flow (`Edit_user_message_and_retry`). Kept context integration opt-in.
+- TDD RED/GREEN: extended `tests/test_agent_runtime_vector_rag.py` to require `GIS_AGENT_ENABLE_VECTOR_RAG_CONTEXT=1` before vector fields are added to conversation context.
+- Added opt-in `vector_knowledge_snippets` and `rag_trace` in `core/context_builder.py`, using the local TF-IDF vector scaffold over retrieved knowledge candidates. Default context behavior remains unchanged when the flag is absent.
+- `format_context_for_agent()` now includes `vector_knowledge_snippets` and `rag_trace` only when they are present in context.
+- Verification after Phase 6: `py_compile` passed; vector RAG tests passed; context/knowledge policy tests passed; 33 related runtime/context/admin tests passed with 18 subtests. GitNexus detect-changes remained medium with the same one affected `ask()` flow.
+- Stopped at Phase 7 because a production RAG backend requires user choice for embedding provider and persistent vector store.
+- User selected Phase 7 option 2: API embedding provider plus local persistent vector store.
+- TDD RED/GREEN: extended `tests/test_agent_runtime_vector_rag.py` for OpenAI-compatible embedding payloads, diagnostics without API key leakage, persistent JSON vector index round-trip/search, and context builder API vector backend use.
+- Added `APIEmbeddingClient`, `PersistentVectorRAGIndex`, and `api_embedding_client_from_env()` in `core/agent_runtime/vector_rag.py`.
+- The API embedding backend uses OpenAI-compatible `/embeddings` payloads and an injectable transport for tests. Production transport uses `requests.post`.
+- Context integration remains opt-in: `GIS_AGENT_ENABLE_VECTOR_RAG_CONTEXT=1` plus `GIS_AGENT_VECTOR_RAG_BACKEND=api` and embedding/store environment variables.
+- Exported `APIEmbeddingClient` and `PersistentVectorRAGIndex` from `core.agent_runtime`.
+- Verification after Phase 7: py_compile passed; 7 vector RAG tests passed; 36 related runtime/context/admin tests passed with 18 subtests. GitNexus detect-changes remained medium with one affected `ask()` flow.
+- Continued Phase 8 RAG ingestion/evaluation hardening.
+- GitNexus could not resolve new Phase 7 vector RAG symbols because they are not yet indexed. Kept changes inside `core/agent_runtime/vector_rag.py` and used post-change `detect-changes` for impact verification.
+- TDD RED/GREEN: added `tests/test_agent_runtime_rag_ingestion_eval.py`.
+- Added `build_persistent_rag_index()` to wrap persistent index builds with structured success/provider-error results and redacted error messages.
+- Added source-hash manifest writing to `PersistentVectorRAGIndex.build()` and `check_vector_index_freshness()` to detect missing, unreadable, stale, or fresh indexes.
+- Added `evaluate_rag_retrieval()` for recall@k checks over RAG evaluation fixtures.
+- Exported ingestion/eval helpers from `core.agent_runtime`.
+- Verification after Phase 8: py_compile passed; 3 ingestion/eval tests passed; 22 related RAG/runtime/context/admin tests passed with 18 subtests. GitNexus detect-changes remained medium with the same one affected `ask()` flow.
+- Continued Phase 9 default enablement readiness.
+- GitNexus could not resolve new `APIEmbeddingClient` or `core/agent_runtime/vector_rag.py` symbols because they are not yet indexed; `build_conversation_context` impact remains MEDIUM with one affected flow. Kept Phase 9 changes inside the new runtime RAG boundary and did not alter default context enablement.
+- TDD RED: added `tests/test_agent_runtime_rag_readiness.py`; it failed because readiness helpers and embedding retry fields did not exist.
+- TDD GREEN: added `evaluate_rag_default_readiness()`, `default_gis_rag_eval_cases()`, API embedding retry/backoff fields, injectable retry sleep, and sanitized final provider errors.
+- Verification after Phase 9 implementation: new readiness tests passed; py_compile passed; 17 RAG/runtime chain tests passed.
+- User selected Phase 10 option 1: expose admin-only read-only RAG readiness/eval API, without rebuild and without embedding cost.
+- GitNexus impact for `create_admin_operations_router`: LOW, 24 impacted symbols, 2 direct dependents, 0 affected processes.
+- TDD RED: added app-level tests for `/api/admin/agent-runtime/rag-readiness`; they failed with 404 before implementation.
+- TDD GREEN: added `agent_runtime_rag_readiness_report()` and `GET /api/admin/agent-runtime/rag-readiness`.
+- The new endpoint returns read-only no-embedding status, default GIS eval cases, provider/store configuration, and readiness; it does not call `embed_texts()` and does not expose rebuild.
+- Preserved sanitization: path/API-key fields are removed, and a safe `credential_configured` boolean is exposed instead.
+- Verification after Phase 10 route: py_compile passed; 12 targeted admin/RAG tests passed.
+- Continued Phase 11 with the recommended CLI-only RAG operations path.
+- GitNexus impact for `retrieve_knowledge_snippets`: HIGH. Did not edit it; the CLI only calls it as a read-only default document source.
+- TDD RED: added `tests/test_agent_runtime_rag_ops.py`; it failed because `core.agent_runtime.rag_ops` did not exist.
+- TDD GREEN: added `core/agent_runtime/rag_ops.py` with `status`, `rebuild`, and `eval` commands.
+- `status` is read-only and does not require embedding configuration. `rebuild` requires `--confirm-rebuild`. `eval` loads an existing persistent store and reports recall/readiness.
+- Verification after Phase 11: `py_compile` passed; `python -m core.agent_runtime.rag_ops status` produced JSON; 18 RAG tests passed.
+- User approved Phase 12: continue planner/coordinator runtime migration.
+- GitNexus could not resolve new runtime symbols yet, so kept edits inside `core/agent_runtime/`. Existing indexed high-risk planner/coordinator functions were not modified.
+- TDD RED: added `tests/test_agent_runtime_decision_trace.py`; it failed because `core.agent_runtime.decision_trace` and `diagnostics.decision_trace` did not exist.
+- TDD GREEN: added `core/agent_runtime/decision_trace.py`, planner/coordinator input/output schemas, and unified runtime decision trace aggregation.
+- Updated `RuntimePlannerAdapter` trace payloads to include schema summaries instead of full prompt/context content.
+- Updated `GISAgentRuntime.diagnostics()` to include `decision_trace`.
+- Verification after Phase 12: py_compile passed; planner/trace/decision tests passed.
+- User approved Phase 13: add planner/coordinator eval fixtures.
+- GitNexus impact for `build_shadow_llm_task_plan`: MEDIUM. Impact for `build_coordinator_decision`: HIGH. Did not edit either function.
+- TDD RED: added `tests/test_agent_runtime_decision_eval.py`; it failed because `core.agent_runtime.decision_eval` did not exist.
+- TDD GREEN: added `core/agent_runtime/decision_eval.py` with default GIS decision eval fixtures and pure scoring helpers for planner and coordinator outputs.
+- Fixtures currently cover uploaded vector inspection, table-to-points, soil XGBoost modeling, and artifact download safety.
+- Verification after Phase 13: py_compile passed; 17 runtime decision/planner/trace tests passed.
+- Continued Phase 14 with a decision eval CLI/report runner.
+- GitNexus could not resolve new `runtime_decision_eval_report` because it is in the new runtime module; kept changes inside `core/agent_runtime/decision_eval.py`.
+- TDD RED: extended `tests/test_agent_runtime_decision_eval.py` for `fixtures` and `report --outputs` CLI behavior; it failed because `run_decision_eval_cli()` did not exist.
+- TDD GREEN: added `run_decision_eval_cli()` and `main()` to `core.agent_runtime.decision_eval`.
+- `python -m core.agent_runtime.decision_eval fixtures` outputs JSON and performs zero LLM/tool calls. `report --outputs <json>` scores planner/coordinator outputs and returns nonzero when below threshold.
+- Initial parallel py_compile plus module execution hit a Windows `__pycache__` write race; reran sequentially successfully. Removed eager package export for `decision_eval` to avoid `python -m` runpy warning.
+- Verification after Phase 14: py_compile passed; `python -m core.agent_runtime.decision_eval fixtures` produced clean JSON; 16 related runtime eval/trace/planner tests passed.
+- User selected Phase 15 option 1: expand planner/coordinator offline eval fixture coverage.
+- Added/verified 10 fixed decision eval cases covering vector inspection, table-to-points, soil XGBoost modeling, artifact download safety, vector/raster clipping, reprojection, zonal statistics, map cartography, and GSCloud download confirmation.
+- Verification after Phase 15: `tests/test_agent_runtime_decision_eval.py` passed 8 tests; `core.agent_runtime.decision_eval fixtures` reported `case_count: 10`; decision/planner/trace tests passed 17 tests.
+- Wider regression after Phase 15: 71 tests passed, 18 subtests passed, with one existing Starlette/httpx deprecation warning.
+- GitNexus detect-changes after Phase 15 remained medium risk with the known single affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH or CRITICAL risk was reported.
+- Root temporary file check found no `vectors.json` or `workflow_cache.db` in the project root.
+- User selected Phase 16 option 1: add CI/local wiring for decision eval reports.
+- TDD RED: added `tests/test_agent_runtime_decision_eval_ci.py`; it failed because `tests/fixtures/agent_runtime_decision_eval_outputs.json` did not exist.
+- TDD GREEN: added `tests/fixtures/agent_runtime_decision_eval_outputs.json`, `scripts/test_agent_runtime_decision_eval.ps1`, and a CI step that runs the guard after Python compile.
+- The guard runs fixed pytest coverage and `python -m core.agent_runtime.decision_eval report --outputs tests/fixtures/agent_runtime_decision_eval_outputs.json --min-pass-rate 1.0`.
+- Verification after Phase 16: targeted CI fixture test passed; local guard script passed 9 tests and reported planner/coordinator pass rates of 1.0 with zero LLM calls and zero tool calls.
+- Wider regression after Phase 16: py_compile passed; 72 tests passed, 18 subtests passed, with one existing Starlette/httpx deprecation warning.
+- `git diff --check` found no whitespace errors; it only reported existing Windows LF-to-CRLF warnings for touched files.
+- GitNexus detect-changes after Phase 16 remained medium risk with the same known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH or CRITICAL risk was reported.
+- User asked for the next step; proceeded with the recommended Phase 17 shadow-output capture path.
+- GitNexus could not resolve the new runtime decision eval/trace symbols because they are not yet indexed; kept changes inside `core/agent_runtime`.
+- TDD RED: updated decision trace/eval tests to require safe `planned_tools` in planner trace output and a `capture` CLI that converts runtime decision trace JSON into report-ready outputs.
+- TDD GREEN: added safe `planned_tools` extraction in `runtime_planner_output_schema()`, `capture_runtime_decision_eval_output()`, and `python -m core.agent_runtime.decision_eval capture --trace ... --case-id ... --output ...`.
+- The capture command reads UTF-8 JSON, writes UTF-8 JSON, reports only basenames, and still reports zero LLM calls, zero tool calls, and no live execution.
+- Verification after Phase 17: decision eval/trace tests passed 14 tests; local decision eval guard passed 11 tests and strict report pass rate 1.0.
+- Wider regression after Phase 17: py_compile passed; 74 tests passed, 18 subtests passed, with one existing Starlette/httpx deprecation warning.
+- `git diff --check` found no whitespace errors; it only reported existing Windows LF-to-CRLF warnings for touched files.
+- GitNexus detect-changes after Phase 17 remained medium risk with the same known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH or CRITICAL risk was reported.
+- User requested automatic execution until a major choice is required. Proceeded with Phase 18 service shadow diagnostics capture.
+- Avoided editing `core/service.py`; added a new runtime capture boundary that calls the existing `GISWorkspaceService.agent_runtime_diagnostics()` method.
+- TDD RED: added `tests/test_agent_runtime_diagnostics_capture.py`; it failed because `core.agent_runtime.diagnostics_capture` did not exist.
+- TDD GREEN: added `core/agent_runtime/diagnostics_capture.py`, `scripts/capture_agent_runtime_diagnostics.ps1`, and included the capture test in `scripts/test_agent_runtime_decision_eval.ps1`.
+- The new CLI is `python -m core.agent_runtime.diagnostics_capture service --diagnostics-output <json> [--case-id <case> --eval-outputs-output <json>]`.
+- The capture path writes UTF-8 diagnostics JSON and optional report-ready eval outputs, reports only output filenames, and records zero LLM calls, zero tool calls, and no live execution.
+- Verification after Phase 18: diagnostics capture tests passed 2 tests; local decision eval guard passed 13 tests and strict report pass rate 1.0.
+- Wider regression after Phase 18: py_compile passed; 76 tests passed, 18 subtests passed, with one existing Starlette/httpx deprecation warning.
+- `git diff --check` found no whitespace errors; it only reported existing Windows LF-to-CRLF warnings for touched files.
+- GitNexus detect-changes after Phase 18 remained medium risk with the same known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH or CRITICAL risk was reported.
+- User approved execution of guarded active-mode cutover foundation.
+- GitNexus could not resolve new runtime symbols (`AgentRuntimeConfig`, `GISAgentRuntime`) because they are not yet indexed; kept runtime guard changes narrow and used post-change `detect-changes`.
+- TDD RED/GREEN: added explicit active cutover guard fields to `AgentRuntimeConfig`. `GIS_AGENT_RUNTIME_MODE=active` now falls back to `shadow` unless `GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER=1` is also set.
+- Added `cutover_guard()` diagnostics and surfaced it in runtime diagnostics and runtime adapter metadata, without adding it to `context_overlay()` or LLM context.
+- TDD RED/GREEN: added `RuntimePlannerAdapter.build_active_task_plan()` and `GISWorkspaceService._build_active_task_plan()`. The service helper falls back to legacy `build_llm_task_plan()` unless the guard is active and the runtime active plan is `ready`.
+- Updated `service.ask()` to call `_build_active_task_plan()` at the existing active-planner point; default env behavior still reaches the legacy planner path.
+- Updated decision trace aggregation to prefer the latest `planner_active` event when present.
+- Extended `scripts/test_agent_runtime_decision_eval.ps1` so CI/local guard now covers runtime config, planner adapter, decision eval, CI fixture, and diagnostics capture tests.
+- Verification after guarded active helper: local guard passed 42 tests and strict report pass rate 1.0; py_compile passed; related width regression passed 83 tests and 18 subtests with one existing Starlette/httpx deprecation warning.
+- `git diff --check` found no whitespace errors; it only reported existing Windows LF-to-CRLF warnings for touched files.
+- GitNexus detect-changes after Phase 19 remained medium risk with the same known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH or CRITICAL risk was reported.
+- Additional service/chat regression: initial combined run of five test files timed out after 184 seconds without complete results. Split reruns passed `test_answer_only_requests.py` (12), `test_llm_planner_observability.py` (4), `test_llm_task_planner.py` (12), `test_interaction_mode_and_xgboost.py` (6), and `test_llm_orchestration_phase2.py` (8, with the same Starlette/httpx warning).
+- User requested environment settings to be documented in `.env.example` and `.env` with Chinese descriptions, keeping unused options removable.
+- Added a LangChain / Agent Runtime V2 environment block to `.env.example` with safe defaults for runtime v2, guarded active cutover, legacy shadow planner compatibility, vector RAG, and embedding API configuration.
+- Added the same block to local `.env` as commented-out guidance only, so it does not change current runtime behavior or override real local secrets.
+- Verification: `git diff --check -- .env.example` passed with only the existing Windows LF-to-CRLF warning; `.env` is ignored by `.gitignore`.
+- User clarified that `.env` must actually enable the setting because `.env.example` is only a sample.
+- Enabled guarded active mode in local `.env` by setting `GIS_AGENT_RUNTIME_V2=1`, `GIS_AGENT_RUNTIME_MODE=active`, and `GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER=1`.
+- Verification: imported project dotenv via `core.config` and confirmed `AgentRuntimeConfig.from_env()` reports `enabled=True`, `mode=active`, and `cutover_guard.active_effective=True`.
+- Re-ran `scripts/test_agent_runtime_decision_eval.ps1`; 42 tests passed and strict decision eval report remained at pass rate 1.0.
+- User asked whether validation can use only `glm-4.5-air` because that model has more token budget.
+- Added local `.env` role-model overrides so chat, planner, coordinator, result interpreter, tool, and vision-related roles all resolve to `glm-4.5-air` during validation.
+- Verification: `validate_llm_config()["role_models"]` reported `chat`, `planner`, `coordinator`, `result_interpreter`, and `vision` all set to `glm-4.5-air`.
+- Continued Phase 20 after GLM-only validation setup.
+- Root cause investigation found eval/runtime mismatches: coordinator runtime uses `request_clarification` / `request_confirmation` instead of fixture-only `ask_user`; fixture tools included logical or nonexistent names (`make_map`, `submit_download_job`, `download_artifact`) rather than registered tools; `raster_zonal_stats` existed as a registry tool but lacked a Tool Card.
+- TDD RED/GREEN: updated decision eval scoring to normalize user-question decisions, accept registered tool aliases, read nested raw `plan.tool_plan`, and allow combined report coordinator scoring to accept any tool already present in the validated planner steps for `continue` decisions.
+- TDD RED/GREEN: aligned eval fixtures to actual tools: `plot_dataset`, `submit_commercial_download_job`, and no planner tool for artifact download safety. Updated fixed CI fixture accordingly.
+- TDD RED/GREEN: added a `raster_zonal_stats` Tool Card with required inputs, output types, preconditions, common failures, and forbidden uses.
+- TDD RED/GREEN: made `validate_llm_task_plan()` tolerate two narrow GLM JSON-mode drifts: missing `tools_read` only when all planned tools are already in candidate Tool Cards, and missing Phase 2 title fields only when `goal`/`task_type` provide equivalent values.
+- TDD RED/GREEN: added active deterministic fallback in `RuntimePlannerAdapter.build_active_task_plan()` when GLM planner is invalid/error or returns `ready` with no actionable plan and no confirmation/clarification request.
+- TDD RED/GREEN: updated runtime planner trace output to read nested raw plans and updated coordinator diagnostics to fill missing `required_tool` from `next_step_id` or a single remaining step.
+- Real GLM-4.5-Air validation without tool execution:
+  - Existing saved outputs after eval normalization: planner 0.8, coordinator 0.4.
+  - Raw active planner without deterministic fallback remained unstable due provider errors / schema drift.
+  - Active fallback validation with deterministic candidate plans reached planner pass rate 0.9, coordinator pass rate 1.0, `ready_for_cutover_eval=true`; outputs written to `outputs/agent_runtime_active_fallback_combined_outputs.json` and `outputs/agent_runtime_active_fallback_summary.json`.
+- Verification after Phase 20 completion:
+  - `py_compile` passed for changed runtime/eval/schema/tool-card/health files.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - Adjacent planner/schema/download regression passed 36 tests with one existing Starlette/httpx deprecation warning.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes reported medium risk, 40 changed indexed symbols, one affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH/CRITICAL post-change risk.
+- User requested automatic Phase 21 execution.
+- GitNexus pre-edit impact checks:
+  - `GISWorkspaceService`: LOW, 3 direct dependents, 0 affected processes.
+  - `run_coordinated_execution`: LOW, 1 direct dependent, 1 affected process (`edit_user_message_and_retry`).
+  - `build_shadow_llm_task_plan`: LOW, 2 direct dependents, 1 affected process (`edit_user_message_and_retry`).
+- TDD RED: added `tests/test_agent_runtime_active_smoke.py`; it failed because `core.agent_runtime.active_smoke` did not exist.
+- TDD GREEN: added `core/agent_runtime/active_smoke.py` and `scripts/run_agent_runtime_active_smoke.ps1`.
+- The Phase 21 smoke runner calls real `GISWorkspaceService.ask()` with synthetic local datasets, writes a sanitized JSON report, defaults to a lightweight runtime adapter plus deterministic coordinator, and can opt into `--runtime-agent real` / `--coordinator-mode llm` for staging.
+- Unit smoke coverage passed: `tests/test_agent_runtime_active_smoke.py` passed 2 tests.
+- Real local Phase 21 smoke passed with current `.env` guarded active mode and GLM-4.5-Air configuration: `scripts/run_agent_runtime_active_smoke.ps1 -CoordinatorMode deterministic -RuntimeAgent lightweight -FailOnError` reported 2/2 passed and `ready_for_next_phase=true`.
+- Smoke output written to `outputs/agent_runtime_service_active_smoke.json`; cases:
+  - `active_map_generation`: active planner `runtime_active:default_llm`, executed `plot_dataset`, produced 1 artifact and 1 image, no external download tools.
+  - `workflow_priority_table_to_points`: deterministic workflow-priority route, executed `describe_dataset` and `table_to_points`, no external download tools.
+- Verification after Phase 21:
+  - `py_compile` passed for `core/agent_runtime/active_smoke.py`.
+  - Targeted regression passed 17 tests.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH/CRITICAL post-change risk.
+- User asked for the next step. Proceeded with the recommended Phase 22 path: broaden deterministic-coordinator service smoke before trying LLM coordinator smoke.
+- GitNexus impact for the new `run_service_active_smoke` symbol returned UNKNOWN because `core/agent_runtime/active_smoke.py` is not indexed yet. Kept edits inside the new runtime smoke boundary and used post-change `detect-changes`.
+- Pre-implementation exploration confirmed `check this dataset` against a synthetic vector produces a deterministic `describe_dataset` plan without clarification.
+- TDD RED: added coverage requiring the default smoke suite to include `active_describe_vector`; it failed because the suite still had only 2 cases.
+- TDD GREEN: added `active_describe_vector` with a synthetic vector dataset and expected `describe_dataset`.
+- During real smoke verification, found stale workspace contamination: repeated runs against the same fixed workspace could make `workflow_priority_table_to_points` report `status=failed` while the old smoke `ok` predicate still passed because expected tools were present.
+- Systematic debugging confirmed the same suite succeeded in a fresh workspace, so the root cause was persisted case workspace state.
+- TDD RED/GREEN: added repeated-run coverage, changed the smoke runner to use a fresh `run_<timestamp>_<id>/<case_id>` workspace per run, recorded `run_id` in the report, and tightened `ok` so `failed`/`blocked`/`error` statuses cannot pass.
+- Verification after Phase 22:
+  - `tests/test_agent_runtime_active_smoke.py` passed 4 tests.
+  - `py_compile` passed for `core/agent_runtime/active_smoke.py`.
+  - `scripts/run_agent_runtime_active_smoke.ps1 -CoordinatorMode deterministic -RuntimeAgent lightweight -FailOnError` passed 3/3 and wrote `outputs/agent_runtime_service_active_smoke.json`.
+  - Latest smoke cases: `active_describe_vector`, `active_map_generation`, and `workflow_priority_table_to_points`; all succeeded and no external download tools were executed.
+  - Adjacent runtime/service regression passed 16 tests.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH/CRITICAL post-change risk.
+- User asked for the next step. Proceeded with Phase 23 minimal coordinator LLM smoke using `active_describe_vector` only.
+- Initial command: `python -m core.agent_runtime.active_smoke service --coordinator-mode llm --runtime-agent lightweight --case active_describe_vector --fail-on-error`.
+- Initial LLM coordinator smoke failed 0/1:
+  - Planner was ready via `runtime_active:deterministic_fallback`.
+  - Coordinator first requested clarification because it believed `describe_dataset` was unavailable.
+  - Root cause: `run_coordinated_execution()` passed only `context["candidate_tool_cards"]` to the LLM coordinator, so validated planned tools could be missing when retrieval did not include their cards.
+- GitNexus impact for `run_coordinated_execution`: LOW, 1 direct dependent, 1 affected process (`edit_user_message_and_retry`).
+- TDD RED/GREEN: added `test_coordinator_payload_includes_planned_tool_card_when_context_cards_miss_it`; implemented `_coordinator_tool_cards()` to hydrate coordinator tool cards from planned steps and built-in Tool Cards, with a minimal fallback card for unknown planned tools.
+- Second LLM coordinator smoke failed 0/1:
+  - The first coordinator decision executed `describe_dataset`.
+  - After the only remaining step completed, GLM returned `continue` with no `next_step_id` / no `required_tool` instead of `stop_success`.
+  - Root cause: the executor treated this as `STEP_NOT_IN_REMAINING_PLAN` even though all planned steps had succeeded.
+- TDD RED/GREEN: added `test_continue_without_remaining_step_after_success_is_treated_as_stop_success`; normalized `continue` with no remaining steps and all-successful results into a `stop_success` return.
+- Final Phase 23 LLM coordinator smoke passed 1/1 and wrote `outputs/agent_runtime_service_llm_coordinator_smoke.json`.
+- Verification after Phase 23:
+  - `tests/test_coordinated_executor.py` passed 5 tests.
+  - `py_compile` passed for `core/coordinated_executor.py`.
+  - `outputs/agent_runtime_service_llm_coordinator_smoke.json`: 1/1 passed, `ready_for_next_phase=true`, no external download tools.
+  - Related regression passed 23 tests.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH/CRITICAL post-change risk.
+- User asked to automatically execute the next step until a choice is needed. Proceeded with Phase 24: LLM coordinator smoke expansion to `active_map_generation`.
+- Ran `python -m core.agent_runtime.active_smoke service --coordinator-mode llm --runtime-agent lightweight --case active_map_generation --fail-on-error`.
+- Phase 24 LLM coordinator map smoke passed 1/1 and wrote `outputs/agent_runtime_service_llm_coordinator_map_smoke.json`.
+- Result summary:
+  - `active_map_generation`
+  - mode `coordinated_workflow`
+  - status `succeeded`
+  - executed `plot_dataset`
+  - artifact_count 1
+  - image_count 1
+  - no external download tools
+  - planner source `runtime_active:default_llm`
+- No code changes were required in Phase 24.
+- Verification after Phase 24:
+  - Related regression passed 23 tests.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH/CRITICAL post-change risk.
+- User asked for the next step. Proceeded with Phase 25 smoke guard integration.
+- Root cause investigation for opt-in LLM guard failure:
+  - `scripts/test_agent_runtime_active_smoke.ps1 -IncludeLlmCoordinatorSmoke` initially returned exit code 0 even when the nested map smoke failed.
+  - The map smoke failed because GLM returned `continue` with a valid `next_step_id` but blank `required_tool`; the executor blocked it as `TOOL_STEP_MISMATCH`.
+- GitNexus impact for `run_coordinated_execution`: LOW risk, one direct dependent (`GISWorkspaceService.ask`) and one known affected flow (`Edit_user_message_and_retry -> _visible_chat_content`).
+- TDD RED/GREEN:
+  - Added `test_continue_with_step_id_and_blank_required_tool_uses_planned_step_tool`.
+  - Added guard-script coverage requiring explicit `Invoke-Checked` / `$LASTEXITCODE` handling.
+  - Updated `run_coordinated_execution()` to fill blank `required_tool` from the selected planned step only; non-empty mismatches still block.
+  - Updated `scripts/test_agent_runtime_active_smoke.ps1` so every pytest/smoke invocation is wrapped by `Invoke-Checked`.
+- Verification after Phase 25:
+  - `tests/test_coordinated_executor.py` passed 6 tests.
+  - `tests/test_agent_runtime_active_smoke_guard.py` passed 2 tests.
+  - `scripts/test_agent_runtime_active_smoke.ps1` passed 6 tests and deterministic smoke 3/3.
+  - `scripts/test_agent_runtime_active_smoke.ps1 -IncludeLlmCoordinatorSmoke` passed deterministic smoke 3/3 plus LLM describe 1/1 and LLM map 1/1.
+  - `py_compile` passed for `core/coordinated_executor.py`.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known single affected flow; no HIGH/CRITICAL post-change risk.
+- Continued automatically into Phase 26 multi-step LLM coordinator smoke.
+- Ran `python -m core.agent_runtime.active_smoke service --coordinator-mode llm --runtime-agent lightweight --case workflow_priority_table_to_points --fail-on-error`; it passed 1/1 and wrote `outputs/agent_runtime_service_llm_coordinator_table_points_smoke.json`.
+- TDD RED/GREEN: extended the active smoke guard test to require `workflow_priority_table_to_points` in the opt-in LLM branch, then added that case to `scripts/test_agent_runtime_active_smoke.ps1`.
+- The first expanded opt-in guard run correctly exited nonzero on a map LLM failure, proving `$LASTEXITCODE` propagation was fixed. Root cause: after `plot_dataset` succeeded, the terminal coordinator returned natural-language `answer` instead of the structured decision schema and was marked unavailable.
+- TDD RED/GREEN: added `test_unavailable_coordinator_after_all_steps_succeed_is_treated_as_stop_success`; updated `run_coordinated_execution()` to treat terminal coordinator unavailability as success only when there are no remaining steps and all tool results succeeded.
+- Verification after Phase 26:
+  - `tests/test_coordinated_executor.py` passed 7 tests.
+  - `tests/test_agent_runtime_active_smoke_guard.py` passed 2 tests.
+  - `scripts/test_agent_runtime_active_smoke.ps1 -IncludeLlmCoordinatorSmoke` passed: deterministic smoke 3/3, LLM describe 1/1, LLM map 1/1, LLM table-to-points 1/1.
+  - `py_compile` passed for `core/coordinated_executor.py`.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 51 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known single affected flow; no HIGH/CRITICAL post-change risk.
+- User asked for the next step. Proceeded with the recommended Phase 27 guardrail path instead of broad user-facing active exposure.
+- GitNexus impact for new runtime symbols `AgentRuntimeConfig` and `GISAgentRuntime` returned UNKNOWN because `core/agent_runtime/*` is not yet indexed. Kept changes inside the runtime diagnostics boundary and did not alter `service.ask()` routing.
+- TDD RED/GREEN:
+  - Added `tests/test_agent_runtime_exposure_policy.py`.
+  - Added `core/agent_runtime/exposure.py` with `AgentRuntimeExposurePolicy`, environment/percent/rollback/smoke gates, report-path sanitization by filename, and production override blocking.
+  - Added `exposure_policy` to `GISAgentRuntime.diagnostics()`.
+  - Exported `AgentRuntimeExposurePolicy` from `core.agent_runtime`.
+- Updated `.env.example` and local `.env` with non-sensitive Chinese descriptions/defaults for exposure policy variables. Local `.env` remains `local` + `0%`, so diagnostics reports observe-only and no user exposure.
+- Added `tests/test_agent_runtime_exposure_policy.py` to `scripts/test_agent_runtime_decision_eval.ps1`.
+- Fixed `scripts/test_agent_runtime_decision_eval.ps1` to use `Invoke-Checked` / `$LASTEXITCODE`, matching the active smoke guard behavior so failed child commands cannot be hidden by a later passing command.
+- Verification after Phase 27:
+  - `tests/test_agent_runtime_exposure_policy.py` passed 4 tests.
+  - `py_compile` passed for `core/agent_runtime/exposure.py`, `core/agent_runtime/runtime.py`, and `core/agent_runtime/__init__.py`.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 56 tests and strict fixed report pass rate 1.0.
+  - `scripts/test_agent_runtime_active_smoke.ps1` passed 6 tests and deterministic smoke 3/3.
+  - Local `.env` exposure policy evaluation showed deterministic smoke passed but `eligible_for_user_exposure=false` because exposure percent is 0.
+  - Admin diagnostics route tests passed: `tests/test_admin_agent_runtime_diagnostics.py` and the admin operations route regression.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known single affected flow; no HIGH/CRITICAL post-change risk.
+- User selected the recommended Phase 28 path and requested automatic execution until another choice is required.
+- GitNexus impact for `create_admin_operations_router`: LOW risk, one direct dependent (`api_server.py`), no affected processes. `agent_runtime_rag_readiness_report` was not indexed, so related new runtime exposure symbols remain UNKNOWN; changes stayed read-only.
+- TDD RED/GREEN:
+  - Added app-level tests requiring `/api/admin/agent-runtime/exposure` to require admin auth and return sanitized read-only exposure data.
+  - Added `agent_runtime_exposure_report()` and exported it from `core.agent_runtime`.
+  - Added `GET /api/admin/agent-runtime/exposure` to the existing admin operations router.
+  - Wired `api_server.py` to pass `agent_runtime_exposure_report`.
+  - Narrowed diagnostic sanitizer so safe `environment` survives while sensitive env/path/token/cookie fields remain filtered.
+  - Extended route-module coverage for the new endpoint.
+  - Added Chinese runbook `docs/runbooks/agent-runtime-staging-exposure.md` and a doc test covering endpoint, exposure percent, rollback, 1%, and 10%.
+- Verification after Phase 28:
+  - `tests/test_agent_runtime_exposure_policy.py` passed 5 tests.
+  - `tests/test_admin_agent_runtime_diagnostics.py` passed 6 tests.
+  - Admin operations route regression passed.
+  - `py_compile` passed for `api/routes/admin_operations.py`, `api_server.py`, `core/agent_runtime/exposure.py`, `core/agent_runtime/runtime.py`, and `core/agent_runtime/__init__.py`.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 57 tests and strict fixed report pass rate 1.0.
+  - `scripts/test_agent_runtime_active_smoke.ps1` passed deterministic smoke 3/3.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known single affected flow; no HIGH/CRITICAL post-change risk.
+- User confirmed automatic execution of Phase 29-32.
+- Phase 29/31 TDD RED/GREEN:
+  - Added tests for staging dry-run evidence generation and the dry-run PowerShell script.
+  - Added `run_staging_exposure_dry_run()` and `python -m core.agent_runtime.exposure staging-dry-run`.
+  - Added `scripts/run_agent_runtime_staging_exposure_dry_run.ps1`; it enables guarded active env for the run, executes deterministic active smoke, then writes `outputs/agent_runtime_exposure_staging_dry_run.json`.
+  - Removed eager `core.agent_runtime.exposure` package export after the script exposed a `runpy` warning; imports now use `core.agent_runtime.exposure` directly.
+- Phase 30 TDD RED/GREEN:
+  - Expanded default deterministic active smoke from 3 to 5 stable local cases.
+  - Added `active_describe_table` and `active_map_generation_secondary_vector`.
+  - Attempted raster/basic and table-to-points-map active smoke candidates exposed active planner instability (`invalid_plan` / clarification), so they were not added to the default smoke gate. Existing offline eval and tool tests continue covering raster/vector processing.
+- Phase 32 TDD RED/GREEN:
+  - Added exposure report fields: `checked_at`, `required_reports`, `blocking_reasons_human`, and `next_actions`.
+  - Admin exposure endpoint now returns those fields through the existing sanitizer.
+- Phase 29 evidence:
+  - Ran `scripts/run_agent_runtime_staging_exposure_dry_run.ps1`.
+  - Deterministic active smoke passed 5/5.
+  - Evidence output `outputs/agent_runtime_exposure_staging_dry_run.json` reported `eligible_for_user_exposure=true`, `recommendation=allow_staging_exposure`, and `live_traffic_changed=false`.
+- Verification after Phase 29-32:
+  - `tests/test_agent_runtime_exposure_policy.py` passed 8 tests.
+  - `tests/test_agent_runtime_active_smoke.py` passed 4 tests.
+  - `tests/test_admin_agent_runtime_diagnostics.py` plus admin operations route regression passed 7 tests.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 60 tests and strict fixed report pass rate 1.0.
+  - `scripts/test_agent_runtime_active_smoke.ps1` passed 6 tests and deterministic smoke 5/5.
+  - `py_compile` passed for changed runtime/admin files.
+  - `git diff --check` reported only existing Windows LF-to-CRLF warnings.
+  - GitNexus detect-changes remained medium risk with the known single affected flow; no HIGH/CRITICAL post-change risk.
+- User asked to use ArcGIS/ArcPy docs as GIS operation reference and to harden active planner raster/clip/cartography stability before deciding real 1%.
+- Used ArcGIS Pro/ArcPy documentation as semantic reference only; no ArcPy runtime dependency was added.
+- GitNexus impact before editing:
+  - `build_shadow_llm_task_plan`: LOW, 2 direct dependents, one affected flow.
+  - `build_llm_task_plan`: LOW, 1 direct dependent, one affected flow.
+  - `_registered_workflow_params`: LOW, one direct upstream caller, one affected flow.
+  - `match_workflow_template`: LOW, one direct upstream caller, one affected flow.
+  - New runtime/smoke symbols remain UNKNOWN because current GitNexus index does not include `core/agent_runtime/*`.
+- TDD RED/GREEN:
+  - Extended `tests/test_agent_runtime_active_smoke.py` to require default deterministic active smoke coverage for raster stats, raster clip, vector clip + map, and table-to-points + map. Initial failure: 5 cases instead of 9.
+  - Added synthetic local raster/vector/table smoke cases in `core/agent_runtime/active_smoke.py`.
+  - Added `test_runtime_planner_adapter_active_plan_promotes_ready_executable_workflow`; initial failure showed active fallback ignored registered `executable_workflow`.
+  - Updated `RuntimePlannerAdapter` to promote ready `executable_workflow.workflow_plan` into ordinary fallback `workflow_plan`/`validated_tool_args`.
+  - Fixed deterministic planner routing so local active dataset clip/map requests are not treated as downloads, and raster clip prompts build `clip_raster_by_vector` workflows before generic DEM processing.
+  - Let raster clip registered workflow params use the selected boundary layer when available.
+- Verification after Phase 33:
+  - `tests/test_agent_runtime_planner_adapter.py::test_runtime_planner_adapter_active_plan_promotes_ready_executable_workflow` passed.
+  - `tests/test_agent_runtime_active_smoke.py::test_service_active_smoke_default_suite_includes_describe_dataset_case` passed with 9/9.
+  - `tests/test_agent_runtime_active_smoke.py tests/test_agent_runtime_planner_adapter.py` passed 18 tests.
+  - Two workflow regression tests passed.
+  - `scripts/test_agent_runtime_active_smoke.ps1` passed 6 tests and deterministic smoke 9/9.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 61 tests and strict fixed report pass rate 1.0.
+  - `scripts/run_agent_runtime_staging_exposure_dry_run.ps1` produced 9/9 smoke evidence with `live_traffic_changed=false`.
+- User chose the recommended Phase 34 path: do not enable real staging 1% yet; first run opt-in LLM coordinator smoke for the new raster/clip/cartography chains.
+- Initial `active_raster_clip_by_boundary` LLM coordinator smoke failed with `STEP_NOT_IN_REMAINING_PLAN`: coordinator returned `required_tool=clip_raster_by_vector` and blank `next_step_id` while the plan had one matching remaining step.
+- GitNexus impact before editing `run_coordinated_execution`: LOW, one direct dependent (`GISWorkspaceService.ask`) and one affected flow (`Edit_user_message_and_retry -> _visible_chat_content`).
+- TDD RED/GREEN: added `test_continue_with_blank_step_id_uses_single_remaining_matching_tool`; updated `run_coordinated_execution()` to fill blank `next_step_id` only when exactly one remaining step matches non-empty `required_tool`.
+- After that fix, individual LLM smokes passed:
+  - `active_raster_clip_by_boundary`: 1/1 passed.
+  - `active_vector_clip_map`: 1/1 passed.
+  - `active_table_to_points_map`: 1/1 passed.
+- Added those three cases to the opt-in LLM branch of `scripts/test_agent_runtime_active_smoke.ps1`; updated `tests/test_agent_runtime_active_smoke_guard.py`.
+- First full opt-in guard rerun exposed LLM planner drift in `active_table_to_points_map`: planner produced `tool_plan` without step ids but used `$steps.make_points.outputs.result_dataset`, causing `plot_dataset` to fail with unresolved dataset reference and the coordinator to hit `STEP_RETRY_LIMIT_EXCEEDED`.
+- GitNexus exact impact for `core/coordinated_executor.py:_plan_steps`: HIGH because it feeds coordinated execution and `GISWorkspaceService.ask`; kept the change narrow and covered by real execution tests.
+- TDD RED/GREEN: added `test_tool_plan_without_step_ids_uses_execution_step_names_for_references`; updated `_plan_steps()` to use safe identifier-like `execution_steps` as fallback step ids for `tool_plan` entries without explicit `step_id`, and normalized the local execution plan before building traces.
+- Verification after Phase 34:
+  - `tests/test_coordinated_executor.py` passed 9 tests.
+  - `tests/test_agent_runtime_active_smoke_guard.py` passed 2 tests.
+  - `py_compile` passed for `core/coordinated_executor.py` and related test file.
+  - `scripts/test_agent_runtime_active_smoke.ps1 -IncludeLlmCoordinatorSmoke` passed: pytest 6/6, deterministic smoke 9/9, and six LLM coordinator cases 1/1 each.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 61 tests and strict fixed report pass rate 1.0.
+  - `git diff --check` reported only existing LF/CRLF warnings.
+  - `node .gitnexus/run.cjs detect-changes` reported medium risk with the known affected flow `Edit_user_message_and_retry -> _visible_chat_content`; no HIGH/CRITICAL post-change risk.
+- User authorized automatic execution of each phase unless a major uncertain change is required.
+- Proceeded with a safe Phase 35 subset: implement controlled staging traffic routing, but do not actually enable real staging 1% in `.env`.
+- Current workspace is the main repo checkout, not an isolated worktree. Continued in place because this is the same ongoing multi-phase change set.
+- GitNexus could not resolve `_build_active_task_plan` or new runtime symbols because the index does not include them yet; used `GISWorkspaceService.ask` impact as the nearest indexed flow. Impact was LOW with one known affected process.
+- TDD RED/GREEN:
+  - Added `tests/test_agent_runtime_traffic_routing.py`.
+  - Added `AgentRuntimeTrafficRouter` in `core/agent_runtime/traffic.py`.
+  - Added service helper coverage for enforced exposure routing miss/hit.
+  - Wired `GISWorkspaceService._build_active_task_plan()` so `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1` gates active runtime by exposure policy plus stable bucket; misses or ineligible policy return the legacy planner with `runtime_exposure_routing` metadata.
+  - Exported `AgentRuntimeTrafficRouter` from `core.agent_runtime`.
+- Updated `.env.example` and local `.env` with:
+  - `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=0`
+  - `GIS_AGENT_RUNTIME_EXPOSURE_SALT=agent-runtime-exposure-v1`
+  - Expanded `GIS_AGENT_RUNTIME_LLM_SMOKE_REPORTS` to all six Phase 34 opt-in LLM smoke reports.
+- Updated the staging runbook config block with `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1` and `GIS_AGENT_RUNTIME_EXPOSURE_SALT=agent-runtime-exposure-v1`.
+- Verification after Phase 35 controlled router:
+  - `tests/test_agent_runtime_traffic_routing.py` passed 3 tests.
+  - Targeted service routing tests passed 2 tests.
+  - `tests/test_agent_runtime_planner_adapter.py tests/test_agent_runtime_exposure_policy.py tests/test_agent_runtime_traffic_routing.py` passed 27 tests.
+  - `scripts/test_agent_runtime_decision_eval.ps1` passed 66 tests and strict fixed report pass rate 1.0.
+  - `py_compile` passed for changed runtime/service/test files.
+  - `scripts/test_agent_runtime_active_smoke.ps1` timed out at the tool level, but its report file was written and shows deterministic smoke 9/9 passed; two orphan smoke processes from the timeout were stopped, leaving only pre-existing uvicorn processes.
+  - `git diff --check` reported only LF/CRLF warnings.
+  - `node .gitnexus/run.cjs detect-changes` reported medium risk, affected flows `Edit_user_message_and_retry -> _visible_chat_content` and `Render_sidebar -> Create_new_session`; no HIGH/CRITICAL post-change risk.
+- User confirmed Phase 36 major choice: actually enable staging 1%.
+- Updated local `.env`:
+  - `GIS_AGENT_RUNTIME_EXPOSURE_ENV=staging`
+  - `GIS_AGENT_RUNTIME_EXPOSURE_PERCENT=1`
+  - `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1`
+  - Kept `GIS_AGENT_RUNTIME_ROLLBACK=0`
+  - Kept `GIS_AGENT_RUNTIME_ALLOW_PRODUCTION_EXPOSURE=0`
+- Generated enablement evidence at `outputs/agent_runtime_exposure_staging_1pct_enablement.json`.
+  - Exposure report: `environment=staging`, `requested_percent=1`, `eligible_for_user_exposure=true`, `recommendation=allow_staging_exposure`, no blocking reasons.
+  - Deterministic smoke report status: passed 9/9.
+  - LLM smoke report statuses: six reports passed 1/1 each; LLM smoke remains not required by policy.
+  - Routing sample check showed enforced routing with bucketed legacy fallback for samples outside the 1% bucket.
+- Restarted the local uvicorn service on `127.0.0.1:8765` so it reads the new `.env`.
+  - Stopped old `api_server:app` uvicorn processes.
+  - Started `api_server:app` on port 8765.
+  - Verified `/api/admin/agent-runtime/exposure` with admin token; response reports staging 1%, eligible, and `allow_staging_exposure`.
+- Verification after Phase 36:
+  - `tests/test_agent_runtime_traffic_routing.py tests/test_agent_runtime_exposure_policy.py` passed 11 tests.
+  - `py_compile` passed for `core/agent_runtime/traffic.py`, `core/agent_runtime/exposure.py`, and `core/service.py`.
+  - `git diff --check` reported only LF/CRLF warnings.
+  - `node .gitnexus/run.cjs detect-changes` reported medium risk and no HIGH/CRITICAL post-change risk.
+- Continued with Phase 37 staging 1% observation and rollback drill.
+- Confirmed `.env` remains:
+  - `GIS_AGENT_RUNTIME_EXPOSURE_ENV=staging`
+  - `GIS_AGENT_RUNTIME_EXPOSURE_PERCENT=1`
+  - `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1`
+  - `GIS_AGENT_RUNTIME_ROLLBACK=0`
+  - `GIS_AGENT_RUNTIME_ALLOW_PRODUCTION_EXPOSURE=0`
+- Checked running service state on `127.0.0.1:8765`. The actual listener is a child Python process of the `.venv` uvicorn launcher process, so no service restart was needed during bookkeeping.
+- Phase 37 evidence files:
+  - `outputs/agent_runtime_phase37_rollback_on.json`
+  - `outputs/agent_runtime_phase37_rollback_restored.json`
+  - `outputs/agent_runtime_phase37_staging_1pct_observation.json`
+- Rollback drill result:
+  - rollback on: exposure became ineligible with `rollback_requested`.
+  - rollback restored: exposure became eligible again with `allow_staging_exposure`.
+- Routing observation summary:
+  - 200 deterministic samples.
+  - 3 active hits.
+  - 197 legacy fallback decisions.
+- HTTP chat observation attempted but blocked by 403 auth. Authentication was kept unchanged.
+- Verification after Phase 37 evidence:
+  - `tests/test_agent_runtime_traffic_routing.py tests/test_agent_runtime_exposure_policy.py -q` passed 11 tests.
+  - `git diff --check` reported only existing LF/CRLF warnings.
+- Updated planning files to mark Phase 37 complete and add Phase 38 as a pending staging 5% exposure decision.
+- User requested one authenticated real request before deciding whether to move past 1%.
+- First authenticated observation attempt used an `example.test` address and failed at `/api/auth/register` with HTTP 422; the failed attempt was preserved as `outputs/agent_runtime_phase37_authenticated_chat_observation_attempt1_failed.json`.
+- Re-ran with a valid test email domain and completed the real authenticated HTTP path:
+  - `/api/auth/register`: 200
+  - `/api/auth/me`: authenticated true
+  - `/api/chat/sessions`: 200
+  - `/api/chat/sessions/mode`: 200, `tool_enabled`
+  - `/api/chat/ask`: 200, `answer_only`, `reason=invalid_plan`
+  - `/api/chat/events/replay`: 200, zero events for this non-streaming answer-only request
+  - `/api/admin/agent-runtime/exposure`: 200, staging 1%, eligible, rollback false
+- Wrote sanitized evidence to `outputs/agent_runtime_phase37_authenticated_chat_observation.json`.
+- Computed the exposure routing decision for the real authenticated request:
+  - routing enforced: true
+  - requested percent: 1
+  - bucket: 74
+  - use active runtime: false
+  - reason: `outside_exposure_bucket`
+- Verified the evidence files do not contain password, cookie, session token, Authorization, or API key strings.
+- User asked for the next step. Continued 1% observation instead of changing exposure.
+- Ran an authenticated active-bucket search with a safe missing-dataset inspection prompt:
+  - Evidence: `outputs/agent_runtime_phase37_authenticated_active_hit_observation.json`
+  - Created authenticated sessions until bucket 0 was found.
+  - `/api/chat/ask` returned 200.
+  - Routing selected active runtime: `selected_for_active_runtime`, bucket 0.
+  - Because no dataset was available, the request returned `answer_only` fallback and did not expose active runtime planner metadata in the final assistant meta. This was recorded as a safe fallback, not an active success.
+- Ran a stronger authenticated active-hit uploaded-dataset observation:
+  - Evidence: `outputs/agent_runtime_phase37_authenticated_active_hit_dataset_observation.json`
+  - Registered temporary authenticated user and verified `/api/auth/me`.
+  - Created sessions until bucket 0 was found for prompt `check this dataset`.
+  - Set session to `tool_enabled`.
+  - Uploaded a small CSV through `/api/files/upload`.
+  - `/api/chat/ask` returned 200 with `mode=coordinated_workflow`, `reason=workflow_coordinator`, and `presentation_status=succeeded`.
+  - Assistant metadata included `planner_source=runtime_active:deterministic_fallback` and `runtime_exposure_routing.reason=selected_for_active_runtime`.
+  - Admin exposure before/after remained staging 1%, eligible, rollback false.
+- Verified active-hit evidence files do not contain password, cookie, session token, Authorization, or API key strings.
+- User requested redesigning the XGBoost and GeoConformal Prediction workflow around local ISMN soil-moisture data.
+- User clarified that `tGCP` means GeoConformal Prediction / GCP from the referenced paper, and that ISMN access should only read user-downloaded official archives plus agent local-library data.
+- Wrote the design specification at `docs/superpowers/specs/2026-06-28-ismn-soil-moisture-xgboost-gcp-design.md`.
+- The design covers ISMN local archive discovery/import, semantic data cards, soil-moisture training table construction, XGBoost validation metadata, GCP interval outputs/diagnostics, planner routing behavior, local-library cataloging, structured errors, testing, and rollout.
+- No implementation code was changed for this design checkpoint.

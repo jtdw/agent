@@ -1,0 +1,81 @@
+# LangChain GIS Agent Redesign Plan
+
+Status: in_progress
+Date: 2026-06-27
+
+## Goal
+
+Generate a Chinese implementation plan for redesigning the GIS agent around the LangChain overview and the user's selected "方案 1", without generating code.
+
+## Scope
+
+- Review current GIS agent architecture at the planning level.
+- Align the redesign with LangChain concepts: agent harness, tools, middleware, context, retrieval, LCEL, workflow durability, observability.
+- Explicitly mark current standard LCEL and vectorized RAG as incomplete and convert them into planned work.
+- Preserve existing API/frontend behavior during future implementation.
+
+## Phases
+
+| Phase | Status | Notes |
+| --- | --- | --- |
+| Context and source review | complete | Used existing project context and official LangChain docs supplied by the user. |
+| Plan structure | complete | Chose phased migration with a new runtime boundary instead of direct replacement. |
+| Formal plan document | complete | Wrote `docs/superpowers/plans/2026-06-27-langchain-gis-agent-redesign-plan.md`. |
+| Verification | complete | No code generated; only markdown planning files changed. |
+
+## Decisions
+
+- Use a hybrid architecture: LangChain agent harness + deterministic GIS workflow executor.
+- Do not remove `core/agent.py`, `core/llm_task_planner.py`, or `core/workflow_executor.py` in the first implementation batch.
+- Build `core/agent_runtime/` as a new boundary and migrate traffic gradually.
+- Treat standard LCEL and vector RAG as explicit construction phases, not existing complete capabilities.
+
+## Errors Encountered
+
+None.
+
+## Implementation Checkpoints
+
+| Checkpoint | Status | Notes |
+| --- | --- | --- |
+| Phase 0 baseline | complete | Ran lightweight API/helper and workflow smoke baseline: 13 tests passed before implementation. |
+| Phase 1 runtime shell | complete | Added `core/agent_runtime/` and attached a disabled-by-default runtime wrapper to `GISAgent`. |
+| Phase 1 cutover | pending | No execution cutover yet; `GISAgent.ask()` still uses the existing legacy agent path. |
+| Phase 2 runtime context | complete | Added `AgentRuntimeContext` with manager scope, ToolRuntimeContext bridge, and workspace path guard. |
+| Phase 3 tool runtime standardization | complete | Added read-only `RuntimeToolSpec` adapter, runtime prechecks, context overlay, and in-memory shadow trace; did not modify `build_tools` or live tool execution. |
+| Phase 4 planner/coordinator runtime adapter | complete | Added a side-channel `RuntimePlannerAdapter` for shadow task-plan diagnostics and coordinator decision diagnostics. `service.ask()` now uses the adapter only when runtime v2 is explicitly enabled; default behavior still delegates to the legacy shadow planner path. It does not modify `build_llm_task_plan()`, `build_shadow_llm_task_plan()`, `build_coordinator_decision()`, or tool execution. |
+| Phase 5 LCEL chain boundary | complete | Added partial LCEL-style runtime chain wrappers for answer-only context, retrieval context, and result-summary context. Added a local TF-IDF vector RAG scaffold. This is not a full LCEL migration and not a full embedding/vector-store RAG implementation. |
+| Phase 6 Context/RAG integration | complete | Added opt-in context integration behind `GIS_AGENT_ENABLE_VECTOR_RAG_CONTEXT=1`. Default keyword retrieval and tool-card behavior are unchanged. |
+| Phase 7 Production RAG backend | complete | User selected option 2. Added OpenAI-compatible API embedding client and local JSON persistent vector store, with opt-in context use via `GIS_AGENT_VECTOR_RAG_BACKEND=api`. |
+| Phase 8 RAG evaluation and ingestion hardening | complete | Added persistent index ingestion wrapper, source-hash freshness checks, provider failure observability, and recall@k evaluation. Still opt-in; default enablement should wait for broader eval and operational limits. |
+| Phase 9 Default enablement readiness | complete | Added readiness policy, default GIS eval fixture seeds, and embedding provider retry/backoff. It still only reports `ready_for_manual_enablement`; vector RAG is not default-enabled. |
+| Phase 10 RAG operations controls | complete | User selected option 1. Added admin-only read-only RAG readiness/eval status API. It does not rebuild indexes, call embedding providers, or expose ordinary workspace UI. |
+| Phase 11 RAG operations execution | complete | Added CLI-only RAG operations via `python -m core.agent_runtime.rag_ops`: read-only status, confirmed rebuild, and eval/readiness against an existing persistent index. No admin write API added. |
+| Phase 12 Runtime migration continuation | complete | Added runtime-facing planner/coordinator input/output schemas and unified runtime decision trace diagnostics. Live execution remains legacy by default. |
+| Phase 13 Runtime cutover readiness | complete | Added fixed GIS planner/coordinator decision eval fixtures and pure scoring helpers. Did not modify live planner/coordinator execution. |
+| Phase 14 Guarded cutover preparation | complete | Added `python -m core.agent_runtime.decision_eval` with `fixtures` and `report --outputs` commands for offline planner/coordinator eval reporting. |
+| Phase 15 Active-mode cutover planning | complete | User selected fixture expansion. Expanded offline planner/coordinator eval coverage to 10 core GIS workflow and safety cases; no live execution cutover. |
+| Phase 16 Decision eval CI/local wiring | complete | User selected CI/local guard. Added fixed outputs fixture, local PowerShell regression script, pytest coverage, and CI job step with strict 1.0 pass-rate report. |
+| Phase 17 Shadow-output capture for eval reports | complete | Added report-ready capture from runtime decision trace/diagnostics JSON, including safe planner tool names in trace output. No LLM calls, no tool calls, no active-mode cutover. |
+| Phase 18 Service shadow diagnostics capture | complete | Added service diagnostics capture CLI/helper and script. It writes runtime diagnostics JSON and optional report-ready eval outputs from `GISWorkspaceService.agent_runtime_diagnostics()` without chat execution, LLM calls, tool calls, or active-mode cutover. |
+| Phase 19 Guarded active-mode cutover foundation | complete | Added explicit active cutover guard, diagnostics visibility, runtime adapter active planner helper, service active planner helper, legacy fallback, and CI guard coverage. Default behavior remains legacy unless `GIS_AGENT_RUNTIME_V2=1`, `GIS_AGENT_RUNTIME_MODE=active`, and `GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER=1` are all set. |
+| Phase 20 Active enablement and GLM validation | complete | User enabled guarded active mode locally and requested GLM-4.5-Air-only validation. Added eval/schema alignment, `raster_zonal_stats` Tool Card, active deterministic fallback, and coordinator required-tool normalization. Latest fallback active eval: planner 0.9, coordinator 1.0, `ready_for_cutover_eval=true`; no tools executed. |
+| Phase 21 Service-level active smoke decision | complete | Added and ran a guarded service-level active smoke runner with synthetic in-workspace datasets. Latest smoke: 2/2 passed, `ready_for_next_phase=true`, no external download tools executed. |
+| Phase 22 Active smoke expansion decision | complete | Chose the safer path first: broadened deterministic-coordinator service smoke from 2 to 3 cases by adding uploaded-vector description. Tightened smoke pass criteria and isolated each run in a fresh workspace. Latest smoke: 3/3 passed, `ready_for_next_phase=true`, no external download tools executed. |
+| Phase 23 Coordinator LLM smoke decision | complete | Ran the minimal GLM-4.5-Air `--coordinator-mode llm` service smoke for `active_describe_vector`. Initial failure exposed coordinator input/terminal-decision issues; fixed planned-tool-card hydration and normalized empty `continue` after successful final step to `stop_success`. Latest LLM coordinator smoke: 1/1 passed, no external download tools executed. |
+| Phase 24 Coordinator LLM smoke expansion decision | complete | Expanded LLM coordinator smoke to `active_map_generation`. It passed 1/1 with artifact/image output, no code changes needed, no external download tools executed. |
+| Phase 25 Smoke guard integration | complete | Added local/CI deterministic active smoke guard with LLM coordinator smoke kept explicit opt-in. Fixed guard exit-code propagation and coordinator blank `required_tool` handling. Latest deterministic guard: 3/3 passed. Latest opt-in LLM guard: describe 1/1, map 1/1. |
+| Phase 26 Multi-step LLM coordinator smoke | complete | Ran and added opt-in local LLM coordinator smoke for `workflow_priority_table_to_points`. Latest opt-in LLM guard covers describe, map, and table-to-points; all passed 1/1. CI remains deterministic-only. |
+| Phase 27 Active exposure guardrails | complete | Added read-only active exposure policy diagnostics with environment, percent, rollback, deterministic smoke, optional LLM smoke, and production override gates. Local `.env` remains observe-only with 0% exposure. |
+| Phase 28 Staging exposure runbook/API | complete | Added admin-only read-only `/api/admin/agent-runtime/exposure`, sanitized exposure report wiring, and Chinese staging 1%-10% rollout/runback runbook. No live traffic routing changed. |
+| Phase 29 Staging dry-run execution | complete | Ran local staging 1% dry-run evidence generation. Output `outputs/agent_runtime_exposure_staging_dry_run.json` reports deterministic smoke 5/5, `eligible_for_user_exposure=true`, and `live_traffic_changed=false`. |
+| Phase 30 Active smoke expansion | complete | Expanded deterministic active smoke default suite from 3 to 5 stable local cases: vector describe, table describe, vector map, secondary vector map, and table-to-points. Deferred unstable raster/vector processing active smoke candidates to offline eval/tool tests. |
+| Phase 31 Staging dry-run script | complete | Added `scripts/run_agent_runtime_staging_exposure_dry_run.ps1`, which runs deterministic active smoke and writes staging exposure evidence with checked child exit codes. |
+| Phase 32 Exposure report enhancement | complete | Added `checked_at`, `required_reports`, `blocking_reasons_human`, and `next_actions` to exposure reports and admin endpoint responses. |
+| Phase 33 Active planner GIS stability hardening | complete | Hardened deterministic active fallback and default smoke for raster stats, raster clip, vector clip + map, and table-to-points + map. Latest deterministic smoke: 9/9; staging dry-run evidence updated with no live traffic change. |
+| Phase 34 Pre-1% LLM coordinator evidence | complete | Kept real staging 1% disabled. Added opt-in LLM coordinator smoke coverage for raster clip, vector clip + map, and table-to-points + map; latest full opt-in guard passed deterministic 9/9 plus six LLM coordinator cases. |
+| Phase 35 Controlled staging traffic router | complete | Added disabled-by-default exposure routing enforcement. When `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1`, eligible staging requests are bucketed by stable hash and non-selected requests fall back to legacy. Local `.env` still keeps routing enforcement off and exposure percent at 0. |
+| Phase 36 Staging 1% enablement | complete | User confirmed the major choice. Local `.env` now sets staging 1% and enforced exposure routing. Uvicorn on 127.0.0.1:8765 was restarted and admin exposure endpoint reports `eligible_for_user_exposure=true`, `recommendation=allow_staging_exposure`. Production exposure remains disabled. |
+| Phase 37 Staging 1% observation and rollback drill | complete | Collected staging 1% routing evidence, confirmed auth blocks unauthenticated chat observation without weakening access control, passed rollback toggle drill, added authenticated real HTTP fallback observation, and captured an authenticated active-hit uploaded-dataset success. Evidence: `outputs/agent_runtime_phase37_staging_1pct_observation.json`, `outputs/agent_runtime_phase37_authenticated_chat_observation.json`, `outputs/agent_runtime_phase37_authenticated_active_hit_dataset_observation.json`. |
+| GIS tool upgrade design: ISMN + XGBoost + GCP | complete | User confirmed the design direction for local ISMN archive ingestion, soil-moisture XGBoost updates, and GeoConformal Prediction outputs. Wrote `docs/superpowers/specs/2026-06-28-ismn-soil-moisture-xgboost-gcp-design.md`. No implementation code changed. |
+| Phase 38 Staging 5% exposure decision | pending | Major choice: increase staging exposure from 1% to 5%, or keep 1% for longer observation. Do not change `.env` until the user confirms. |
