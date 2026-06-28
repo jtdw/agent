@@ -22,7 +22,11 @@ workspace/
 local_library/
 .worktrees/
 logs/
+outputs/
 *.log
+*.db
+workflow_cache.db
+commercial_secret.key
 
 # Secrets and authentication state
 .env

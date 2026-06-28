@@ -539,3 +539,167 @@
 - Wrote the design specification at `docs/superpowers/specs/2026-06-28-ismn-soil-moisture-xgboost-gcp-design.md`.
 - The design covers ISMN local archive discovery/import, semantic data cards, soil-moisture training table construction, XGBoost validation metadata, GCP interval outputs/diagnostics, planner routing behavior, local-library cataloging, structured errors, testing, and rollout.
 - No implementation code was changed for this design checkpoint.
+- User confirmed executing Phase 38 staging 5%.
+- During Phase 38 prep, found that several `.env` runtime rollout keys were embedded in corrupted comment lines and were not reliably parsed as standalone key/value lines. Added standalone override lines for runtime v2 active guard, staging exposure, routing enforcement, rollback, smoke report, LLM smoke requirement, and production exposure block.
+- Temporarily set `GIS_AGENT_RUNTIME_EXPOSURE_PERCENT=5`, restarted uvicorn on `127.0.0.1:8765`, and confirmed the admin exposure endpoint reported staging 5%, eligible, rollback false, deterministic smoke passed, and no blocking reasons.
+- Ran `scripts/run_agent_runtime_staging_exposure_dry_run.ps1` for Phase 38 with `ExposurePercent=5`. The outer tool command timed out while the smoke subprocess continued; after waiting, the fresh smoke report was written.
+- Fresh Phase 38 smoke evidence:
+  - `outputs/agent_runtime_phase38_service_active_smoke_guard.json`
+  - summary: 9 cases, 2 passed, 7 failed, `ready_for_next_phase=false`
+  - failed cases showed active planner `default_llm` drift/invalid plan behavior, not external download tool execution.
+- Because the fresh smoke failed, reverted both standalone `GIS_AGENT_RUNTIME_EXPOSURE_PERCENT=5` lines back to `1`, restarted uvicorn, and confirmed the admin exposure endpoint returned to staging 1%, eligible, rollback false.
+- Wrote Phase 38 summary evidence to `outputs/agent_runtime_phase38_staging_5pct_attempt_summary.json`.
+- Verification after Phase 38 attempt:
+  - `tests/test_agent_runtime_traffic_routing.py tests/test_agent_runtime_exposure_policy.py -q` passed 11 tests.
+  - `py_compile` passed for `core/agent_runtime/traffic.py`, `core/agent_runtime/exposure.py`, `core/agent_runtime/active_smoke.py`, and `core/service.py`.
+  - Sensitive-string scan of Phase 38 evidence files found no password, cookie, session token, Authorization, API key, ZAI key, admin token, or app secret strings.
+  - Current runtime remains staging 1% rather than 5%.
+- User confirmed executing Phase 38A remediation.
+- Root cause investigation:
+  - `core/agent_runtime/planner.py::_active_result_should_use_deterministic_fallback` impact: LOW.
+  - `core/agent_runtime/active_smoke.py::run_service_active_smoke` impact: LOW.
+  - The first Phase 38 smoke failed mostly because active smoke inherited `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1`; smoke cases outside the exposure bucket used legacy/default LLM planning rather than active runtime.
+- TDD RED/GREEN:
+  - Added planner adapter tests for LLM-ready clarification drift with executable deterministic plans, and for preserving LLM clarification when deterministic plan has no actions.
+  - Added active-smoke test proving smoke ignores percentage exposure routing.
+  - Updated active fallback so executable deterministic plans override LLM ready/no-action or LLM ready/clarification drift.
+  - Updated `run_service_active_smoke()` to temporarily set `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=0` during smoke validation.
+  - Isolated an exposure diagnostics test from local `.env` rollout state.
+- Phase 38A verification:
+  - `tests/test_agent_runtime_planner_adapter.py -q`: 18 passed.
+  - Active-smoke stable subset: 4 passed.
+  - `py_compile` passed for changed runtime/test files.
+  - Fresh smoke `outputs/agent_runtime_phase38a_service_active_smoke_guard_fixed.json`: 9/9 passed, `ready_for_next_phase=true`.
+  - 5% dry-run `outputs/agent_runtime_phase38a_staging_5pct_dry_run_fixed.json`: eligible, `allow_staging_exposure`, `live_traffic_changed=false`.
+  - `.env` now points `GIS_AGENT_RUNTIME_SMOKE_REPORT` to `outputs/agent_runtime_phase38a_service_active_smoke_guard_dry_run_fixed.json` and sets staging exposure percent to 5.
+  - Restarted uvicorn on `127.0.0.1:8765`; `outputs/agent_runtime_phase38a_admin_exposure_5pct_fixed.json` reports staging 5%, eligible, rollback false.
+  - Authenticated active-hit evidence `outputs/agent_runtime_phase38a_authenticated_active_hit_5pct_fixed.json`: selected attempt 14, bucket 1, `/api/chat/ask` returned 200, `mode=coordinated_workflow`, `presentation_status=succeeded`, `execution_status=succeeded`.
+  - `tests/test_agent_runtime_traffic_routing.py tests/test_agent_runtime_exposure_policy.py -q`: 11 passed.
+  - `scripts/test_agent_runtime_decision_eval.ps1`: 68 passed, strict planner/coordinator report pass rate 1.0.
+- Sensitive-string scan of Phase 38A evidence produced one expected field-name match (`password_cookie_token_authorization_not_persisted`) and no actual secret values.
+- `node .gitnexus/run.cjs detect-changes` reported medium risk and no HIGH/CRITICAL post-change risk.
+- User requested the next step after Phase 38A.
+- Read the approved ISMN/XGBoost/GCP design spec, current planning files, STM workflow, station archive parser, generic XGBoost workflow, GCP uncertainty code, context builder, tool cards, and relevant tests.
+- Wrote the executable Phase 39 plan at `docs/superpowers/plans/2026-06-28-soil-moisture-xgboost-gcp-implementation-plan.md`.
+- Marked Phase 39 implementation planning complete and added Phase 39.1 data semantic card foundation as the next pending code batch.
+- No implementation code was changed in this step.
+- User asked to add old `core/station_data.py` removal to the task and start executing the plan.
+- Updated the Phase 39 implementation plan: the old `.stm` parser is now explicitly slated for migration/removal after the ISMN local adapter and workflow rewiring are in place.
+- Started Phase 39.1 in progress.
+- Worktree check showed the repo is a normal checkout on `main` with many existing in-progress changes; continued in-place to preserve current Phase 38/39 context instead of creating a separate worktree.
+- GitNexus impact before Phase 39.1 implementation:
+  - `build_conversation_context`: HIGH risk.
+  - `format_context_for_agent`: LOW risk.
+  - `DataManager.put_table`: MEDIUM risk.
+  - `DataManager.put_vector`: CRITICAL risk.
+  - `DataManager.put_raster_path`: HIGH risk.
+- Decided to avoid editing `DataManager.put_*`; Phase 39.1 will use helper-based semantic card attachment plus minimal context-builder integration.
+- Completed Phase 39.1:
+  - Added `core/data_semantics.py`.
+  - Integrated sanitized `data_semantic_cards` into `core/context_builder.py`.
+  - Added `tests/test_data_semantics.py`.
+  - Verified `tests/test_agent_runtime_planner_adapter.py tests/test_data_semantics.py -q`: 27 passed.
+- Completed Phase 39.2:
+  - Added `core/ismn_adapter.py` and `core/tools/soil_moisture_tools.py`.
+  - Registered ISMN tools through `core/tools/registry.py`.
+  - Added ISMN tool cards in `core/tool_cards.py`.
+  - Added `tests/test_ismn_adapter.py` and `tests/test_ismn_tools.py`.
+  - Verified `tests/test_ismn_adapter.py tests/test_ismn_tools.py -q`: 6 passed.
+- Fixed prompt budget regression from added tool cards:
+  - Failure: `tests/test_llm_first_layers.py::test_context_builder_adds_relevant_policy_cards_knowledge_and_profiles` exceeded 20000 characters.
+  - Resolution: compacted tool-card list fields and serialized top 5 formatted candidate cards only.
+  - Verified `tests/test_field_semantics.py tests/test_llm_first_layers.py tests/test_conversation_state_context.py -q`: 28 passed, 22 subtests passed.
+- Completed Phase 39.3:
+  - Added clean local STM-compatible ISMN archive parsing to `core/ismn_adapter.py`.
+  - Rewired `core/tools/common_tools.py`, `core/workflows/stm_soil_moisture.py`, and `api_server.py` away from `core.station_data`.
+  - Migrated old STM tests to the new ISMN adapter path and local library `local_library/data/ismn`.
+  - Deleted `core/station_data.py`.
+  - Verified `rg "core.station_data|from core.station_data|station_data|stm_archive_to_training_dataframe|find_station_archives|parse_ismn_station_zip" core api_server.py tests` returned no matches.
+  - Verified `tests/test_stm_training_table.py tests/test_stm_xgboost_workflow.py tests/test_data_semantics.py tests/test_ismn_adapter.py tests/test_ismn_tools.py -q`: 19 passed.
+  - Verified `tests/test_field_semantics.py tests/test_llm_first_layers.py tests/test_conversation_state_context.py tests/test_workflow_smoke.py -q`: 40 passed, 22 subtests passed.
+  - Verified `py_compile` for changed core/API files passed.
+- GitNexus `detect-changes` after Phase 39.1-39.3 reported medium risk, with affected flows limited to soil moisture workflow and chat context paths.
+- Completed Phase 39.4:
+  - Added `tests/test_generic_xgboost_method_metadata.py` using TDD.
+  - Initial RED failed with missing `target_column` and `validation_method` in `outputs`.
+  - Updated `core/ml/generic_xgboost.py::_fit_table_model` to add GCP-ready result columns:
+    - `xgb_prediction`
+    - `xgb_residual`
+    - `xgb_validation_prediction`
+    - `xgb_validation_residual`
+    - `xgb_validation_fold`
+    - `xgb_validation_role`
+  - Added outputs/diagnostics method metadata:
+    - `target_column`
+    - `prediction_column`
+    - `cv_prediction_column`
+    - `residual_column`
+    - `cv_fold_column`
+    - `validation_method`
+    - `coordinate_columns`
+    - `time_column`
+    - `feature_semantics`
+    - `gcp_ready`
+  - Added `random_split_validation` limitation when validation falls back to random split.
+  - Verification:
+    - `tests/test_generic_xgboost_method_metadata.py -q`: 2 passed.
+    - `tests/test_generic_xgboost_intelligence.py -q`: 12 passed.
+    - `tests/test_stm_xgboost_workflow.py tests/test_xgboost_modeling_routing.py -q`: 18 passed.
+    - `tests/test_gcp_uncertainty.py tests/test_tool_contracts.py -q`: 52 passed.
+    - `tests/test_data_semantics.py tests/test_ismn_adapter.py tests/test_ismn_tools.py tests/test_generic_xgboost_method_metadata.py -q`: 11 passed.
+    - `py_compile core/ml/generic_xgboost.py tests/test_generic_xgboost_method_metadata.py`: passed.
+- GitNexus `detect-changes` after this batch reported HIGH on the full dirty worktree because earlier Phase 38/39 changes are still present; individual impact checks for the edited XGBoost symbols were LOW.
+- Completed Phase 39.5:
+  - Added `tests/test_gcp_tool_contract.py` using TDD.
+  - Initial RED failed because core GCP still reported `method="gcp"` and the tool result dataset had no `data_semantic_card`.
+  - Updated `core/gcp_uncertainty.py`:
+    - method names are now `global_split_conformal`, `spatially_weighted_gcp`, and `global_split_conformal_fallback`.
+    - fallback diagnostics include `used_fallback`, `code`, `reason`, `requested_method`, and `effective_method`.
+    - coordinate fallback codes include `GCP_COORDINATES_MISSING_GLOBAL_FALLBACK` and `GCP_COORDINATES_INSUFFICIENT_GLOBAL_FALLBACK`.
+    - predictions now include `gcp_local_quantile`, `gcp_method`, `gcp_fallback_code`, and `gcp_interval_score`.
+  - Updated the registered `geographical_conformal_prediction` wrapper in `core/tools/ml_tools.py`:
+    - outputs include `fallback_diagnostics` and `semantic_card`.
+    - result dataset receives a sanitized semantic card with `prediction_with_uncertainty`, `gcp_result`, `map_ready`, and `calibration_diagnostics` roles.
+    - interval summaries include local quantile and method columns.
+    - `spatial_ready` now checks for `spatially_weighted_gcp`.
+  - Updated `tests/test_gcp_uncertainty.py` to expect explicit method names.
+  - Verification:
+    - `tests/test_gcp_tool_contract.py -q`: 2 passed.
+    - `tests/test_gcp_uncertainty.py tests/test_gcp_tool_contract.py tests/test_tool_contracts.py -q`: 54 passed.
+    - `tests/test_xgboost_modeling_routing.py tests/test_generic_xgboost_method_metadata.py -q`: 13 passed.
+    - `tests/test_data_semantics.py tests/test_ismn_adapter.py tests/test_ismn_tools.py tests/test_stm_xgboost_workflow.py -q`: 16 passed.
+    - `py_compile core/gcp_uncertainty.py core/tools/ml_tools.py tests/test_gcp_uncertainty.py tests/test_gcp_tool_contract.py`: passed.
+  - GitNexus `detect-changes` still reports HIGH on the full dirty worktree because earlier Phase 38/39 changes are present; individual impact checks for the edited GCP symbols were LOW.
+- Completed Phase 39.6:
+  - Added `tests/test_soil_moisture_semantic_planning.py` using TDD.
+  - Initial RED showed missing semantic-card support for ISMN observation to XGBoost, prediction semantic card to GCP, GCP result analysis, and GCP uncertainty map routing.
+  - Updated `core/task_planner.py` with semantic-card helpers that:
+    - seed `generic_xgboost_workflow` arguments from ISMN observation cards when real target/features/coordinates/time fields exist;
+    - keep clarification behavior when ISMN observations have no feature fields;
+    - build `geographical_conformal_prediction` args from XGBoost prediction semantic cards when no recent model result is available;
+    - satisfy result-analysis context from GCP result cards;
+    - seed uncertainty map fields from GCP interval-width metadata while preserving the existing table-to-points map workflow.
+  - Verification:
+    - `tests/test_soil_moisture_semantic_planning.py -q`: 5 passed.
+    - `py_compile core/task_planner.py tests/test_soil_moisture_semantic_planning.py`: passed.
+    - `tests/test_agent_runtime_planner_adapter.py tests/test_task_slots.py tests/test_xgboost_modeling_routing.py -q`: 42 passed.
+    - `tests/test_next_data_processing_migration.py tests/test_gcp_uncertainty.py tests/test_gcp_tool_contract.py -q`: 17 passed.
+- Completed Phase 39.7:
+  - Initial validation:
+    - `tests/test_soil_moisture_semantic_planning.py tests/test_data_semantics.py tests/test_ismn_adapter.py tests/test_ismn_tools.py tests/test_stm_xgboost_workflow.py tests/test_generic_xgboost_method_metadata.py tests/test_gcp_tool_contract.py -q`: 25 passed.
+    - Full deterministic active smoke initially exceeded the 180s command timeout but produced no report; residual smoke child processes were identified and stopped without touching the existing uvicorn service.
+  - Added opt-in semantic active smoke coverage:
+    - `semantic_gcp_result_uncertainty_map` creates a local GCP result table with a semantic card and expects `table_to_points` plus `plot_dataset`.
+    - Default active smoke remains 9 cases; the semantic case is opt-in to avoid slowing every guard run.
+  - Fixed Phase 39.7 drift found by the new smoke:
+    - `plot the GCP uncertainty map` was classified as modeling because of GCP keywords.
+    - Active LLM planning could skip the table-to-points prerequisite and call `plot_dataset` directly on a table.
+    - `core/task_planner.py` now overrides GCP result map prompts to `map_generation`, synchronizes `slots.task_type`, and drops stale modeling slot-missing entries after the override.
+    - `core/agent_runtime/planner.py` now falls back to deterministic planning when an active LLM plan skips `table_to_points` while deterministic planning has a table-to-points map workflow.
+  - Verification:
+    - `tests/test_soil_moisture_semantic_planning.py tests/test_agent_runtime_planner_adapter.py tests/test_agent_runtime_active_smoke.py::test_service_active_smoke_can_run_opt_in_semantic_gcp_result_map_case tests/test_agent_runtime_active_smoke.py::test_service_active_smoke_default_suite_includes_describe_dataset_case -q`: 27 passed.
+    - `tests/test_task_slots.py tests/test_xgboost_modeling_routing.py tests/test_next_data_processing_migration.py tests/test_gcp_uncertainty.py tests/test_gcp_tool_contract.py -q`: 41 passed.
+    - `py_compile core/task_planner.py core/agent_runtime/planner.py core/agent_runtime/active_smoke.py tests/test_soil_moisture_semantic_planning.py tests/test_agent_runtime_active_smoke.py tests/test_agent_runtime_planner_adapter.py`: passed.
+    - `scripts/run_agent_runtime_active_smoke.ps1 ... -Case semantic_gcp_result_uncertainty_map -FailOnError`: 1/1 passed, output `outputs/agent_runtime_phase39_7_semantic_gcp_result_map_smoke.json`.
+    - Full deterministic active smoke: 9/9 passed, output `outputs/agent_runtime_phase39_7_deterministic_smoke.json`.
+    - Staging 5% dry-run: `eligible_for_user_exposure=true`, `recommendation=allow_staging_exposure`, `live_traffic_changed=false`, output `outputs/agent_runtime_phase39_7_staging_5pct_dry_run.json`.

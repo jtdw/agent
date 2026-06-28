@@ -239,6 +239,56 @@ Date: 2026-06-28
 
 Date: 2026-06-28
 
+## Phase 38 Staging 5% Attempt Findings
+
+- The local `.env` contained several runtime rollout keys embedded in corrupted comment lines, so strict line-based parsing only saw `GIS_AGENT_RUNTIME_EXPOSURE_PERCENT`. Adding standalone runtime override lines made the API process correctly read active guard, smoke report, rollback, and production-exposure settings.
+- After enabling staging 5% and restarting uvicorn, `/api/admin/agent-runtime/exposure` reported `requested_percent=5`, `eligible_for_user_exposure=true`, `recommendation=allow_staging_exposure`, `rollback_requested=false`, and no blocking reasons.
+- A fresh Phase 38 deterministic active smoke rerun did not pass: 9 cases, 2 passed, 7 failed, `ready_for_next_phase=false`.
+- The failed smoke cases did not execute external download tools. Failures were planner/plan-validity failures: `default_llm` produced invalid responses, invalid plans, clarification, or missing-input plans for several established smoke cases.
+- Because the fresh smoke failed, staging 5% should not be held. The local runtime was returned to staging 1% and the admin exposure endpoint again reported eligible at 1%.
+- Before retrying 5%, investigate active planner drift and decide whether to tighten deterministic fallback, isolate smoke from default LLM drift, or add a stronger planner validity gate. Do not start ISMN/XGBoost/GCP implementation until the 5% runtime rollout is stable.
+
+Date: 2026-06-28
+
+## Phase 38A Active Planner Drift Remediation Findings
+
+- Root cause was narrower than first suspected: fresh active smoke inherited `GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1` from `.env`, so most smoke cases were bucketed outside 1%/5% and routed back to legacy/default LLM planning. The smoke runner was not actually validating active runtime for those cases.
+- `run_service_active_smoke()` now temporarily disables percentage exposure routing while it runs, so active smoke validates active runtime directly and is not affected by the current staging percentage.
+- Active fallback was also tightened for executable deterministic plans: if the LLM planner returns a ready plan that asks for clarification or lacks executable actions while the deterministic plan already has validated actions, the runtime uses deterministic fallback. If the deterministic plan itself needs user input and has no actions, LLM clarification is preserved.
+- Phase 38A fresh smoke passed 9/9, and a Phase 38A staging 5% dry-run reported eligible with `live_traffic_changed=false`.
+- After updating `.env` to staging 5% and restarting uvicorn, `/api/admin/agent-runtime/exposure` reported `requested_percent=5`, eligible, rollback false, and no blocking reasons.
+- A real authenticated bucket-1 request with CSV upload succeeded as `coordinated_workflow` with `presentation_status=succeeded`, giving active-hit evidence at 5%.
+
+Date: 2026-06-28
+
+## Phase 39 Implementation Plan Findings
+
+- Phase 39 should begin with a data semantic card foundation before ISMN import, XGBoost metadata, or GCP upgrades. Without this layer the planner would continue guessing scientific roles from filenames and prompt wording.
+- Existing `core/workflows/stm_soil_moisture.py`, `core/ml/generic_xgboost.py`, and `core/gcp_uncertainty.py` already provide useful foundations. The implementation plan keeps them compatible and extends outputs/contracts instead of replacing them.
+- `core/station_data.py` contains older `.stm` archive parsing and visible historical mojibake. Phase 39 should not combine the ISMN/GCP upgrade with broad encoding repair; only mark blocking cases for later review.
+- ISMN archive access remains local-only: uploaded official archives, workspace archives, or `local_library/data/ismn/**/*.zip`. `TUW-GEO/ismn` should stay optional at first, with `ISMN_DEPENDENCY_MISSING` as a structured error.
+- The recommended first code batch is Phase 39.1 plus 39.2: semantic cards and local ISMN adapter/tools. This lowers downstream planner and modeling risk.
+- User later confirmed that the old `core/station_data.py` `.stm` parser should be migrated away and deleted after replacement. Direct deletion now would break `core/tools/common_tools.py`, `core/workflows/stm_soil_moisture.py`, `api_server.py`, and STM tests, so deletion is a Phase 39.3 migration completion criterion rather than a Phase 39.1 action.
+- GitNexus impact for Phase 39.1 showed `build_conversation_context` as HIGH risk, `format_context_for_agent` as LOW risk, `put_table` as MEDIUM, `put_raster_path` as HIGH, and `put_vector` as CRITICAL. Therefore Phase 39.1 should avoid editing `DataManager.put_*` and attach semantic cards through separate helpers.
+- Phase 39.3 completed the old parser migration. Runtime imports no longer reference `core.station_data`; the compatibility tool name `convert_stm_station_archive_to_training_table` remains, but it now calls `core.ismn_adapter.ismn_archive_to_observation_dataframe`.
+- `core/station_data.py` was deleted after `rg "core.station_data|from core.station_data|station_data|stm_archive_to_training_dataframe|find_station_archives|parse_ismn_station_zip" core api_server.py tests` returned no runtime/test matches.
+- `build_common_tools` impact was CRITICAL because tool registration feeds workflow executor, active smoke, and service ask paths. The implementation kept tool names compatible and changed only the internal parser dependency.
+- Adding ISMN tool cards increased formatted prompt size beyond the existing 20000-character budget. The fix was to compact tool-card list fields and serialize only the top 5 candidate cards in `format_context_for_agent`, while leaving `candidate_tool_cards()` retrieval limits unchanged.
+- Phase 39.4 impact analysis showed `run_generic_xgboost_workflow`, `_fit_table_model`, and `_split_indices` as LOW risk individually. The full-worktree `detect-changes` reported HIGH because many earlier Phase 38/39 files remain dirty in the same checkout.
+- Generic XGBoost now emits a stable GCP-ready contract: `xgb_prediction`, `xgb_residual`, `xgb_validation_prediction`, `xgb_validation_residual`, `xgb_validation_fold`, `xgb_validation_role`, plus outputs/diagnostics for target, prediction, residual, validation method, coordinate columns, time column, and feature semantics.
+- Random validation fallback is explicitly reported through `limitations=["random_split_validation"]`, making it easier for later GCP routing to distinguish spatial/temporal evidence from weak random holdout evidence.
+- Phase 39.5 impact analysis showed `run_gcp_uncertainty_analysis` and the registered `geographical_conformal_prediction` wrapper as LOW risk.
+- GCP method names are now explicit: `global_split_conformal`, `spatially_weighted_gcp`, and `global_split_conformal_fallback`.
+- Spatial fallback is now structured with codes such as `GCP_COORDINATES_MISSING_GLOBAL_FALLBACK` and `GCP_COORDINATES_INSUFFICIENT_GLOBAL_FALLBACK`, and the fallback diagnostics are copied into metrics, summary JSON, tool outputs, diagnostics, and result semantic cards.
+- GCP prediction tables now include `gcp_local_quantile`, `gcp_method`, `gcp_fallback_code`, and `gcp_interval_score`, plus per-prediction alias columns such as `<pred>_gcp_local_quantile` and `<pred>_gcp_method`.
+- The registered `geographical_conformal_prediction` tool attaches a sanitized data semantic card to the result dataset with roles `prediction_with_uncertainty`, `gcp_result`, `map_ready`, and `calibration_diagnostics`.
+- `core/tools/ml_tools.py` still contains an unreachable legacy GCP implementation block after the registered wrapper return path. It is not executed by `build_ml_tools()` but still contains old method literals; defer cleanup to a separate targeted refactor rather than mixing it into Phase 39.5.
+- Phase 39.6 impact analysis showed `build_task_plan`, `_seed_modeling_fields_from_profile`, `_recent_model_for_gcp`, and `_build_gcp_args_from_recent_model` as HIGH risk because they feed `GISWorkspaceService.ask` and the edit/retry flow. The implementation stayed narrow in `core/task_planner.py` and added dedicated planner tests.
+- Phase 39.6 planner routing now reads sanitized `data_semantic_cards` to seed ISMN observation modeling fields, preserve "no features means clarify" behavior, route XGBoost prediction cards to `geographical_conformal_prediction`, and treat GCP result cards as result/map-ready context rather than retraining input.
+- Phase 39.7 found an active-runtime drift case: prompts like "plot the GCP uncertainty map" can be classified as `modeling` because of GCP keywords, and the active LLM planner may skip the required `table_to_points` prerequisite by calling `plot_dataset` directly on a table. The fix is two-layered: deterministic planner now overrides GCP-result map prompts to `map_generation`, and the active runtime fallback detects when an LLM plan skips `table_to_points` while deterministic planning has the safe table-to-points map workflow.
+
+Date: 2026-06-28
+
 ## Project Findings
 
 - The project is a GIS intelligent workbench, not a generic chatbot.

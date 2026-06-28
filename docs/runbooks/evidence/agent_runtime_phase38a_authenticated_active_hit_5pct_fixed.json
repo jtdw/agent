@@ -1,0 +1,192 @@
+{
+  "schema_version": "agent-runtime-phase38a-authenticated-5pct-active-hit/v2",
+  "created_at": "2026-06-28T02:07:33.854124+00:00",
+  "status": "completed",
+  "request_kind": "authenticated_real_http_chat_active_bucket_with_upload",
+  "admin_exposure_before_request": {
+    "environment": "staging",
+    "requested_percent": 5,
+    "eligible_for_user_exposure": true,
+    "recommendation": "allow_staging_exposure",
+    "rollback_requested": false,
+    "reasons": []
+  },
+  "selected_attempt": 14,
+  "selected_routing": {
+    "schema_version": "agent-runtime-traffic-routing/v1",
+    "routing_enforced": true,
+    "use_active_runtime": true,
+    "reason": "selected_for_active_runtime",
+    "requested_percent": 5,
+    "bucket": 1,
+    "bucket_key": "9716b7917ad2",
+    "policy_reasons": []
+  },
+  "upload": {
+    "status_code": 200,
+    "dataset_count": 1
+  },
+  "ask": {
+    "status_code": 200,
+    "mode": "coordinated_workflow",
+    "reason": "workflow_coordinator",
+    "presentation_status": "succeeded",
+    "execution_status": "succeeded",
+    "artifact_count": 0,
+    "image_count": 0
+  },
+  "admin_exposure_after_request": {
+    "environment": "staging",
+    "requested_percent": 5,
+    "eligible_for_user_exposure": true,
+    "recommendation": "allow_staging_exposure",
+    "rollback_requested": false,
+    "reasons": []
+  },
+  "attempts_before_selected": [
+    {
+      "attempt": 1,
+      "user_id_tail": "947492bd",
+      "session_id_tail": "fbf23370",
+      "bucket": 58,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 2,
+      "user_id_tail": "2520e798",
+      "session_id_tail": "72b83ec4",
+      "bucket": 51,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 3,
+      "user_id_tail": "296ba699",
+      "session_id_tail": "c971f0dc",
+      "bucket": 12,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 4,
+      "user_id_tail": "f5bfefc8",
+      "session_id_tail": "25a2e2b8",
+      "bucket": 19,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 5,
+      "user_id_tail": "1e775135",
+      "session_id_tail": "2c4d1540",
+      "bucket": 5,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 6,
+      "user_id_tail": "5a9642c3",
+      "session_id_tail": "ad949766",
+      "bucket": 76,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 7,
+      "user_id_tail": "e293a439",
+      "session_id_tail": "4b97b92f",
+      "bucket": 45,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 8,
+      "user_id_tail": "beb92fb9",
+      "session_id_tail": "0b8e9807",
+      "bucket": 28,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 9,
+      "user_id_tail": "de858482",
+      "session_id_tail": "f3cf1989",
+      "bucket": 90,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 10,
+      "user_id_tail": "962ad2fd",
+      "session_id_tail": "63a0bda9",
+      "bucket": 56,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 11,
+      "user_id_tail": "4fa211fa",
+      "session_id_tail": "69777a74",
+      "bucket": 75,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 12,
+      "user_id_tail": "864bf4f1",
+      "session_id_tail": "5d9d457e",
+      "bucket": 80,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 13,
+      "user_id_tail": "f2e218ff",
+      "session_id_tail": "d507a558",
+      "bucket": 39,
+      "use_active_runtime": false,
+      "reason": "outside_exposure_bucket",
+      "mode_status": 200,
+      "auth_ok": true
+    },
+    {
+      "attempt": 14,
+      "user_id_tail": "07e4e402",
+      "session_id_tail": "cfb72e2b",
+      "bucket": 1,
+      "use_active_runtime": true,
+      "reason": "selected_for_active_runtime",
+      "mode_status": 200,
+      "auth_ok": true
+    }
+  ],
+  "safety": {
+    "password_cookie_token_authorization_not_persisted": true,
+    "production_exposure_enabled": false
+  }
+}

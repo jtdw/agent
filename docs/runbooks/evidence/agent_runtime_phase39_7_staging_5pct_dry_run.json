@@ -1,0 +1,41 @@
+{
+  "schema_version": "agent-runtime-staging-exposure-dry-run/v1",
+  "created_at": "2026-06-28T04:31:08.465513+00:00",
+  "exposure": {
+    "schema_version": "agent-runtime-exposure-policy/v1",
+    "checked_at": "2026-06-28T04:31:08.465513+00:00",
+    "environment": "staging",
+    "requested_percent": 5,
+    "rollback_requested": false,
+    "eligible_for_user_exposure": true,
+    "recommendation": "allow_staging_exposure",
+    "reasons": [],
+    "blocking_reasons_human": [],
+    "required_reports": {
+      "deterministic_smoke": true,
+      "llm_smoke": false
+    },
+    "deterministic_smoke": {
+      "required": true,
+      "status": "passed",
+      "report_filename": "agent_runtime_phase39_7_deterministic_smoke.json",
+      "passed": 9,
+      "failed": 0,
+      "ready_for_next_phase": true
+    },
+    "llm_smoke": {
+      "required": false,
+      "status": "not_required",
+      "reports": []
+    },
+    "next_actions": [
+      "Continue staging rollout at the requested percentage.",
+      "Keep rollback ready with GIS_AGENT_RUNTIME_ROLLBACK=1."
+    ]
+  },
+  "operations": {
+    "llm_calls_performed": 0,
+    "tool_calls_performed": 0,
+    "live_traffic_changed": false
+  }
+}

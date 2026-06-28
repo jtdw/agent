@@ -1,0 +1,256 @@
+{
+  "schema_version": "agent-runtime-service-active-smoke/v1",
+  "created_at": "2026-06-28T04:10:16.412895+00:00",
+  "runtime": {
+    "run_id": "20260628T040430Z_41e4619c",
+    "enabled": true,
+    "mode": "active",
+    "cutover_guard": {
+      "active_requested": true,
+      "active_cutover_allowed": true,
+      "active_effective": true,
+      "fallback_mode": "shadow",
+      "reason": "active_mode_allowed"
+    },
+    "coordinator_mode": "deterministic",
+    "runtime_agent": "lightweight"
+  },
+  "summary": {
+    "case_count": 9,
+    "passed": 9,
+    "failed": 0,
+    "ready_for_next_phase": true
+  },
+  "cases": [
+    {
+      "case_id": "active_describe_vector",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "describe_dataset",
+        "detect_coordinate_fields",
+        "profile_missing_values",
+        "preview_table"
+      ],
+      "expected_tools": [
+        "describe_dataset"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:deterministic_fallback",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 0,
+        "image_count": 0
+      }
+    },
+    {
+      "case_id": "active_describe_table",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "describe_dataset",
+        "preview_table",
+        "detect_coordinate_fields",
+        "profile_missing_values"
+      ],
+      "expected_tools": [
+        "describe_dataset"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:deterministic_fallback",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 0,
+        "image_count": 0
+      }
+    },
+    {
+      "case_id": "active_map_generation",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "plot_dataset"
+      ],
+      "expected_tools": [
+        "plot_dataset"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:default_llm",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 1,
+        "image_count": 1
+      }
+    },
+    {
+      "case_id": "active_map_generation_secondary_vector",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "plot_dataset"
+      ],
+      "expected_tools": [
+        "plot_dataset"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:default_llm",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 1,
+        "image_count": 1
+      }
+    },
+    {
+      "case_id": "workflow_priority_table_to_points",
+      "ok": true,
+      "mode": "validated_workflow_executor",
+      "reason": "workflow_priority_route",
+      "status": "succeeded",
+      "executed_tools": [
+        "describe_dataset",
+        "table_to_points"
+      ],
+      "expected_tools": [
+        "table_to_points"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "workflow_priority",
+        "planner_source": "deterministic_workflow_priority",
+        "executes_tools": true
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 1,
+        "image_count": 0
+      }
+    },
+    {
+      "case_id": "active_raster_basic_stats",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "describe_dataset",
+        "raster_basic_stats"
+      ],
+      "expected_tools": [
+        "raster_basic_stats"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:deterministic_fallback",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 0,
+        "image_count": 0
+      }
+    },
+    {
+      "case_id": "active_raster_clip_by_boundary",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "clip_raster_by_vector",
+        "describe_dataset"
+      ],
+      "expected_tools": [
+        "clip_raster_by_vector"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:deterministic_fallback",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 1,
+        "image_count": 0
+      }
+    },
+    {
+      "case_id": "active_vector_clip_map",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "describe_dataset",
+        "vector_clip_by_vector",
+        "plot_dataset"
+      ],
+      "expected_tools": [
+        "vector_clip_by_vector",
+        "plot_dataset"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:deterministic_fallback",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 2,
+        "image_count": 1
+      }
+    },
+    {
+      "case_id": "active_table_to_points_map",
+      "ok": true,
+      "mode": "coordinated_workflow",
+      "reason": "workflow_coordinator",
+      "status": "succeeded",
+      "executed_tools": [
+        "table_to_points",
+        "plot_dataset"
+      ],
+      "expected_tools": [
+        "table_to_points",
+        "plot_dataset"
+      ],
+      "llm_planner": {
+        "status": "ready",
+        "mode": "active",
+        "planner_source": "runtime_active:default_llm",
+        "executes_tools": false
+      },
+      "safe_tool_execution": {
+        "external_download_tools_executed": [],
+        "artifact_count": 2,
+        "image_count": 1
+      }
+    }
+  ]
+}

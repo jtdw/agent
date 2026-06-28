@@ -137,6 +137,68 @@ Python 文本读写必须显式指定 encoding，例如：
 * 设置 PYTHONIOENCODING=utf-8；
 * PowerShell 中设置 InputEncoding、OutputEncoding 和 $OutputEncoding 为 UTF-8。
 
+## 六点一、PowerShell 命令规则
+
+本项目默认 shell 是 PowerShell。Codex 运行内联 Python、Node 或其他多行脚本时，禁止使用 Bash heredoc 写法，例如：
+
+```bash
+python - <<'PY'
+...
+PY
+```
+
+PowerShell 中必须使用 here-string 管道写法：
+
+```powershell
+@'
+print("hello")
+'@ | .\.venv\Scripts\python.exe -
+```
+
+如果需要执行多行 Python，优先使用项目 `.venv`：
+
+```powershell
+$env:PYTHONUTF8='1'
+$env:PYTHONIOENCODING='utf-8'
+
+@'
+from pathlib import Path
+print(Path.cwd())
+'@ | .\.venv\Scripts\python.exe -
+```
+
+不要在 PowerShell 中使用 `<<`、`<<EOF`、`<<'PY'` 等 Bash heredoc 语法。
+
+如果内联脚本包含中文内容，不要通过 PowerShell 管道传递；应写入临时 `.py` 文件或使用已有脚本，并确保 UTF-8 编码。
+
+## 六点二、常见执行注意事项
+
+* 当前项目运行环境是 Windows + PowerShell，命令示例必须优先使用 PowerShell 语法，不要默认使用 Bash/Linux 语法。
+* 路径默认使用 Windows 路径或 PowerShell 可识别路径；路径含空格时必须使用 `-LiteralPath` 或引号包裹。
+* 运行 Python 命令优先使用项目 `.venv\Scripts\python.exe`，不要默认使用系统 Python。
+* 运行 npm 命令前先确认所在目录；前端命令通常应在 `ui_next` 目录执行。
+* 不要把 `.env`、API Key、token、cookie、storage_state、日志中的敏感内容输出到回复或终端摘要中。
+* 检查 API key 是否可用时，只输出是否存在、长度、HTTP 状态、错误码和脱敏错误信息，不输出完整 key。
+* 工作区可能已有用户改动。修改前先看 `git status --short`，不要回滚、覆盖或格式化无关文件。
+* 修改代码前先阅读相关文件，避免凭文件名猜测结构。
+* 只改和任务直接相关的文件；不要顺手做大规模格式化、重命名或重构。
+* 如果命令失败，先判断是 shell 语法、路径、依赖、环境变量还是业务逻辑问题，不要连续重复运行同一个失败命令。
+* PowerShell 中不要用 `&&`、`||`、heredoc、`export VAR=...` 等 Bash 写法；应使用 `$env:VAR='value'`、`;` 或分步执行。
+* 涉及中文内容时，显式设置 UTF-8，并避免通过 PowerShell 管道传递中文源码或中文提示词。
+
+## 六点三、Codex 自检规则
+
+Codex 在运行命令前应先确认当前 shell、当前工作目录和项目虚拟环境。
+
+如果命令需要联网、调用外部 API 或读取 `.env`，必须：
+
+* 不打印敏感值；
+* 使用最小请求验证；
+* 输出脱敏后的状态摘要；
+* 遇到认证失败时报告 HTTP 状态码和供应商错误码，不猜测 key 内容。
+
+如果第一次命令因为 shell 语法失败，应明确记录原因，并改用当前 shell 的原生写法继续执行。
+
 发现以下疑似乱码时，不要凭空猜测原文：
 
 * ???
@@ -242,7 +304,7 @@ Codex 每次完成任务后，应输出：
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **agent** (7938 symbols, 18642 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **agent** (9231 symbols, 20862 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -270,6 +332,10 @@ This project is indexed by GitNexus as **agent** (7938 symbols, 18642 relationsh
 | `gitnexus://repo/agent/clusters` | All functional areas |
 | `gitnexus://repo/agent/processes` | All execution flows |
 | `gitnexus://repo/agent/process/{name}` | Step-by-step execution trace |
+
+## CLI Compatibility
+
+This project uses GitNexus CLI 1.6.8 compatible parameters. Do not use `--max-depth`; this version does not accept it. When limiting analysis scope, pass an explicit path to `node .gitnexus/run.cjs analyze` or configure `.gitnexusignore`. Before using version-sensitive flags, check the current command help with `node .gitnexus/run.cjs <command> --help`.
 
 ## CLI
 

@@ -1,0 +1,142 @@
+{
+  "schema_version": "agent-runtime-staging-1pct-observation/v1",
+  "created_at": "2026-06-28T00:02:37.232045+00:00",
+  "cutover_guard": {
+    "active_requested": true,
+    "active_cutover_allowed": true,
+    "active_effective": true,
+    "fallback_mode": "shadow",
+    "reason": "active_mode_allowed"
+  },
+  "exposure": {
+    "environment": "staging",
+    "requested_percent": 1,
+    "rollback_requested": false,
+    "eligible_for_user_exposure": true,
+    "recommendation": "allow_staging_exposure",
+    "reasons": [],
+    "deterministic_smoke": {
+      "required": true,
+      "status": "passed",
+      "report_filename": "agent_runtime_service_active_smoke_guard.json",
+      "passed": 9,
+      "failed": 0,
+      "ready_for_next_phase": true
+    },
+    "llm_smoke": {
+      "required": false,
+      "status": "passed",
+      "reports": [
+        {
+          "required": true,
+          "status": "passed",
+          "report_filename": "agent_runtime_service_llm_coordinator_describe_guard.json",
+          "passed": 1,
+          "failed": 0,
+          "ready_for_next_phase": true
+        },
+        {
+          "required": true,
+          "status": "passed",
+          "report_filename": "agent_runtime_service_llm_coordinator_map_guard.json",
+          "passed": 1,
+          "failed": 0,
+          "ready_for_next_phase": true
+        },
+        {
+          "required": true,
+          "status": "passed",
+          "report_filename": "agent_runtime_service_llm_coordinator_table_points_guard.json",
+          "passed": 1,
+          "failed": 0,
+          "ready_for_next_phase": true
+        },
+        {
+          "required": true,
+          "status": "passed",
+          "report_filename": "agent_runtime_service_llm_coordinator_raster_clip_guard.json",
+          "passed": 1,
+          "failed": 0,
+          "ready_for_next_phase": true
+        },
+        {
+          "required": true,
+          "status": "passed",
+          "report_filename": "agent_runtime_service_llm_coordinator_vector_clip_map_guard.json",
+          "passed": 1,
+          "failed": 0,
+          "ready_for_next_phase": true
+        },
+        {
+          "required": true,
+          "status": "passed",
+          "report_filename": "agent_runtime_service_llm_coordinator_table_points_map_guard.json",
+          "passed": 1,
+          "failed": 0,
+          "ready_for_next_phase": true
+        }
+      ]
+    }
+  },
+  "routing_observation": {
+    "sample_count": 200,
+    "active_hit_count": 3,
+    "legacy_fallback_count": 197,
+    "active_hit_bucket_keys": [
+      "33366a682002",
+      "7d059f10768a",
+      "4d4000a4ff75"
+    ],
+    "min_bucket": 0,
+    "max_bucket": 99
+  },
+  "http_chat_observation": {
+    "attempted": true,
+    "result": "blocked_by_auth_403",
+    "action": "kept authentication unchanged; did not enable anonymous access for observation"
+  },
+  "rollback_drill": {
+    "rollback_on": {
+      "phase": "rollback_on",
+      "environment": "staging",
+      "requested_percent": 1,
+      "rollback_requested": true,
+      "eligible_for_user_exposure": false,
+      "recommendation": "do_not_expose_users",
+      "reasons": [
+        "rollback_requested"
+      ],
+      "deterministic_smoke": {
+        "required": true,
+        "status": "passed",
+        "report_filename": "agent_runtime_service_active_smoke_guard.json",
+        "passed": 9,
+        "failed": 0,
+        "ready_for_next_phase": true
+      }
+    },
+    "rollback_restored": {
+      "phase": "rollback_restored",
+      "environment": "staging",
+      "requested_percent": 1,
+      "rollback_requested": false,
+      "eligible_for_user_exposure": true,
+      "recommendation": "allow_staging_exposure",
+      "reasons": [],
+      "deterministic_smoke": {
+        "required": true,
+        "status": "passed",
+        "report_filename": "agent_runtime_service_active_smoke_guard.json",
+        "passed": 9,
+        "failed": 0,
+        "ready_for_next_phase": true
+      }
+    },
+    "passed": true
+  },
+  "operations": {
+    "live_traffic_configured": true,
+    "production_exposure_enabled": false,
+    "rollback_restored_to_zero": true
+  }
+}
