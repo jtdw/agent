@@ -46,11 +46,37 @@ GIS_AGENT_RUNTIME_ENFORCE_EXPOSURE_ROUTING=1
 GIS_AGENT_RUNTIME_EXPOSURE_SALT=agent-runtime-exposure-v1
 GIS_AGENT_RUNTIME_ROLLBACK=0
 GIS_AGENT_RUNTIME_SMOKE_REPORT=outputs/agent_runtime_service_active_smoke_guard.json
+GIS_AGENT_RUNTIME_REQUIRE_SOIL_MOISTURE_GCP_SMOKE=1
+GIS_AGENT_RUNTIME_SOIL_MOISTURE_GCP_SMOKE_SUMMARY=outputs/phase45_real_soil_gcp_smoke/phase45_real_soil_gcp_recurring_smoke_summary.json
 GIS_AGENT_RUNTIME_REQUIRE_LLM_SMOKE=0
 GIS_AGENT_RUNTIME_ALLOW_PRODUCTION_EXPOSURE=0
 ```
 
 然后重启 staging 服务，调用 `/api/admin/agent-runtime/exposure`。只有当 `eligible_for_user_exposure=true` 且 `recommendation=allow_staging_exposure` 时，才允许把 staging 流量接入 active 验证。
+
+## Phase 47: Staging 10% readiness dry-run
+
+进入真实 10% 暴露前，先运行只读 dry-run：
+
+```powershell
+.\scripts\run_agent_runtime_staging_exposure_dry_run.ps1
+```
+
+该脚本会依次执行：
+
+- `run_agent_runtime_active_smoke.ps1`，验证 active smoke guard。
+- `run_soil_moisture_gcp_smoke.ps1 -ValidateOnly`，验证 Phase 45/46 recurring soil moisture/XGBoost/GCP summary。
+- `python -m core.agent_runtime.exposure staging-dry-run --percent 10`，生成 staging 10% readiness evidence。
+
+通过条件：
+
+- `deterministic_smoke.status=passed`
+- `soil_moisture_gcp_smoke.status=passed`
+- `eligible_for_user_exposure=true`
+- `recommendation=allow_staging_exposure`
+- `live_traffic_changed=false`
+
+这一步只写入 `outputs/agent_runtime_exposure_staging_dry_run.json`，不修改 `.env`，不切换真实流量。
 
 ## Staging 5% 到 10%
 

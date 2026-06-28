@@ -293,3 +293,18 @@ def test_staging_exposure_runbook_documents_admin_endpoint_and_rollback() -> Non
     assert "GIS_AGENT_RUNTIME_ROLLBACK=1" in content
     assert "1%" in content
     assert "10%" in content
+
+
+def test_staging_exposure_runbook_is_utf8_and_documents_phase47_gate() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    runbook = repo_root / "docs" / "runbooks" / "agent-runtime-staging-exposure.md"
+
+    content = runbook.read_text(encoding="utf-8")
+
+    mojibake_markers = ("锟斤拷", "\ufffd", "Ã", "å", "æ", "ä", "鐩", "鏆", "绛", "浠")
+    assert not any(marker in content for marker in mojibake_markers)
+    assert "Phase 47" in content
+    assert "run_agent_runtime_staging_exposure_dry_run.ps1" in content
+    assert "run_soil_moisture_gcp_smoke.ps1 -ValidateOnly" in content
+    assert "GIS_AGENT_RUNTIME_REQUIRE_SOIL_MOISTURE_GCP_SMOKE=1" in content
+    assert "live_traffic_changed=false" in content
