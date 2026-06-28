@@ -280,6 +280,8 @@ def build_executable_workflow(workflow_id: str, params: dict[str, Any] | None = 
                     "aggregate": payload.get("aggregate") or "daily",
                     "min_samples": payload.get("min_samples") or 8,
                     "encode_aspect_circular": payload.get("encode_aspect_circular", True),
+                    "boundary_name": payload.get("boundary_name") or "",
+                    "study_area": payload.get("study_area") or payload.get("area_query") or "",
                 },
                 expected_outputs=["training_table", "point_layer", "raster_features", "xgboost_model"],
             ),

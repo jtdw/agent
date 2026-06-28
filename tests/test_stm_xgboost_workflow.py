@@ -7,9 +7,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
+import geopandas as gpd
 import rasterio
 from rasterio.transform import from_origin
 from rasterio.warp import transform as transform_coords
+from shapely.geometry import box
 
 from core.config import Settings
 from core.service import GISWorkspaceService
@@ -102,6 +104,38 @@ def _write_lulc_mask_raster(path: Path) -> None:
         dst.write(data, 1)
 
 
+def _put_covering_boundary(service: GISWorkspaceService, name: str = "study_area") -> str:
+    boundary = gpd.GeoDataFrame(
+        {"name": [name]},
+        geometry=[box(115.0, 41.0, 116.0, 42.0)],
+        crs="EPSG:4326",
+    )
+    return service.manager.put_vector(name, boundary)
+
+
+def _put_inside_only_boundary(service: GISWorkspaceService, name: str = "inside_boundary") -> str:
+    boundary = gpd.GeoDataFrame(
+        {"name": [name]},
+        geometry=[box(115.535, 41.548, 115.542, 41.554)],
+        crs="EPSG:4326",
+    )
+    return service.manager.put_vector(name, boundary)
+
+
+def _write_shandian_boundary_library(manager, tmp_root: Path, *, inside_only: bool = True) -> None:
+    boundary_dir = manager.workdir / "local_library" / "data" / "boundary"
+    boundary_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = tmp_root / "source_boundary"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    geom = box(115.535, 41.548, 115.542, 41.554) if inside_only else box(115.0, 41.0, 116.0, 42.0)
+    gdf = gpd.GeoDataFrame({"name": ["shandianhe"]}, geometry=[geom], crs="EPSG:4326")
+    shp_path = source_dir / "shandianhe_basin_boundary.shp"
+    gdf.to_file(shp_path, driver="ESRI Shapefile")
+    with zipfile.ZipFile(boundary_dir / "shandianhe_basin_boundary_full.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in source_dir.glob("shandianhe_basin_boundary.*"):
+            archive.write(path, arcname=path.name)
+
+
 def _service(tmp: str) -> GISWorkspaceService:
     return GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
 
@@ -138,6 +172,7 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
         _write_many_day_station_archive(archive_path)
         raster_path = service.manager.upload_dir / "dem.tif"
         _write_covering_raster(raster_path)
+        boundary_name = _put_covering_boundary(service)
         service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:3857"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
 
@@ -146,6 +181,7 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
                 {
                     "archive_path": str(archive_path),
                     "raster_names": "dem",
+                    "boundary_name": boundary_name,
                     "output_prefix": "stm_full",
                     "aggregate": "daily",
                 }
@@ -173,6 +209,7 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
         assert "raster_stm_full_dem_twi" in result["outputs"]["model_feature_cols"]
         assert [step["tool_name"] for step in result["outputs"]["steps"]] == [
             "convert_stm_station_archive_to_training_table",
+            "prepare_study_area_training_samples",
             "table_to_points",
             "batch_register_points_to_rasters",
             "prepare_unified_training_samples",
@@ -192,6 +229,7 @@ def test_stm_xgboost_workflow_filters_lulc_zero_before_derivatives() -> None:
         lulc_path = service.manager.upload_dir / "lulc.tif"
         _write_covering_raster(dem_path)
         _write_lulc_mask_raster(lulc_path)
+        boundary_name = _put_covering_boundary(service)
         service.manager.put_raster_path("dem", dem_path, meta={"crs": "EPSG:3857"})
         service.manager.put_raster_path("lulc", lulc_path, meta={"crs": "EPSG:4326", "dataset_type": "landcover"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
@@ -201,6 +239,7 @@ def test_stm_xgboost_workflow_filters_lulc_zero_before_derivatives() -> None:
                 {
                     "archive_path": str(archive_path),
                     "raster_names": "dem,lulc",
+                    "boundary_name": boundary_name,
                     "output_prefix": "stm_filtered",
                     "aggregate": "daily",
                     "min_samples": 8,
@@ -222,6 +261,103 @@ def test_stm_xgboost_workflow_filters_lulc_zero_before_derivatives() -> None:
         assert unified_index < derivative_index
 
 
+def test_stm_xgboost_workflow_filters_stations_by_explicit_study_area_before_raster_sampling() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "stations.zip"
+        _write_two_station_archive(archive_path)
+        dem_path = service.manager.upload_dir / "dem.tif"
+        _write_covering_raster(dem_path)
+        boundary_name = _put_inside_only_boundary(service)
+        service.manager.put_raster_path("dem", dem_path, meta={"crs": "EPSG:3857"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "dem",
+                    "boundary_name": boundary_name,
+                    "output_prefix": "stm_boundary",
+                    "aggregate": "daily",
+                    "min_samples": 8,
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        assert result["outputs"]["status"] == "modeled"
+        preprocessing = result["outputs"]["unified_preprocessing"]
+        assert preprocessing["filter_method"] == "study_area_boundary"
+        assert preprocessing["boundary_dataset"] == boundary_name
+        assert preprocessing["study_area_filter"]["removed_row_count"] == 12
+        assert preprocessing["study_area_filter"]["removed_station_count"] == 1
+        assert preprocessing["study_area_filter"]["removed_stations"] == ["OUTSIDE"]
+        assert set(service.manager.get_table("stm_boundary_unified_training")["station_id"]) == {"INSIDE"}
+        step_names = [step["tool_name"] for step in result["outputs"]["steps"]]
+        assert step_names.index("prepare_study_area_training_samples") < step_names.index("batch_register_points_to_rasters")
+
+
+def test_stm_xgboost_workflow_asks_for_study_area_when_area_cannot_be_inferred() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "stations.zip"
+        _write_many_day_station_archive(archive_path)
+        raster_path = service.manager.upload_dir / "dem.tif"
+        _write_covering_raster(raster_path)
+        service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:3857"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "dem",
+                    "output_prefix": "stm_missing_area",
+                    "aggregate": "daily",
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        assert result["outputs"]["status"] == "needs_study_area"
+        assert result["outputs"]["study_area_resolution"]["status"] == "missing"
+        assert "generic_xgboost_workflow" not in [step["tool_name"] for step in result["outputs"]["steps"]]
+
+
+def test_stm_xgboost_workflow_resolves_shandianhe_boundary_from_local_library() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "shandianhe_stations.zip"
+        _write_two_station_archive(archive_path)
+        _write_shandian_boundary_library(service.manager, Path(tmp))
+        raster_path = service.manager.upload_dir / "dem.tif"
+        _write_covering_raster(raster_path)
+        service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:3857"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "dem",
+                    "study_area": "shandianhe",
+                    "output_prefix": "stm_shandian",
+                    "aggregate": "daily",
+                    "min_samples": 8,
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        assert result["outputs"]["status"] == "modeled"
+        assert result["outputs"]["unified_preprocessing"]["boundary_dataset"] == "shandianhe_basin_boundary"
+        assert result["outputs"]["unified_preprocessing"]["study_area_filter"]["removed_stations"] == ["OUTSIDE"]
+
+
 def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
     with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         service = _service(tmp)
@@ -229,6 +365,7 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
         _write_many_day_station_archive(archive_path)
         raster_path = service.manager.upload_dir / "ndvi_daily.tif"
         _write_temporal_covering_raster(raster_path)
+        boundary_name = _put_covering_boundary(service)
         service.manager.put_raster_path("ndvi_daily", raster_path, meta={"crs": "EPSG:4326"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
 
@@ -237,6 +374,7 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
                 {
                     "archive_path": str(archive_path),
                     "raster_names": "ndvi_daily",
+                    "boundary_name": boundary_name,
                     "output_prefix": "stm_temporal",
                     "aggregate": "daily",
                     "min_samples": 3,
@@ -271,8 +409,8 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
             "build_temporal_covariate_composite",
         ]
         assert [step["tool_name"] for step in result["outputs"]["steps"]][3:5] == [
+            "prepare_study_area_training_samples",
             "table_to_points",
-            "batch_register_points_to_rasters",
         ]
         register_step = next(step for step in result["outputs"]["steps"] if step["tool_name"] == "batch_register_points_to_rasters")
         assert register_step["args"]["raster_names"] == "stm_temporal_ndvi_daily_composite"
@@ -285,6 +423,7 @@ def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> No
         _write_many_day_station_archive(archive_path)
         raster_path = service.manager.upload_dir / "ndvi.tif"
         _write_covering_raster(raster_path)
+        boundary_name = _put_covering_boundary(service)
         service.manager.put_raster_path("ndvi", raster_path, meta={"crs": "EPSG:4326"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
 
@@ -293,6 +432,7 @@ def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> No
                 {
                     "archive_path": str(archive_path),
                     "raster_names": "ndvi",
+                    "boundary_name": boundary_name,
                     "output_prefix": "stm_ndvi",
                     "aggregate": "daily",
                 }
@@ -314,6 +454,7 @@ def test_stm_xgboost_workflow_uses_dem_only_derivatives_without_aspect_engineeri
         _write_many_day_station_archive(archive_path)
         raster_path = service.manager.upload_dir / "dem.tif"
         _write_covering_raster(raster_path)
+        boundary_name = _put_covering_boundary(service)
         service.manager.put_raster_path("dem", raster_path, meta={"crs": "EPSG:3857"})
         tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
 
@@ -322,6 +463,7 @@ def test_stm_xgboost_workflow_uses_dem_only_derivatives_without_aspect_engineeri
                 {
                     "archive_path": str(archive_path),
                     "raster_names": "dem",
+                    "boundary_name": boundary_name,
                     "output_prefix": "stm_no_circular",
                     "aggregate": "daily",
                     "encode_aspect_circular": False,

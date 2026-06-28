@@ -208,6 +208,229 @@ def _dataset_frame(manager: Any, dataset_name: str) -> pd.DataFrame:
     raise TypeError(f"{dataset_name} is not a table or vector dataset")
 
 
+def _vector_dataset_exists(manager: Any, dataset_name: str) -> bool:
+    try:
+        return bool(dataset_name) and manager.get(dataset_name).data_type == "vector"
+    except Exception:
+        return False
+
+
+def _is_shandianhe_query(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return "shandian" in text or "\u95ea\u7535\u6cb3" in str(value or "")
+
+
+def _infer_study_area_query(*, archive_path: str, raster_names: str, output_prefix: str) -> str:
+    text = " ".join([str(archive_path or ""), str(raster_names or ""), str(output_prefix or "")])
+    if _is_shandianhe_query(text):
+        return "shandianhe"
+    return ""
+
+
+def _load_shandianhe_boundary(manager: Any) -> dict[str, Any]:
+    if _vector_dataset_exists(manager, "shandianhe_basin_boundary"):
+        return {
+            "status": "resolved",
+            "boundary_dataset": "shandianhe_basin_boundary",
+            "area_source": "workspace",
+            "resolution_method": "existing_dataset",
+            "study_area": "shandianhe",
+        }
+
+    try:
+        from core.domestic_sources.gscloud_adapter import _extract_local_shandian_boundary
+
+        _, dataset_name, source = _extract_local_shandian_boundary(manager, "shandianhe")
+        if dataset_name and _vector_dataset_exists(manager, dataset_name):
+            return {
+                "status": "resolved",
+                "boundary_dataset": dataset_name,
+                "area_source": source or "local_library_boundary",
+                "resolution_method": "local_library_boundary_asset",
+                "study_area": "shandianhe",
+            }
+    except Exception as exc:
+        last_error = f"{type(exc).__name__}: {exc}"
+    else:
+        last_error = ""
+
+    try:
+        dataset_name = manager.load_path("lib_shandianhe_basin_boundary_full", name="shandianhe_basin_boundary")
+        if _vector_dataset_exists(manager, dataset_name):
+            return {
+                "status": "resolved",
+                "boundary_dataset": dataset_name,
+                "area_source": "local_library",
+                "resolution_method": "local_library_manifest_item",
+                "study_area": "shandianhe",
+            }
+    except Exception as exc:
+        last_error = last_error or f"{type(exc).__name__}: {exc}"
+
+    return {
+        "status": "unsupported",
+        "study_area": "shandianhe",
+        "reason": "known_area_boundary_not_available",
+        "technical_detail": last_error,
+    }
+
+
+def _resolve_study_area_boundary(
+    manager: Any,
+    *,
+    boundary_name: str = "",
+    study_area: str = "",
+    archive_path: str = "",
+    raster_names: str = "",
+    output_prefix: str = "",
+) -> dict[str, Any]:
+    explicit_boundary = str(boundary_name or "").strip()
+    if explicit_boundary:
+        if _vector_dataset_exists(manager, explicit_boundary):
+            return {
+                "status": "resolved",
+                "boundary_dataset": explicit_boundary,
+                "area_source": "workspace",
+                "resolution_method": "explicit_boundary_name",
+                "study_area": str(study_area or explicit_boundary),
+            }
+        return {
+            "status": "invalid_boundary",
+            "boundary_dataset": explicit_boundary,
+            "reason": "boundary_dataset_not_found_or_not_vector",
+        }
+
+    query = str(study_area or "").strip()
+    inferred = False
+    if not query:
+        query = _infer_study_area_query(archive_path=archive_path, raster_names=raster_names, output_prefix=output_prefix)
+        inferred = bool(query)
+    if not query:
+        return {
+            "status": "missing",
+            "reason": "study_area_not_provided",
+            "supported_local_areas": ["china_admin_province_city_county", "shandianhe_basin"],
+        }
+
+    if _is_shandianhe_query(query):
+        resolved = _load_shandianhe_boundary(manager)
+        resolved["requested_study_area"] = query
+        resolved["inferred"] = inferred
+        return resolved
+
+    try:
+        from core.admin_boundary import extract_local_admin_boundary
+        from core.area_resolver import resolve_area_candidates
+
+        candidates = resolve_area_candidates(query, limit=3, manager=manager)
+        for candidate in candidates:
+            dataset_name = str(candidate.get("dataset_name") or candidate.get("geometry_asset_id") or "")
+            if dataset_name and _vector_dataset_exists(manager, dataset_name):
+                return {
+                    "status": "resolved",
+                    "boundary_dataset": dataset_name,
+                    "area_source": str(candidate.get("area_source") or "local_admin_boundary"),
+                    "resolution_method": str(candidate.get("resolution_method") or "area_resolver"),
+                    "study_area": str(candidate.get("name") or query),
+                    "requested_study_area": query,
+                    "inferred": inferred,
+                    "candidate": candidate,
+                }
+        _, dataset_name, source = extract_local_admin_boundary(manager, query)
+        if dataset_name and _vector_dataset_exists(manager, dataset_name):
+            return {
+                "status": "resolved",
+                "boundary_dataset": dataset_name,
+                "area_source": source or "local_admin_boundary",
+                "resolution_method": "local_admin_boundary",
+                "study_area": query,
+                "requested_study_area": query,
+                "inferred": inferred,
+            }
+    except Exception as exc:
+        return {
+            "status": "unsupported",
+            "requested_study_area": query,
+            "reason": "area_resolution_failed",
+            "technical_detail": f"{type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "status": "unsupported",
+        "requested_study_area": query,
+        "reason": "study_area_not_in_local_library",
+        "supported_local_areas": ["china_admin_province_city_county", "shandianhe_basin"],
+    }
+
+
+def _filter_training_by_boundary(
+    manager: Any,
+    *,
+    training_dataset: str,
+    boundary_dataset: str,
+    output_name: str,
+) -> dict[str, Any]:
+    try:
+        import geopandas as gpd
+
+        training_df = manager.get_table(training_dataset)
+        boundary = manager.get_vector(boundary_dataset).copy()
+        lon = pd.to_numeric(training_df.get("lon"), errors="coerce")
+        lat = pd.to_numeric(training_df.get("lat"), errors="coerce")
+        valid_xy = lon.notna() & lat.notna()
+        points = gpd.GeoDataFrame(
+            training_df.copy(),
+            geometry=gpd.points_from_xy(lon.fillna(0), lat.fillna(0)),
+            crs="EPSG:4326",
+        )
+        if boundary.crs is None:
+            boundary = boundary.set_crs("EPSG:4326", allow_override=True)
+        else:
+            boundary = boundary.to_crs("EPSG:4326")
+        boundary = boundary[boundary.geometry.notna() & ~boundary.geometry.is_empty].copy()
+        if boundary.empty:
+            return tool_result_error(
+                "prepare_study_area_training_samples",
+                inputs={"training_dataset": training_dataset, "boundary_dataset": boundary_dataset, "output_name": output_name},
+                error_code="EMPTY_STUDY_AREA_BOUNDARY",
+                error_title="Study area boundary is empty",
+                user_message="The selected study-area boundary has no usable geometry.",
+                next_actions=["Upload a valid polygon boundary or choose a supported local-library area."],
+            ).to_dict()
+        union_geom = boundary.geometry.union_all() if hasattr(boundary.geometry, "union_all") else boundary.geometry.unary_union
+        inside_mask = valid_xy & points.geometry.intersects(union_geom)
+        filtered_df = training_df.loc[inside_mask].reset_index(drop=True)
+        removed_df = training_df.loc[~inside_mask].copy()
+        saved_name = manager.put_table(output_name, filtered_df)
+        removed_stations = sorted({str(item) for item in removed_df.get("station_id", pd.Series(dtype=str)).dropna().unique()})
+        return tool_result_ok(
+            "prepare_study_area_training_samples",
+            inputs={"training_dataset": training_dataset, "boundary_dataset": boundary_dataset, "output_name": output_name},
+            outputs={
+                "result_dataset": saved_name,
+                "boundary_dataset": boundary_dataset,
+                "row_count": int(len(filtered_df)),
+                "removed_row_count": int(len(removed_df)),
+                "removed_station_count": int(len(removed_stations)),
+                "removed_stations": removed_stations,
+                "filter_method": "study_area_boundary",
+                "boundary_bounds": [float(v) for v in boundary.total_bounds],
+            },
+            summary=f"Filtered station samples by study-area boundary: kept {len(filtered_df)} row(s), removed {len(removed_df)} row(s).",
+            diagnostics={"source_training_dataset": training_dataset},
+        ).to_dict()
+    except Exception as exc:
+        return tool_result_error(
+            "prepare_study_area_training_samples",
+            inputs={"training_dataset": training_dataset, "boundary_dataset": boundary_dataset, "output_name": output_name},
+            error_code="STUDY_AREA_FILTER_FAILED",
+            error_title="Study area filtering failed",
+            user_message="Failed to filter station samples by the selected study-area boundary.",
+            technical_detail=f"{type(exc).__name__}: {exc}",
+            next_actions=["Check that the station table has lon/lat columns and the boundary is a valid vector polygon dataset."],
+        ).to_dict()
+
+
 def _unified_training_filter(
     manager: Any,
     *,
@@ -257,6 +480,7 @@ def _unified_training_filter(
             "removed_stations": removed_stations,
             "required_raster_fields": required_fields,
             "mask_raster_fields": mask_fields,
+            "filter_method": "raster_coverage_and_mask",
         },
         summary=f"Prepared unified training samples: kept {len(filtered_df)} row(s), removed {len(removed_df)} row(s).",
         diagnostics={"coverage_dataset": coverage_dataset},
@@ -274,6 +498,8 @@ def run_stm_soil_moisture_xgboost_workflow(
     aggregate: str = "daily",
     min_samples: int = 8,
     encode_aspect_circular: bool = True,
+    boundary_name: str = "",
+    study_area: str = "",
 ) -> dict[str, Any]:
     """Run the conditional STM -> point -> raster feature -> XGBoost workflow."""
     resolved_archive = Path(archive_path) if str(archive_path or "").strip() else resolve_default_station_archive(manager)
@@ -357,6 +583,79 @@ def run_stm_soil_moisture_xgboost_workflow(
             next_actions=["Use a wider year range, hourly aggregate mode, or additional station data."],
         ).to_dict()
 
+    study_area_resolution = _resolve_study_area_boundary(
+        manager,
+        boundary_name=boundary_name,
+        study_area=study_area,
+        archive_path=archive_path,
+        raster_names=",".join(rasters),
+        output_prefix=output_prefix,
+    )
+    if study_area_resolution.get("status") == "missing":
+        return tool_result_ok(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs={
+                "archive_path": archive_path,
+                "raster_names": ",".join(rasters),
+                "output_prefix": output_prefix,
+                "boundary_name": boundary_name,
+                "study_area": study_area,
+            },
+            outputs={
+                "status": "needs_study_area",
+                "source_archive": archive_path,
+                "training_dataset": training_dataset,
+                "target_col": target_col,
+                "row_count": row_count,
+                "raster_features": rasters,
+                "study_area_resolution": study_area_resolution,
+                "steps": steps,
+            },
+            artifacts=artifacts,
+            summary="Station and raster inputs are ready, but the workflow needs a study area before spatial filtering and modeling.",
+            diagnostics={"minimum_samples": min_samples},
+            next_actions=[
+                "Specify a China province/city/county name that exists in the local admin boundary library.",
+                "Specify shandianhe for the local Shandianhe basin boundary.",
+                "Upload a polygon boundary and pass its dataset name as boundary_name for other regions.",
+            ],
+        ).to_dict()
+    if study_area_resolution.get("status") == "unsupported":
+        return tool_result_ok(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs={
+                "archive_path": archive_path,
+                "raster_names": ",".join(rasters),
+                "output_prefix": output_prefix,
+                "boundary_name": boundary_name,
+                "study_area": study_area,
+            },
+            outputs={
+                "status": "needs_boundary_upload",
+                "source_archive": archive_path,
+                "training_dataset": training_dataset,
+                "target_col": target_col,
+                "row_count": row_count,
+                "raster_features": rasters,
+                "study_area_resolution": study_area_resolution,
+                "steps": steps,
+            },
+            artifacts=artifacts,
+            summary="The requested study area is not available in the local boundary library.",
+            diagnostics={"minimum_samples": min_samples},
+            next_actions=["Upload a polygon boundary for this study area, then run the workflow again with boundary_name."],
+        ).to_dict()
+    if study_area_resolution.get("status") == "invalid_boundary":
+        return tool_result_error(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs={"boundary_name": boundary_name, "study_area": study_area},
+            error_code="STUDY_AREA_BOUNDARY_NOT_FOUND",
+            error_title="Study area boundary not found",
+            user_message="The provided boundary_name is not a registered vector dataset.",
+            diagnostics={"study_area_resolution": study_area_resolution},
+            next_actions=["Upload or register a polygon boundary dataset, or use a supported local-library area."],
+        ).to_dict()
+
     temporal_rasters = _temporal_raster_names(manager, rasters)
     temporal_alignment: dict[str, Any] = {}
     temporal_composites: dict[str, str] = {}
@@ -431,6 +730,59 @@ def run_stm_soil_moisture_xgboost_workflow(
             if composite_dataset:
                 temporal_composites[raster_name] = composite_dataset
 
+    study_area_filter: dict[str, Any] = {}
+    boundary_dataset = str(study_area_resolution.get("boundary_dataset") or "")
+    if boundary_dataset:
+        study_area_filter_result = _filter_training_by_boundary(
+            manager,
+            training_dataset=training_dataset,
+            boundary_dataset=boundary_dataset,
+            output_name=f"{prefix}_study_area_training",
+        )
+        steps.append(
+            _step(
+                "prepare_study_area_training_samples",
+                {"training_dataset": training_dataset, "boundary_dataset": boundary_dataset, "output_name": f"{prefix}_study_area_training"},
+                study_area_filter_result,
+            )
+        )
+        artifacts.extend([item for item in study_area_filter_result.get("artifacts", []) if isinstance(item, dict)])
+        if not study_area_filter_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs={"training_dataset": training_dataset, "boundary_dataset": boundary_dataset, "output_prefix": output_prefix},
+                error_code=str(study_area_filter_result.get("error_code") or "STUDY_AREA_FILTER_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(study_area_filter_result.get("user_message") or "Failed to filter station samples by study area."),
+                diagnostics={"steps": steps, "study_area_resolution": study_area_resolution},
+                next_actions=[str(item) for item in study_area_filter_result.get("next_actions", []) if str(item).strip()],
+            ).to_dict()
+        study_area_filter = dict(study_area_filter_result.get("outputs") or {})
+        training_dataset = str(study_area_filter.get("result_dataset") or training_dataset)
+        row_count = int(study_area_filter.get("row_count") or 0)
+        if row_count < int(min_samples):
+            return tool_result_ok(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs={"archive_path": archive_path, "raster_names": ",".join(rasters), "output_prefix": output_prefix},
+                outputs={
+                    "status": "needs_more_samples_after_study_area_filter",
+                    "source_archive": archive_path,
+                    "training_dataset": training_dataset,
+                    "target_col": target_col,
+                    "row_count": row_count,
+                    "raster_features": rasters,
+                    "temporal_alignment": temporal_alignment,
+                    "temporal_composites": temporal_composites,
+                    "study_area_resolution": study_area_resolution,
+                    "study_area_filter": study_area_filter,
+                    "steps": steps,
+                },
+                artifacts=artifacts,
+                summary="Study-area boundary filtering succeeded, but too few samples remain for XGBoost.",
+                diagnostics={"minimum_samples": min_samples},
+                next_actions=["Use a larger study area, more station observations, or inspect whether station coordinates match the boundary."],
+            ).to_dict()
+
     feature_rasters = [temporal_composites.get(raster_name, raster_name) for raster_name in rasters]
     coverage_point_args = {
         "dataset_name": training_dataset,
@@ -496,6 +848,22 @@ def run_stm_soil_moisture_xgboost_workflow(
             next_actions=[str(item) for item in unified_result.get("next_actions", []) if str(item).strip()],
         ).to_dict()
     unified_outputs = dict(unified_result.get("outputs") or {})
+    if study_area_filter:
+        unified_outputs["filter_method"] = "study_area_boundary"
+        unified_outputs["boundary_dataset"] = boundary_dataset
+        unified_outputs["study_area_resolution"] = study_area_resolution
+        unified_outputs["study_area_filter"] = study_area_filter
+        unified_outputs["raster_filter"] = {
+            "removed_row_count": int(unified_outputs.get("removed_row_count") or 0),
+            "removed_station_count": int(unified_outputs.get("removed_station_count") or 0),
+            "removed_stations": list(unified_outputs.get("removed_stations") or []),
+            "required_raster_fields": list(unified_outputs.get("required_raster_fields") or []),
+            "mask_raster_fields": list(unified_outputs.get("mask_raster_fields") or []),
+        }
+        unified_outputs["total_removed_row_count"] = int(study_area_filter.get("removed_row_count") or 0) + int(unified_outputs.get("removed_row_count") or 0)
+        unified_outputs["total_removed_station_count"] = len(
+            set(study_area_filter.get("removed_stations") or []) | set(unified_outputs.get("removed_stations") or [])
+        )
     training_dataset = str(unified_outputs.get("result_dataset") or training_dataset)
     row_count = int(unified_outputs.get("row_count") or 0)
     if row_count < int(min_samples):
@@ -511,6 +879,7 @@ def run_stm_soil_moisture_xgboost_workflow(
                 "raster_features": feature_rasters,
                 "temporal_alignment": temporal_alignment,
                 "temporal_composites": temporal_composites,
+                "study_area_resolution": study_area_resolution,
                 "unified_preprocessing": unified_outputs,
                 "steps": steps,
             },
@@ -708,6 +1077,7 @@ def run_stm_soil_moisture_xgboost_workflow(
             "row_count": row_count,
             "temporal_alignment": temporal_alignment,
             "temporal_composites": temporal_composites,
+            "study_area_resolution": study_area_resolution,
             "unified_preprocessing": unified_outputs,
             "model_result": xgb_result,
             "steps": steps,
