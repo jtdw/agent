@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,45 @@ def _role_inference_from_fields(fields: list[str]) -> dict[str, Any]:
     }
 
 
+def _date_from_text(value: str) -> str:
+    match = re.search(r"((?:19|20)\d{2})[_-]?(\d{2})[_-]?(\d{2})", str(value or ""))
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _raster_file_profile(path: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    try:
+        import rasterio
+
+        with rasterio.open(path) as src:
+            band_count = int(src.count)
+            temporal_bands = []
+            dates = []
+            for index, description in enumerate(src.descriptions or (), start=1):
+                date_value = _date_from_text(str(description or ""))
+                item = {"band": int(index), "description": str(description or ""), "date": date_value}
+                if date_value:
+                    dates.append(date_value)
+                temporal_bands.append(item)
+            payload: dict[str, Any] = {
+                "width": int(src.width),
+                "height": int(src.height),
+                "band_count": band_count,
+                "crs": str(src.crs) if src.crs else meta.get("crs"),
+                "dtype": str(src.dtypes[0]) if src.dtypes else meta.get("dtype"),
+                "nodata": src.nodata if src.nodata is not None else meta.get("nodata"),
+            }
+            if temporal_bands:
+                payload["temporal_bands"] = temporal_bands
+                payload["temporal_band_count"] = int(len([item for item in temporal_bands if item.get("date")]))
+            if dates:
+                payload["time_range"] = {"field": "raster_band_description", "start": min(dates), "end": max(dates)}
+            return payload
+    except Exception:
+        return {}
+
+
 def _profile_table(record: Any) -> dict[str, Any]:
     df = record.object_ref
     if not isinstance(df, pd.DataFrame):
@@ -131,6 +171,8 @@ def _profile_vector(record: Any) -> dict[str, Any]:
 
 def _profile_raster(record: Any) -> dict[str, Any]:
     meta = dict(getattr(record, "meta", {}) or {})
+    file_profile = _raster_file_profile(Path(str(getattr(record, "path", ""))), meta)
+    meta = {**meta, **{key: value for key, value in file_profile.items() if key not in {"time_range", "temporal_bands", "temporal_band_count"}}}
     width = meta.get("width")
     height = meta.get("height")
     bounds = meta.get("bounds")
@@ -141,7 +183,7 @@ def _profile_raster(record: Any) -> dict[str, Any]:
             resolution = [abs((right - left) / float(width)), abs((top - bottom) / float(height))]
         except Exception:
             resolution = None
-    return {
+    profile = {
         "width": width,
         "height": height,
         "band_count": meta.get("count"),
@@ -152,6 +194,14 @@ def _profile_raster(record: Any) -> dict[str, Any]:
         "nodata": meta.get("nodata"),
         "role_inference": {"basis": "metadata_only", "roles": ["raster"], "evidence": ["raster_metadata"]},
     }
+    if "band_count" in file_profile:
+        profile["band_count"] = file_profile["band_count"]
+    if "time_range" in file_profile:
+        profile["time_range"] = file_profile["time_range"]
+    if "temporal_bands" in file_profile:
+        profile["temporal_bands"] = file_profile["temporal_bands"]
+        profile["temporal_band_count"] = file_profile.get("temporal_band_count", 0)
+    return profile
 
 
 def _profile_archive(path: Path) -> dict[str, Any]:

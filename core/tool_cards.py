@@ -129,7 +129,7 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         ["data_processing", "raster_composite", "remote_sensing", "soil_moisture", "modeling"],
         ["raster_names", "output_name"],
         ["raster_dataset", "summary", "artifact", "map_layer"],
-        optional_inputs=["covariate_type", "method", "band", "min_observations", "band_selection"],
+        optional_inputs=["covariate_type", "method", "band", "min_observations", "band_selection", "start_date", "end_date"],
         input_asset_roles=["daily_ndvi_raster", "daily_lst_raster", "daily_precipitation_raster", "covariate_raster"],
         preconditions=["Rasters must be loaded and share the same CRS, transform, width, and height"],
         common_failure_cases=["Input grids are not aligned", "all pixels missing", "categorical rasters need a mode workflow"],

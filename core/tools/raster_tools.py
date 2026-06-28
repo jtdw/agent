@@ -221,6 +221,23 @@ def _same_raster_grid(left: dict[str, Any], right: dict[str, Any]) -> bool:
     )
 
 
+def _date_from_temporal_text(value: str) -> str:
+    match = re.search(r"((?:19|20)\d{2})[_-]?(\d{2})[_-]?(\d{2})", str(value or ""))
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _parse_optional_iso_date(value: str) -> Any:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError(f"Invalid date: {value}")
+    return parsed.date()
+
+
 def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> list[Any]:
 
     def _default_nodata_for_dtype(dtype: str) -> float | int:
@@ -547,6 +564,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
         band: int = 1,
         min_observations: int = 1,
         band_selection: str = "auto",
+        start_date: str = "",
+        end_date: str = "",
     ) -> str:
         """Build a same-grid temporal composite for daily raster covariates before modeling."""
         inputs = {
@@ -557,6 +576,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             "band": band,
             "min_observations": min_observations,
             "band_selection": band_selection,
+            "start_date": start_date,
+            "end_date": end_date,
         }
         raster_list = _parse_columns(raster_names)
         if not raster_list:
@@ -575,6 +596,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             band_value = int(band)
             min_obs = int(min_observations)
             clean_band_selection = str(band_selection or "auto").strip().lower()
+            start_filter = _parse_optional_iso_date(start_date)
+            end_filter = _parse_optional_iso_date(end_date)
         except Exception as exc:
             return tool_result_error(
                 "build_temporal_covariate_composite",
@@ -582,8 +605,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 error_code="TEMPORAL_COMPOSITE_ARGS_INVALID",
                 error_title="Invalid temporal composite arguments",
                 user_message=str(exc),
-                diagnostics={"band": band, "min_observations": min_observations, "method": method},
-                next_actions=["Use integer band/min_observations values and a supported composite method."],
+                diagnostics={"band": band, "min_observations": min_observations, "method": method, "start_date": start_date, "end_date": end_date},
+                next_actions=["Use integer band/min_observations values, ISO dates such as 2019-01-15, and a supported composite method."],
             ).to_json()
         if clean_band_selection not in {"auto", "single", "all"}:
             return tool_result_error(
@@ -640,6 +663,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             arrays: list[np.ndarray] = []
             source_summaries: list[dict[str, Any]] = []
             source_bands: list[dict[str, Any]] = []
+            selected_dates: list[str] = []
             reference_grid: dict[str, Any] | None = None
             first_path: Path | None = None
             input_layout = "multiple_single_band"
@@ -649,7 +673,22 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     first_path = Path(raster_path)
                 with rasterio.open(raster_path) as src:
                     use_all_bands = len(raster_list) == 1 and src.count > 1 and clean_band_selection in {"auto", "all"}
-                    band_indexes = list(range(1, src.count + 1)) if use_all_bands else [band_value]
+                    candidate_band_indexes = list(range(1, src.count + 1)) if use_all_bands else [band_value]
+                    band_indexes: list[int] = []
+                    band_dates: dict[int, str] = {}
+                    for candidate_index in candidate_band_indexes:
+                        description = str(src.descriptions[candidate_index - 1] or "")
+                        band_date = _date_from_temporal_text(description) or _date_from_temporal_text(raster_name)
+                        band_dates[candidate_index] = band_date
+                        if start_filter or end_filter:
+                            parsed_band_date = _parse_optional_iso_date(band_date)
+                            if parsed_band_date is None:
+                                continue
+                            if start_filter and parsed_band_date < start_filter:
+                                continue
+                            if end_filter and parsed_band_date > end_filter:
+                                continue
+                        band_indexes.append(candidate_index)
                     if use_all_bands:
                         input_layout = "single_multiband"
                     if any(index < 1 or index > src.count for index in band_indexes):
@@ -661,6 +700,16 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                             user_message=f"Raster {raster_name} has {src.count} band(s); band {band_value} cannot be read.",
                             diagnostics={"raster": raster_name, "band": band_value, "band_count": int(src.count)},
                             next_actions=["Choose a band number between 1 and the raster band count."],
+                        ).to_json()
+                    if not band_indexes:
+                        return tool_result_error(
+                            "build_temporal_covariate_composite",
+                            inputs=inputs,
+                            error_code="TEMPORAL_BAND_DATE_RANGE_EMPTY",
+                            error_title="No raster bands match the requested date range",
+                            user_message="No temporal raster bands matched start_date/end_date.",
+                            diagnostics={"raster": raster_name, "band_count": int(src.count), "start_date": start_date, "end_date": end_date},
+                            next_actions=["Check raster band descriptions and choose a date range covered by the raster."],
                         ).to_json()
                     grid = _raster_grid_signature(src)
                     if reference_grid is None:
@@ -687,10 +736,13 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                                 "raster_name": raster_name,
                                 "band": int(band_index),
                                 "description": str(src.descriptions[band_index - 1] or ""),
+                                "date": band_dates.get(band_index, ""),
                                 "valid_pixels": band_valid_pixels,
                                 "total_pixels": int(values.size),
                             }
                         )
+                        if band_dates.get(band_index):
+                            selected_dates.append(str(band_dates[band_index]))
                     source_summaries.append(
                         {
                             "raster_name": raster_name,
@@ -730,6 +782,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 "mean": float(valid_values.mean()) if valid_values.size else None,
                 "valid_count": valid_pixels,
             }
+            selected_time_range = {"start": min(selected_dates), "end": max(selected_dates)} if selected_dates else {}
             stored_name, output_path, _ = _write_raster_dataset_like(
                 first_path or manager.get_raster_path(raster_list[0]),
                 output_name,
@@ -739,6 +792,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "source_rasters": raster_list,
                     "source_band_count": int(len(arrays)),
                     "input_layout": input_layout,
+                    "selected_time_range": selected_time_range,
                     "covariate_type": clean_covariate_type,
                     "composite_method": clean_method,
                     "min_observations": min_obs,
@@ -751,6 +805,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 "method": clean_method,
                 "band": band_value,
                 "band_selection": clean_band_selection,
+                "requested_time_range": {"start": str(start_date or ""), "end": str(end_date or "")},
+                "selected_time_range": selected_time_range,
                 "min_observations": min_obs,
                 "source_raster_count": int(len(raster_list)),
                 "source_band_count": int(len(arrays)),
@@ -790,6 +846,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "source_raster_count": int(len(raster_list)),
                     "source_band_count": int(len(arrays)),
                     "input_layout": input_layout,
+                    "selected_time_range": selected_time_range,
                     "valid_pixel_count": valid_pixels,
                     "all_missing_pixel_count": all_missing_pixels,
                     "below_min_observation_pixels": below_min_observation_pixels,

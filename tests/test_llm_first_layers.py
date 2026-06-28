@@ -4,7 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import rasterio
+from rasterio.transform import from_origin
 
 from core.config import Settings
 from core.context_builder import build_conversation_context, format_context_for_agent
@@ -101,6 +104,38 @@ class LLMFirstLayerTests(unittest.TestCase):
             self.assertEqual(profile["time_range"]["end"], "2024-01-03")
             self.assertEqual(profile["role_inference"]["basis"], "metadata_only")
             self.assertNotIn("soil_named_file", profile["role_inference"]["evidence"])
+
+    def test_asset_profiler_extracts_multiband_raster_time_range_from_band_descriptions(self) -> None:
+        from core.asset_profiler import profile_dataset
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = Path(tmp) / "ndvi_daily.tif"
+            data = np.ones((3, 2, 2), dtype="float32")
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=2,
+                width=2,
+                count=3,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(0, 2, 1, 1),
+            ) as dst:
+                dst.write(data)
+                dst.set_band_description(1, "2019_01_01_2019_01_01_NDVI")
+                dst.set_band_description(2, "2019_01_02_2019_01_02_NDVI")
+                dst.set_band_description(3, "2019_01_03_2019_01_03_NDVI")
+            service.manager.put_raster_path("ndvi_daily", raster_path, meta={"crs": "EPSG:4326"})
+
+            profile = profile_dataset(service.manager, "ndvi_daily")
+
+            self.assertEqual(profile["band_count"], 3)
+            self.assertEqual(profile["time_range"]["start"], "2019-01-01")
+            self.assertEqual(profile["time_range"]["end"], "2019-01-03")
+            self.assertEqual(profile["temporal_band_count"], 3)
+            self.assertEqual(profile["temporal_bands"][1]["date"], "2019-01-02")
 
     def test_context_builder_adds_relevant_policy_cards_knowledge_and_profiles(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
