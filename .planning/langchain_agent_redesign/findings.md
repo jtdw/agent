@@ -354,3 +354,12 @@ Date: 2026-06-28
 - A source-hash manifest is sufficient for the first local JSON backend: it detects document count changes and content/metadata hash changes.
 - Provider failure observability should return structured errors and redact API keys or known secret values from error messages.
 - A small recall@k evaluator is now available for regression fixtures, but production readiness still needs a larger GIS-specific evaluation set before default enablement.
+
+## Phase 45/46 Real Smoke and Recurring Guard Findings
+
+- The real Shandianhe soil moisture/GCP three-sample smoke completed successfully even though the original shell invocation hit the outer timeout. The generated evidence showed all three dates completed full STM/XGBoost/raster-prediction/GCP outputs.
+- Full three-case recomputation took about 31 minutes. This is appropriate for strong regression evidence but should not be the default recurring guard.
+- A recurring guard can validate the full-smoke evidence quickly by checking case count, per-case workflow status, mapped prediction output, nonzero valid pixels, GCP report presence, empirical coverage threshold, and study-area boundary filtering.
+- This keeps later staging decisions grounded in real outputs while avoiding repeated DEM derivative, temporal composite, raster prediction, and GCP recomputation on every local guard run.
+
+Date: 2026-06-29

@@ -703,3 +703,21 @@
     - `scripts/run_agent_runtime_active_smoke.ps1 ... -Case semantic_gcp_result_uncertainty_map -FailOnError`: 1/1 passed, output `outputs/agent_runtime_phase39_7_semantic_gcp_result_map_smoke.json`.
     - Full deterministic active smoke: 9/9 passed, output `outputs/agent_runtime_phase39_7_deterministic_smoke.json`.
     - Staging 5% dry-run: `eligible_for_user_exposure=true`, `recommendation=allow_staging_exposure`, `live_traffic_changed=false`, output `outputs/agent_runtime_phase39_7_staging_5pct_dry_run.json`.
+
+## 2026-06-29
+
+- Completed Phase 45 real soil moisture/GCP smoke recovery.
+- Recovered the completed real three-sample smoke under `outputs/phase45_real_soil_gcp_smoke`.
+- All three cases passed: `summer_20190715`, `spring_20190515`, and `early_window_20190115`.
+- Each case completed STM training, XGBoost modeling, raster prediction, and GCP outputs.
+- Study-area boundary filtering removed the same 7 out-of-basin stations in each case, confirming the boundary filtering path is active.
+- Total recorded case runtime was about 1865 seconds, so full three-case recomputation is strong regression evidence but too slow for routine guard runs.
+- Completed Phase 46 lightweight recurring smoke gate.
+- Added `core/workflows/soil_moisture_gcp_smoke.py` to compact and validate Phase 45 full-smoke evidence without recomputing GIS rasters or models.
+- Added `scripts/run_soil_moisture_gcp_smoke.ps1` as the PowerShell entry point. Default mode reads the Phase 45 source evidence, writes a recurring summary, and validates it with thresholds.
+- Added `tests/test_soil_moisture_gcp_smoke_runner.py` using TDD. RED failed on missing module; GREEN passed after adding the runner.
+- Real runner output: `outputs/phase45_real_soil_gcp_smoke/phase45_real_soil_gcp_recurring_smoke_summary.json`, validation `ok=true`, 3 cases, no failed checks.
+- Verification:
+  - `tests/test_soil_moisture_gcp_smoke_runner.py tests/test_stm_xgboost_workflow.py -q`: 18 passed.
+  - `tests/test_xgboost_raster_prediction.py tests/test_gcp_uncertainty.py tests/test_gcp_tool_contract.py -q`: 14 passed.
+  - `py_compile` passed for the new runner and related STM/prediction/GCP modules.
