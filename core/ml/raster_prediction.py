@@ -190,6 +190,7 @@ def run_xgboost_raster_prediction(
     feature_rasters: str,
     output_name: str,
     boundary_name: str = "",
+    target_raster_name: str = "",
     representative_date: str = "",
     max_prediction_pixels: int = 5_000_000,
     raster_resampling: str = "bilinear",
@@ -200,6 +201,7 @@ def run_xgboost_raster_prediction(
         "feature_rasters": feature_rasters,
         "output_name": output_name,
         "boundary_name": boundary_name,
+        "target_raster_name": target_raster_name,
         "representative_date": representative_date,
         "max_prediction_pixels": max_prediction_pixels,
         "raster_resampling": raster_resampling,
@@ -241,7 +243,7 @@ def run_xgboost_raster_prediction(
 
         rep_date = _parse_representative_date(representative_date)
         first_feature = next(feature for feature in model_features if feature in feature_map)
-        reference_name = feature_map[first_feature]
+        reference_name = str(target_raster_name or "").strip() or feature_map[first_feature]
         reference_path = manager.get_raster_path(reference_name)
         arrays: dict[str, np.ndarray] = {}
         masks: list[np.ndarray] = []
@@ -323,6 +325,9 @@ def run_xgboost_raster_prediction(
             "features": model_features,
             "feature_rasters": feature_map,
             "boundary_name": boundary_name,
+            "target_raster_name": str(target_raster_name or "").strip(),
+            "reference_raster": reference_name,
+            "reference_source": "target_raster_name" if str(target_raster_name or "").strip() else "first_model_feature",
             "representative_date": rep_date.isoformat(),
             "crs": str(profile.get("crs") or ""),
             "width": int(profile["width"]),
@@ -351,6 +356,8 @@ def run_xgboost_raster_prediction(
                 "map_layer_id": _map_layer_id(safe_output),
                 "target": target,
                 "representative_date": rep_date.isoformat(),
+                "target_raster_name": str(target_raster_name or "").strip(),
+                "reference_raster": reference_name,
             },
         )
         artifacts = [
@@ -369,6 +376,8 @@ def run_xgboost_raster_prediction(
                 "summary_path": str(summary_path),
                 "target": target,
                 "features": model_features,
+                "target_raster_name": str(target_raster_name or "").strip(),
+                "reference_raster": reference_name,
                 "representative_date": rep_date.isoformat(),
                 "valid_prediction_pixels": int(rows.size),
                 "map_layer_id": _map_layer_id(dataset_name),
