@@ -1415,6 +1415,66 @@ class ToolContractTests(unittest.TestCase):
                 out = src.read(1)
                 self.assertTrue(np.allclose(out, np.array([[0.4, 0.7], [0.5, -9999.0]], dtype="float32")))
 
+    def test_align_station_raster_time_window_selects_common_dates_and_stations(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.manager.put_table(
+                "ismn_daily",
+                pd.DataFrame(
+                    {
+                        "station_id": ["S1", "S1", "S1", "S2", "S3"],
+                        "date": ["2019-01-01", "2019-01-02", "2019-01-04", "2019-01-02", "2019-01-04"],
+                        "lon": [115.8, 115.8, 115.8, 116.0, 116.2],
+                        "lat": [41.8, 41.8, 41.8, 41.9, 42.0],
+                        "soil_moisture_mean": [0.11, 0.12, 0.15, 0.2, 0.25],
+                    }
+                ),
+            )
+            raster_specs = {
+                "ndvi_daily": ["2019_01_01_2019_01_01_NDVI", "2019_01_02_2019_01_02_NDVI", "2019_01_03_2019_01_03_NDVI"],
+                "lst_daily": ["2019_01_02_2019_01_02_LST", "2019_01_03_2019_01_03_LST"],
+            }
+            for name, descriptions in raster_specs.items():
+                raster_path = Path(tmp) / f"{name}.tif"
+                data = np.ones((len(descriptions), 2, 2), dtype="float32")
+                with rasterio.open(
+                    raster_path,
+                    "w",
+                    driver="GTiff",
+                    height=2,
+                    width=2,
+                    count=len(descriptions),
+                    dtype="float32",
+                    crs="EPSG:4326",
+                    transform=from_origin(0, 2, 1, 1),
+                ) as dst:
+                    dst.write(data)
+                    for index, description in enumerate(descriptions, start=1):
+                        dst.set_band_description(index, description)
+                service.manager.put_raster_path(name, raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["align_station_raster_time_window"].invoke(
+                {
+                    "station_dataset": "ismn_daily",
+                    "raster_names": "ndvi_daily,lst_daily",
+                    "output_name": "aligned_station_dates",
+                    "date_col": "date",
+                    "station_col": "station_id",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["tool_name"], "align_station_raster_time_window")
+            self.assertEqual(result["outputs"]["selected_time_range"], {"start": "2019-01-02", "end": "2019-01-02"})
+            self.assertEqual(result["outputs"]["selected_date_count"], 1)
+            self.assertEqual(result["outputs"]["selected_station_count"], 2)
+            self.assertEqual(result["outputs"]["selected_station_ids"], ["S1", "S2"])
+            aligned = service.manager.get_table(result["outputs"]["result_dataset"])
+            self.assertEqual(aligned["date"].tolist(), ["2019-01-02", "2019-01-02"])
+            self.assertEqual(sorted(aligned["station_id"].tolist()), ["S1", "S2"])
+
     def test_temporal_covariate_composite_has_planner_tool_card(self) -> None:
         from core.tool_cards import candidate_tool_cards, list_tool_cards
 
@@ -1426,6 +1486,22 @@ class ToolContractTests(unittest.TestCase):
 
         self.assertIn("build_temporal_covariate_composite", names)
         self.assertEqual(candidates[0], "build_temporal_covariate_composite")
+
+    def test_station_raster_temporal_alignment_has_planner_card_and_executor_allowlist(self) -> None:
+        from core.tool_cards import candidate_tool_cards, list_tool_cards
+        from core.tool_executor import DEFAULT_DETERMINISTIC_TOOLS
+        from core.workflow_executor import SUPPORTED_WORKFLOW_TOOLS
+
+        names = {card["tool_name"] for card in list_tool_cards()}
+        candidates = [
+            card["tool_name"]
+            for card in candidate_tool_cards("align ISMN station dates with NDVI LST raster band dates", task_type="modeling", limit=8)
+        ]
+
+        self.assertIn("align_station_raster_time_window", names)
+        self.assertEqual(candidates[0], "align_station_raster_time_window")
+        self.assertIn("align_station_raster_time_window", DEFAULT_DETERMINISTIC_TOOLS)
+        self.assertIn("align_station_raster_time_window", SUPPORTED_WORKFLOW_TOOLS)
 
     def test_batch_register_invalid_mode_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

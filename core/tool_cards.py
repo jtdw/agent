@@ -136,6 +136,18 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         forbidden_uses=["Do not use for unaligned rasters", "Do not use continuous composites for landcover classes"],
     ),
     _card(
+        "align_station_raster_time_window",
+        "Align station observation dates with temporal raster band dates before soil moisture modeling.",
+        ["data_processing", "temporal_alignment", "station_raster_matching", "soil_moisture", "modeling"],
+        ["station_dataset", "raster_names", "output_name"],
+        ["table_dataset", "alignment_summary", "artifact"],
+        optional_inputs=["date_col", "station_col", "start_date", "end_date", "min_observations_per_station"],
+        input_asset_roles=["station_observation_table", "daily_ndvi_raster", "daily_lst_raster", "temporal_covariate_raster"],
+        preconditions=["Station table must have observation dates", "Temporal rasters should expose band dates in descriptions or names"],
+        common_failure_cases=["No overlapping dates", "date field missing", "stations below observation threshold"],
+        forbidden_uses=["Do not assume station/raster dates overlap without running alignment"],
+    ),
+    _card(
         "raster_zonal_stats",
         "按面状分区统计栅格像元值，并返回注册后的统计表 artifact。",
         ["analysis", "raster_statistics", "zonal_statistics", "data_processing"],
@@ -398,6 +410,10 @@ def candidate_tool_cards(query: str, *, task_type: str = "", limit: int = 8) -> 
         token in lower_query for token in ("temporal", "composite", "gap", "fill", "missing")
     ):
         synonym_terms.extend(["build_temporal_covariate_composite", "raster_composite", "remote_sensing"])
+    if any(token in lower_query for token in ("station", "ismn")) and any(token in lower_query for token in ("raster", "ndvi", "lst")) and any(
+        token in lower_query for token in ("date", "dates", "time", "temporal", "align", "overlap", "intersection")
+    ):
+        synonym_terms.extend(["align_station_raster_time_window", "station_raster_matching", "temporal_alignment", "soil_moisture"])
     if any(token in raw_query for token in ("站点", "采样", "提取")) and ("栅格" in raw_query or "raster" in lower_query):
         synonym_terms.extend(["raster_sampling", "station_raster_feature_extraction", "table_to_points"])
     if any(token in raw_query for token in ("坡度", "坡向", "地形")) or any(token in lower_query for token in ("slope", "aspect", "terrain")):

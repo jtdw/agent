@@ -20,6 +20,7 @@ DEFAULT_DETERMINISTIC_TOOLS = {
     "dem_terrain_derivatives",
     "raster_reproject",
     "raster_algebra",
+    "align_station_raster_time_window",
     "vector_buffer",
     "vector_spatial_join",
     "export_dataset",

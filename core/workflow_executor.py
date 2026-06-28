@@ -29,6 +29,7 @@ SUPPORTED_WORKFLOW_TOOLS = {
     "raster_mosaic",
     "raster_reproject",
     "raster_algebra",
+    "align_station_raster_time_window",
     "dem_terrain_derivatives",
     "plot_dataset",
     "generic_xgboost_workflow",

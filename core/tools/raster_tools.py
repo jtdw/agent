@@ -11,6 +11,7 @@ RASTER_TOOL_NAMES = {
     'raster_basic_stats',
     'raster_covariate_quality_check',
     'build_temporal_covariate_composite',
+    'align_station_raster_time_window',
     'raster_zonal_stats',
     'clip_raster_by_vector',
     'raster_mosaic',
@@ -236,6 +237,20 @@ def _parse_optional_iso_date(value: str) -> Any:
     if pd.isna(parsed):
         raise ValueError(f"Invalid date: {value}")
     return parsed.date()
+
+
+def _date_set_from_raster(path: Any, raster_name: str) -> set[str]:
+    dates: set[str] = set()
+    with rasterio.open(path) as src:
+        for description in src.descriptions or ():
+            date_value = _date_from_temporal_text(str(description or ""))
+            if date_value:
+                dates.add(date_value)
+    if not dates:
+        date_value = _date_from_temporal_text(raster_name)
+        if date_value:
+            dates.add(date_value)
+    return dates
 
 
 def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> list[Any]:
@@ -875,6 +890,243 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             ).to_json()
         except Exception as exc:
             return _tool_internal_error("build_temporal_covariate_composite", inputs, exc)
+
+
+    @tool
+    def align_station_raster_time_window(
+        station_dataset: str,
+        raster_names: str,
+        output_name: str,
+        date_col: str = "date",
+        station_col: str = "station_id",
+        start_date: str = "",
+        end_date: str = "",
+        min_observations_per_station: int = 1,
+    ) -> str:
+        """Align station observation dates with temporal raster band dates before feature extraction/modeling."""
+        inputs = {
+            "station_dataset": station_dataset,
+            "raster_names": raster_names,
+            "output_name": output_name,
+            "date_col": date_col,
+            "station_col": station_col,
+            "start_date": start_date,
+            "end_date": end_date,
+            "min_observations_per_station": min_observations_per_station,
+        }
+        raster_list = _parse_columns(raster_names)
+        if not raster_list:
+            return tool_result_error(
+                "align_station_raster_time_window",
+                inputs=inputs,
+                error_code="RASTER_INPUT_REQUIRED",
+                error_title="Missing raster inputs",
+                user_message="At least one temporal raster is required for station-raster time alignment.",
+                diagnostics={},
+                next_actions=["Provide NDVI/LST/precipitation raster dataset names separated by commas."],
+            ).to_json()
+        try:
+            start_filter = _parse_optional_iso_date(start_date)
+            end_filter = _parse_optional_iso_date(end_date)
+            min_obs = int(min_observations_per_station)
+        except Exception as exc:
+            return tool_result_error(
+                "align_station_raster_time_window",
+                inputs=inputs,
+                error_code="TEMPORAL_ALIGNMENT_ARGS_INVALID",
+                error_title="Invalid temporal alignment arguments",
+                user_message=str(exc),
+                diagnostics={"start_date": start_date, "end_date": end_date, "min_observations_per_station": min_observations_per_station},
+                next_actions=["Use ISO dates such as 2019-01-15 and integer min_observations_per_station."],
+            ).to_json()
+        if min_obs < 1:
+            return tool_result_error(
+                "align_station_raster_time_window",
+                inputs=inputs,
+                error_code="MIN_OBSERVATIONS_INVALID",
+                error_title="Invalid minimum observation count",
+                user_message="min_observations_per_station must be at least 1.",
+                diagnostics={"min_observations_per_station": min_observations_per_station},
+                next_actions=["Use min_observations_per_station=1 or a larger positive integer."],
+            ).to_json()
+
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_dataset_exists(manager, station_dataset))
+        for raster_name in raster_list:
+            errors.extend(validate_dataset_exists(manager, raster_name))
+        if not errors:
+            for raster_name in raster_list:
+                errors.extend(validate_raster_readable(manager, raster_name))
+        if errors:
+            return _tool_error_from_validation("align_station_raster_time_window", inputs, errors)
+
+        try:
+            record = manager.get(station_dataset)
+            if record.data_type == "table":
+                station_df = manager.get_table(station_dataset).copy()
+            elif record.data_type == "vector":
+                station_df = pd.DataFrame(manager.get_vector(station_dataset).drop(columns=["geometry"], errors="ignore")).copy()
+            else:
+                return tool_result_error(
+                    "align_station_raster_time_window",
+                    inputs=inputs,
+                    error_code="STATION_DATASET_TYPE_UNSUPPORTED",
+                    error_title="Unsupported station dataset type",
+                    user_message="station_dataset must be a table or vector dataset with a date column.",
+                    diagnostics={"data_type": record.data_type},
+                    next_actions=["Use an imported ISMN observation table or station point layer with observation dates."],
+                ).to_json()
+            if date_col not in station_df.columns:
+                return tool_result_error(
+                    "align_station_raster_time_window",
+                    inputs=inputs,
+                    error_code="DATE_FIELD_NOT_FOUND",
+                    error_title="Date field not found",
+                    user_message=f"Date column {date_col} does not exist in {station_dataset}.",
+                    diagnostics={"available_fields": [str(col) for col in station_df.columns], "date_col": date_col},
+                    next_actions=["Choose a date column such as date, date_time, or observation_date."],
+                ).to_json()
+            if station_col and station_col not in station_df.columns:
+                return tool_result_error(
+                    "align_station_raster_time_window",
+                    inputs=inputs,
+                    error_code="STATION_FIELD_NOT_FOUND",
+                    error_title="Station field not found",
+                    user_message=f"Station column {station_col} does not exist in {station_dataset}.",
+                    diagnostics={"available_fields": [str(col) for col in station_df.columns], "station_col": station_col},
+                    next_actions=["Choose a station id column or leave station_col empty to treat all rows as one group."],
+                ).to_json()
+
+            parsed_dates = pd.to_datetime(station_df[date_col], errors="coerce")
+            station_df = station_df[parsed_dates.notna()].copy()
+            parsed_dates = parsed_dates.loc[station_df.index]
+            if start_filter is not None:
+                station_df = station_df[parsed_dates.dt.date >= start_filter].copy()
+                parsed_dates = parsed_dates.loc[station_df.index]
+            if end_filter is not None:
+                station_df = station_df[parsed_dates.dt.date <= end_filter].copy()
+                parsed_dates = parsed_dates.loc[station_df.index]
+            if station_df.empty:
+                return tool_result_error(
+                    "align_station_raster_time_window",
+                    inputs=inputs,
+                    error_code="STATION_DATE_RANGE_EMPTY",
+                    error_title="No station observations match the requested date range",
+                    user_message="No station observations were available after date filtering.",
+                    diagnostics={"station_dataset": station_dataset, "start_date": start_date, "end_date": end_date},
+                    next_actions=["Check the station table date range or relax the requested date window."],
+                ).to_json()
+            station_df[date_col] = parsed_dates.dt.strftime("%Y-%m-%d")
+            station_dates = set(station_df[date_col].astype(str))
+
+            raster_date_sets: dict[str, set[str]] = {}
+            raster_time_ranges: list[dict[str, Any]] = []
+            for raster_name in raster_list:
+                dates = _date_set_from_raster(manager.get_raster_path(raster_name), raster_name)
+                if start_filter is not None:
+                    dates = {value for value in dates if _parse_optional_iso_date(value) >= start_filter}
+                if end_filter is not None:
+                    dates = {value for value in dates if _parse_optional_iso_date(value) <= end_filter}
+                raster_date_sets[raster_name] = dates
+                raster_time_ranges.append(
+                    {
+                        "raster_name": raster_name,
+                        "date_count": int(len(dates)),
+                        "start": min(dates) if dates else "",
+                        "end": max(dates) if dates else "",
+                    }
+                )
+            common_dates = set(station_dates)
+            for dates in raster_date_sets.values():
+                common_dates &= dates
+            selected_dates = sorted(common_dates)
+            if not selected_dates:
+                return tool_result_error(
+                    "align_station_raster_time_window",
+                    inputs=inputs,
+                    error_code="TEMPORAL_OVERLAP_EMPTY",
+                    error_title="No common dates between station observations and rasters",
+                    user_message="Station observations and raster temporal bands have no overlapping dates.",
+                    diagnostics={"station_date_count": int(len(station_dates)), "raster_time_ranges": raster_time_ranges},
+                    next_actions=["Check raster band dates, station observation dates, or choose a wider overlapping date range."],
+                ).to_json()
+
+            aligned_df = station_df[station_df[date_col].astype(str).isin(selected_dates)].copy()
+            if station_col:
+                counts = aligned_df.groupby(station_col, dropna=False)[date_col].nunique()
+                keep_stations = counts[counts >= min_obs].index.astype(str).tolist()
+                aligned_df = aligned_df[aligned_df[station_col].astype(str).isin(keep_stations)].copy()
+            else:
+                keep_stations = ["all"] if aligned_df[date_col].nunique() >= min_obs else []
+                if not keep_stations:
+                    aligned_df = aligned_df.iloc[0:0].copy()
+            if aligned_df.empty:
+                return tool_result_error(
+                    "align_station_raster_time_window",
+                    inputs=inputs,
+                    error_code="STATION_OBSERVATION_THRESHOLD_EMPTY",
+                    error_title="No stations meet the observation threshold",
+                    user_message="No stations have enough observations on the common station-raster dates.",
+                    diagnostics={"min_observations_per_station": min_obs, "selected_date_count": int(len(selected_dates))},
+                    next_actions=["Lower min_observations_per_station or choose a wider date range."],
+                ).to_json()
+
+            aligned_df = aligned_df.sort_values([station_col, date_col] if station_col else [date_col]).reset_index(drop=True)
+            saved_name = manager.put_table(output_name, aligned_df)
+            saved_record = manager.get(saved_name)
+            selected_station_ids = sorted(aligned_df[station_col].astype(str).unique().tolist()) if station_col else keep_stations
+            selected_time_range = {"start": min(selected_dates), "end": max(selected_dates)}
+            summary_path = _save_json_artifact(
+                manager,
+                f"{output_name}_station_raster_temporal_alignment",
+                {
+                    "station_dataset": station_dataset,
+                    "raster_names": raster_list,
+                    "date_col": date_col,
+                    "station_col": station_col,
+                    "selected_time_range": selected_time_range,
+                    "selected_date_count": int(len(selected_dates)),
+                    "selected_dates": selected_dates,
+                    "selected_station_count": int(len(selected_station_ids)),
+                    "selected_station_ids": selected_station_ids[:200],
+                    "raster_time_ranges": raster_time_ranges,
+                    "min_observations_per_station": min_obs,
+                },
+            )
+            return tool_result_ok(
+                "align_station_raster_time_window",
+                inputs=inputs,
+                outputs={
+                    "result_dataset": saved_name,
+                    "path": str(saved_record.path),
+                    "summary_path": str(summary_path),
+                    "selected_time_range": selected_time_range,
+                    "selected_date_count": int(len(selected_dates)),
+                    "selected_dates": selected_dates,
+                    "selected_station_count": int(len(selected_station_ids)),
+                    "selected_station_ids": selected_station_ids,
+                    "row_count": int(len(aligned_df)),
+                    "raster_time_ranges": raster_time_ranges,
+                },
+                artifacts=[
+                    ArtifactInfo(f"dataset:{saved_name}", str(saved_record.path), "dataset", saved_name, "Station observations filtered to raster-overlapping dates.", "ok", True),
+                    ArtifactInfo(f"file:{Path(summary_path).name}", str(summary_path), "file", Path(summary_path).name, "Station-raster temporal alignment summary.", "ok", False),
+                ],
+                tables=[{"table_id": saved_name, "title": saved_name}],
+                summary=f"Aligned {len(selected_station_ids)} station(s) on {len(selected_dates)} common station-raster date(s).",
+                diagnostics={
+                    "station_date_count": int(len(station_dates)),
+                    "raster_time_ranges": raster_time_ranges,
+                    "selected_dates": selected_dates,
+                    "min_observations_per_station": min_obs,
+                },
+                next_actions=[
+                    "Use selected_time_range as start_date/end_date for temporal raster composites.",
+                    "Use result_dataset as the station observation table for feature extraction and modeling.",
+                ],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("align_station_raster_time_window", inputs, exc)
 
 
     @tool
@@ -1782,6 +2034,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
         raster_basic_stats,
         raster_covariate_quality_check,
         build_temporal_covariate_composite,
+        align_station_raster_time_window,
         raster_zonal_stats,
         clip_raster_by_vector,
         raster_mosaic,
