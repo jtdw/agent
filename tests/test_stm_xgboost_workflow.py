@@ -129,23 +129,19 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
         assert result["outputs"]["raster_features"] == [
             "dem",
             "stm_full_dem_slope",
-            "stm_full_dem_aspect",
+            "stm_full_dem_terrain",
+            "stm_full_dem_twi",
         ]
-        assert {"raster_dem", "raster_stm_full_dem_slope", "raster_stm_full_dem_aspect"}.issubset(
+        assert {"raster_dem", "raster_stm_full_dem_slope", "raster_stm_full_dem_terrain", "raster_stm_full_dem_twi"}.issubset(
             set(result["outputs"]["feature_cols"])
         )
-        assert "raster_stm_full_dem_aspect" not in result["outputs"]["model_feature_cols"]
-        assert "raster_stm_full_dem_aspect_sin" in result["outputs"]["model_feature_cols"]
-        assert "raster_stm_full_dem_aspect_cos" in result["outputs"]["model_feature_cols"]
-        engineered = service.manager.get_table(result["outputs"]["model_dataset"])
-        assert "raster_stm_full_dem_aspect_sin" in engineered.columns
-        assert "raster_stm_full_dem_aspect_cos" in engineered.columns
+        assert "raster_stm_full_dem_aspect" not in result["outputs"]["feature_cols"]
+        assert "raster_stm_full_dem_twi" in result["outputs"]["model_feature_cols"]
         assert [step["tool_name"] for step in result["outputs"]["steps"]] == [
             "convert_stm_station_archive_to_training_table",
             "dem_terrain_derivatives",
             "table_to_points",
             "batch_register_points_to_rasters",
-            "engineer_aspect_circular_features",
             "generic_xgboost_workflow",
         ]
 
@@ -234,7 +230,7 @@ def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> No
         assert "engineer_aspect_circular_features" not in [step["tool_name"] for step in result["outputs"]["steps"]]
 
 
-def test_stm_xgboost_workflow_can_disable_aspect_circular_features() -> None:
+def test_stm_xgboost_workflow_uses_dem_only_derivatives_without_aspect_engineering() -> None:
     with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         service = _service(tmp)
         archive_path = service.manager.upload_dir / "stations.zip"
@@ -259,7 +255,8 @@ def test_stm_xgboost_workflow_can_disable_aspect_circular_features() -> None:
         assert result is not None
         assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
         assert result["outputs"]["model_dataset"] == result["outputs"]["feature_dataset"]
-        assert "raster_stm_no_circular_dem_aspect" in result["outputs"]["model_feature_cols"]
+        assert "raster_stm_no_circular_dem_twi" in result["outputs"]["model_feature_cols"]
+        assert "raster_stm_no_circular_dem_aspect" not in result["outputs"]["model_feature_cols"]
         assert "engineer_aspect_circular_features" not in [step["tool_name"] for step in result["outputs"]["steps"]]
 
 

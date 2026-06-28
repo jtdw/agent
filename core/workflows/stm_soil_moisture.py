@@ -37,7 +37,7 @@ def _is_dem_like_raster(manager: Any, raster_name: str) -> bool:
     if not name:
         return False
     lower_name = name.lower()
-    derived_tokens = ("slope", "aspect", "tpi", "tri")
+    derived_tokens = ("slope", "aspect", "tpi", "tri", "twi")
     if any(token in lower_name for token in derived_tokens):
         return False
 
@@ -374,7 +374,7 @@ def run_stm_soil_moisture_xgboost_workflow(
         derivative_args = {
             "dem_name": raster_name,
             "output_prefix": f"{prefix}_{_safe_name(raster_name)}",
-            "derivatives": "slope,aspect",
+            "derivatives": "slope,tpi,twi",
         }
         derivative_result = _invoke(tool_map, "dem_terrain_derivatives", derivative_args)
         steps.append(_step("dem_terrain_derivatives", derivative_args, derivative_result))
@@ -385,7 +385,7 @@ def run_stm_soil_moisture_xgboost_workflow(
                 inputs=derivative_args,
                 error_code=str(derivative_result.get("error_code") or "DEM_TERRAIN_DERIVATIVE_FAILED"),
                 error_title="STM workflow failed",
-                user_message=str(derivative_result.get("user_message") or "Failed to derive slope and aspect from DEM."),
+                user_message=str(derivative_result.get("user_message") or "Failed to derive DEM-only terrain factors from DEM."),
                 diagnostics={"steps": steps, "source_dem": raster_name},
                 next_actions=[str(item) for item in derivative_result.get("next_actions", []) if str(item).strip()],
             ).to_dict()
