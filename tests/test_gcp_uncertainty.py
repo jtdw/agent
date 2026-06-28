@@ -69,7 +69,7 @@ class GCPUncertaintyCoreTests(unittest.TestCase):
             )
             widths = spatial["predictions"]["interval_width"]
             self.assertGreater(widths.max() - widths.min(), 0.0)
-            self.assertEqual(spatial["metrics"]["method"], "gcp")
+            self.assertEqual(spatial["metrics"]["method"], "spatially_weighted_gcp")
             self.assertTrue(any(str(item["path"]).endswith("_gcp_interval_width_spatial.png") for item in spatial["images"]))
 
             no_coords = run_gcp_uncertainty_analysis(
@@ -83,7 +83,7 @@ class GCPUncertaintyCoreTests(unittest.TestCase):
                 alpha=0.1,
                 spatial_weighting=True,
             )
-            self.assertEqual(no_coords["metrics"]["method"], "split_conformal")
+            self.assertEqual(no_coords["metrics"]["method"], "global_split_conformal_fallback")
             self.assertTrue(no_coords["warnings"])
 
     def test_invalid_alpha_raises_value_error(self) -> None:

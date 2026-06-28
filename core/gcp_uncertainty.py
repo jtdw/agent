@@ -8,6 +8,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+METHOD_GLOBAL = "global_split_conformal"
+METHOD_SPATIAL = "spatially_weighted_gcp"
+METHOD_GLOBAL_FALLBACK = "global_split_conformal_fallback"
+FALLBACK_COORDS_MISSING = "GCP_COORDINATES_MISSING_GLOBAL_FALLBACK"
+FALLBACK_COORDS_INSUFFICIENT = "GCP_COORDINATES_INSUFFICIENT_GLOBAL_FALLBACK"
+
 
 def _safe_stem(value: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "gcp").strip())
@@ -374,8 +380,15 @@ def run_gcp_uncertainty_analysis(
     pred = pd.to_numeric(predictions[predicted_col], errors="coerce")
     valid_target = pd.Series(target_mask, index=predictions.index) & pred.notna()
     local_q = pd.Series(float(q_hat), index=predictions.index, dtype=float)
-    method = "split_conformal"
+    method = METHOD_GLOBAL
     bandwidth_used: float | None = None
+    fallback_diagnostics: dict[str, Any] = {
+        "used_fallback": False,
+        "code": "",
+        "reason": "",
+        "requested_method": METHOD_SPATIAL if spatial_weighting else METHOD_GLOBAL,
+        "effective_method": method,
+    }
 
     has_coords = bool(lon_col and lat_col and lon_col in cal_df.columns and lat_col in cal_df.columns and lon_col in predictions.columns and lat_col in predictions.columns)
     if spatial_weighting and has_coords:
@@ -393,11 +406,28 @@ def run_gcp_uncertainty_analysis(
                 distances = np.sqrt(np.sum(np.square(cal_xy - xy), axis=1))
                 weights = _kernel_weights(distances, bandwidth_used)
                 local_q.loc[idx] = _weighted_quantile(scores, quantile_level, weights)
-            method = "gcp"
+            method = METHOD_SPATIAL
+            fallback_diagnostics["effective_method"] = method
         else:
-            warnings.append("spatial weighting requested but valid coordinate rows were insufficient; used split conformal")
+            method = METHOD_GLOBAL_FALLBACK
+            fallback_diagnostics = {
+                "used_fallback": True,
+                "code": FALLBACK_COORDS_INSUFFICIENT,
+                "reason": "spatial weighting requested but valid coordinate rows were insufficient",
+                "requested_method": METHOD_SPATIAL,
+                "effective_method": method,
+            }
+            warnings.append(f"{FALLBACK_COORDS_INSUFFICIENT}: used global split conformal fallback")
     elif spatial_weighting:
-        warnings.append("spatial weighting requested but lon/lat were unavailable; used split conformal")
+        method = METHOD_GLOBAL_FALLBACK
+        fallback_diagnostics = {
+            "used_fallback": True,
+            "code": FALLBACK_COORDS_MISSING,
+            "reason": "spatial weighting requested but lon/lat were unavailable",
+            "requested_method": METHOD_SPATIAL,
+            "effective_method": method,
+        }
+        warnings.append(f"{FALLBACK_COORDS_MISSING}: used global split conformal fallback")
 
     predictions["prediction_interval_lower"] = np.nan
     predictions["prediction_interval_upper"] = np.nan
@@ -409,6 +439,14 @@ def run_gcp_uncertainty_analysis(
     predictions["covered"] = ((obs_target >= predictions["prediction_interval_lower"]) & (obs_target <= predictions["prediction_interval_upper"])).astype(float)
     predictions.loc[obs_target.isna(), "covered"] = np.nan
     predictions["uncertainty_level"] = _level_from_width(predictions["interval_width"])
+    row_penalty = pd.Series(0.0, index=predictions.index)
+    row_penalty = row_penalty.mask(obs_target < predictions["prediction_interval_lower"], (predictions["prediction_interval_lower"] - obs_target) * (2.0 / float(alpha)))
+    row_penalty = row_penalty.mask(obs_target > predictions["prediction_interval_upper"], (obs_target - predictions["prediction_interval_upper"]) * (2.0 / float(alpha)))
+    predictions["gcp_local_quantile"] = local_q
+    predictions["gcp_method"] = method
+    predictions["gcp_fallback_code"] = str(fallback_diagnostics.get("code") or "")
+    predictions["gcp_interval_score"] = predictions["interval_width"] + row_penalty
+    predictions.loc[obs_target.isna(), "gcp_interval_score"] = np.nan
 
     metrics = compute_uncertainty_metrics(
         predictions,
@@ -418,12 +456,16 @@ def run_gcp_uncertainty_analysis(
         pred_col=predicted_col,
         alpha=float(alpha),
         method=method,
-        spatial_weighting=spatial_weighting and method == "gcp",
+        spatial_weighting=spatial_weighting and method == METHOD_SPATIAL,
         bandwidth=bandwidth_used,
         fold_col=fold_col,
     )
     metrics["q_hat"] = float(q_hat)
     metrics["n_calibration"] = int(pd.Series(cal_mask, index=cal_df.index).sum())
+    metrics["fallback_code"] = str(fallback_diagnostics.get("code") or "")
+    metrics["fallback_reason"] = str(fallback_diagnostics.get("reason") or "")
+    metrics["requested_method"] = str(fallback_diagnostics.get("requested_method") or method)
+    metrics["effective_method"] = method
 
     images, skipped_images, image_warnings = generate_gcp_visualizations(
         predictions,
@@ -443,5 +485,6 @@ def run_gcp_uncertainty_analysis(
         "images": images,
         "skipped_images": skipped_images,
         "warnings": warnings,
+        "fallback_diagnostics": fallback_diagnostics,
         "report_markdown": report,
     }

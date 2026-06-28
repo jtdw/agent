@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from core.station_data import find_station_archives
+from core.ismn_adapter import find_local_ismn_archives
 from core.tool_contracts import parse_tool_result, tool_result_error, tool_result_ok
 
 
@@ -97,15 +97,12 @@ def resolve_default_station_archive(manager: Any) -> Path | None:
             roots.append(Path(value))
     roots.extend(
         [
-            workdir / "local_library" / "data" / "stations",
-            workdir / "local_library" / "data",
-            workdir.parent / "local_library" / "data" / "stations",
-            workdir.parent / "local_library" / "data",
-            Path.cwd() / "local_library" / "data" / "stations",
-            Path.cwd() / "local_library" / "data",
+            workdir / "local_library" / "data" / "ismn",
+            workdir.parent / "local_library" / "data" / "ismn",
+            Path.cwd() / "local_library" / "data" / "ismn",
         ]
     )
-    archives = find_station_archives(*roots)
+    archives = find_local_ismn_archives(*roots)
     return archives[0] if archives else None
 
 
@@ -176,10 +173,10 @@ def run_stm_soil_moisture_xgboost_workflow(
         return tool_result_error(
             "run_stm_soil_moisture_xgboost_workflow",
             inputs={"archive_path": archive_path, "raster_names": raster_names, "output_prefix": output_prefix},
-            error_code="STM_ARCHIVE_NOT_FOUND",
-            error_title="Station archive not found",
-            user_message="No STM station archive was provided and no default station archive was found in uploads, derived, or local_library/data/stations.",
-            next_actions=["Upload a station zip archive or place shandianhe2019_station_0_5cm.zip under local_library/data/stations."],
+            error_code="ISMN_ARCHIVE_NOT_FOUND",
+            error_title="ISMN archive not found",
+            user_message="No local ISMN archive was provided and no default archive was found in uploads, derived, or local_library/data/ismn.",
+            next_actions=["Upload an official ISMN zip archive or place it under local_library/data/ismn."],
         ).to_dict()
     archive_path = str(resolved_archive)
     prefix = _safe_name(output_prefix or Path(archive_path).stem)

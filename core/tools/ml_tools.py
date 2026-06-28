@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.data_semantics import attach_semantic_card_to_dataset, build_data_semantic_card
 from core.gcp_uncertainty import run_gcp_uncertainty_analysis
 from core.model_visualization import generate_model_visualizations
 from core.tools import ml_helpers as _helpers
@@ -327,6 +328,7 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
         result_df: pd.DataFrame | None = None
         report_sections: list[str] = []
         interval_summaries: list[dict[str, Any]] = []
+        fallback_diagnostics: list[dict[str, Any]] = []
         effective_bandwidth = float(spatial_bandwidth) if float(spatial_bandwidth or 0) > 0 else float(bandwidth or 0)
 
         for index, pred_col in enumerate(pred_cols):
@@ -354,6 +356,8 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             predictions[f"{pred_col}_gcp_upper"] = predictions["prediction_interval_upper"]
             predictions[f"{pred_col}_gcp_width"] = predictions["interval_width"]
             predictions[f"{pred_col}_gcp_covered"] = predictions["covered"]
+            predictions[f"{pred_col}_gcp_local_quantile"] = predictions.get("gcp_local_quantile")
+            predictions[f"{pred_col}_gcp_method"] = predictions.get("gcp_method")
             if result_df is None:
                 result_df = predictions
             else:
@@ -363,16 +367,22 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                     f"{pred_col}_gcp_upper",
                     f"{pred_col}_gcp_width",
                     f"{pred_col}_gcp_covered",
+                    f"{pred_col}_gcp_local_quantile",
+                    f"{pred_col}_gcp_method",
                 ]:
                     result_df[col] = predictions[col]
             metrics_row = dict(analysis["metrics"])
+            fallback_info = dict(analysis.get("fallback_diagnostics") or {})
             metrics_row["predicted"] = pred_col
             metrics_row["nominal_coverage"] = metrics_row.get("target_coverage")
             metrics_row["global_qhat"] = metrics_row.get("q_hat")
             metrics_row["kernel"] = kernel
             metrics_row["calibration_dataset"] = calibration_dataset
             metrics_row["target_dataset"] = target_name
+            metrics_row["fallback_diagnostics"] = fallback_info
             all_metrics.append(metrics_row)
+            if fallback_info and fallback_info not in fallback_diagnostics:
+                fallback_diagnostics.append(fallback_info)
             if index == 0:
                 all_images.extend(analysis.get("images", []))
                 all_skipped_images.extend(analysis.get("skipped_images", []))
@@ -390,11 +400,52 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                     "upper": f"{pred_col}_gcp_upper",
                     "width": f"{pred_col}_gcp_width",
                     "covered": f"{pred_col}_gcp_covered",
+                    "local_quantile": f"{pred_col}_gcp_local_quantile",
+                    "method": f"{pred_col}_gcp_method",
                 },
+                "fallback_diagnostics": fallback_info,
             })
 
         result_df = result_df if result_df is not None else target_df.copy()
         saved_name = manager.put_table(f"{output_name}_gcp_predictions", result_df)
+        methods = sorted({str(row.get("method") or "") for row in all_metrics})
+        semantic_card = attach_semantic_card_to_dataset(
+            manager,
+            saved_name,
+            build_data_semantic_card(
+                dataset_name=saved_name,
+                source_kind="gcp_uncertainty_result",
+                scientific_roles=["prediction_with_uncertainty", "gcp_result", "map_ready", "calibration_diagnostics"],
+                variables=[
+                    {"name": observed_col, "role": "observed", "standard_name": "observed_value"},
+                    *[
+                        {
+                            "name": str(pred_col),
+                            "role": "prediction",
+                            "interval_lower": f"{pred_col}_gcp_lower",
+                            "interval_upper": f"{pred_col}_gcp_upper",
+                            "interval_width": f"{pred_col}_gcp_width",
+                            "local_quantile": f"{pred_col}_gcp_local_quantile",
+                        }
+                        for pred_col in pred_cols
+                    ],
+                ],
+                spatial={"has_coordinates": bool(coord_lon_col and coord_lat_col), "lon_col": coord_lon_col, "lat_col": coord_lat_col},
+                temporal={"has_time": bool(date_col), "time_col": date_col},
+                quality={"warnings": all_warnings, "fallback_diagnostics": fallback_diagnostics},
+                modeling={
+                    "gcp_method": methods[0] if len(methods) == 1 else "mixed",
+                    "methods": methods,
+                    "alpha": float(alpha),
+                    "target_coverage": float(1 - float(alpha)),
+                    "can_calibrate_gcp": False,
+                    "uncertainty_output": True,
+                },
+                row_count=int(len(result_df)),
+                lineage={"created_by_tool": "geographical_conformal_prediction", "calibration_dataset": calibration_dataset, "target_dataset": target_name},
+                recommended_tools=["plot_dataset", "generate_thesis_charts", "evaluate_prediction_accuracy"],
+            ),
+        )
         metrics_df = pd.DataFrame(all_metrics)
         metrics_df = metrics_df.map(lambda value: _json(value) if isinstance(value, (dict, list)) else value)
         metrics_name = manager.put_table(f"{output_name}_gcp_metrics", metrics_df)
@@ -412,6 +463,8 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             "bandwidth": effective_bandwidth or None,
             "warnings": all_warnings,
             "skipped_images": all_skipped_images,
+            "fallback_diagnostics": fallback_diagnostics,
+            "semantic_card": semantic_card,
             "models": interval_summaries,
         })
 
@@ -482,9 +535,11 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                 "target_dataset": target_name,
                 "observed_col": observed_col,
                 "predicted_cols": pred_cols,
-                "spatial_ready": any(row.get("method") == "gcp" for row in all_metrics),
+                "spatial_ready": any(row.get("method") == "spatially_weighted_gcp" for row in all_metrics),
                 "summary": interval_summaries,
                 "warnings": all_warnings,
+                "fallback_diagnostics": fallback_diagnostics,
+                "semantic_card": semantic_card,
             },
         )
         return tool_result_ok(
@@ -499,8 +554,10 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                 "report_path": str(report_path),
                 "summary_path": str(summary_path),
                 "interval_columns": interval_summaries,
-                "methods": sorted({str(row.get("method") or "") for row in all_metrics}),
-                "spatial_ready": any(row.get("method") == "gcp" for row in all_metrics),
+                "methods": methods,
+                "spatial_ready": any(row.get("method") == "spatially_weighted_gcp" for row in all_metrics),
+                "fallback_diagnostics": fallback_diagnostics,
+                "semantic_card": semantic_card,
                 "images": all_images,
                 "skipped_images": all_skipped_images,
             },
@@ -509,7 +566,7 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
                 f"GCP uncertainty analysis completed. Result dataset: {saved_name}. "
                 f"Metrics dataset: {metrics_name}. Report: {report_path}."
             ),
-            diagnostics={"metrics": all_metrics, "summary": interval_summaries, "warnings": all_warnings},
+            diagnostics={"metrics": all_metrics, "summary": interval_summaries, "warnings": all_warnings, "fallback_diagnostics": fallback_diagnostics, "semantic_card": semantic_card},
             warnings=all_warnings,
             next_actions=["Explain empirical coverage and interval width.", "Inspect high uncertainty regions or samples."],
         ).to_json()

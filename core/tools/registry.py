@@ -8,6 +8,7 @@ from core.tools.download_tools import build_download_tools
 from core.tools.map_tools import build_map_tools
 from core.tools.ml_tools import build_ml_tools
 from core.tools.raster_tools import build_raster_tools
+from core.tools.soil_moisture_tools import build_soil_moisture_tools
 from core.tools.table_tools import build_table_tools
 from core.tools.vector_tools import build_vector_tools
 
@@ -26,6 +27,7 @@ def build_tools(manager: Any, context: Any | None = None):
     tools.extend(build_vector_tools(manager))
     tools.extend(build_raster_tools(manager))
     tools.extend(build_map_tools(manager))
+    tools.extend(build_soil_moisture_tools(manager))
     tools.extend(build_ml_tools(manager))
     tools.extend(build_download_tools(manager))
 

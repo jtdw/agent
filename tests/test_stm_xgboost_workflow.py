@@ -200,12 +200,12 @@ def test_stm_xgboost_workflow_is_registered_as_executable_template() -> None:
     assert workflow["workflow_plan"][0]["tool_name"] == "run_stm_soil_moisture_xgboost_workflow"
 
 
-def test_stm_workflow_resolves_default_station_archive_from_local_library() -> None:
+def test_soil_moisture_workflow_resolves_default_ismn_archive_from_local_library() -> None:
     with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         service = _service(tmp)
-        station_dir = service.manager.workdir / "local_library" / "data" / "stations"
+        station_dir = service.manager.workdir / "local_library" / "data" / "ismn"
         station_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = station_dir / "shandianhe2019_station_0_5cm.zip"
+        archive_path = station_dir / "shandianhe2019_ismn_0_5cm.zip"
         _write_many_day_station_archive(archive_path)
 
         resolved = resolve_default_station_archive(service.manager)

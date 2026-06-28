@@ -474,18 +474,52 @@ def _fit_table_model(
     all_pred = pipeline.predict(x)
     if label_encoder is not None:
         all_pred_labels = label_encoder.inverse_transform(all_pred.astype(int))
+        validation_pred_labels = label_encoder.inverse_transform(pred.astype(int))
     else:
         all_pred_labels = all_pred
+        validation_pred_labels = pred
     prediction_col = "xgb_prediction"
+    residual_col = "xgb_residual"
+    validation_prediction_col = "xgb_validation_prediction"
+    validation_residual_col = "xgb_validation_residual"
+    validation_fold_col = "xgb_validation_fold"
+    validation_role_col = "xgb_validation_role"
+    validation_method = str(split_info.get("method") or "random")
+    validation_predictions = pd.Series(pd.NA, index=range(len(work)), dtype="object")
+    validation_predictions.iloc[test_idx] = list(validation_pred_labels)
+    validation_roles = pd.Series("train", index=range(len(work)), dtype="object")
+    validation_roles.iloc[test_idx] = "test"
+    validation_folds = pd.Series(0, index=range(len(work)), dtype="Int64")
+    validation_folds.iloc[test_idx] = 1
+    if model_type == "regression":
+        all_residuals = pd.to_numeric(y_raw.reset_index(drop=True), errors="coerce") - pd.to_numeric(pd.Series(all_pred_labels), errors="coerce")
+        validation_residuals = pd.Series(pd.NA, index=range(len(work)), dtype="object")
+        validation_residuals.iloc[test_idx] = (
+            pd.to_numeric(pd.Series(y_raw.reset_index(drop=True).iloc[test_idx]), errors="coerce").to_numpy()
+            - pd.to_numeric(pd.Series(validation_pred_labels), errors="coerce").to_numpy()
+        )
+    else:
+        all_residuals = pd.Series(pd.NA, index=range(len(work)), dtype="object")
+        validation_residuals = pd.Series(pd.NA, index=range(len(work)), dtype="object")
+
+    def _add_method_columns(frame: pd.DataFrame) -> pd.DataFrame:
+        frame[prediction_col] = all_pred_labels
+        frame[residual_col] = all_residuals.to_numpy()
+        frame[validation_prediction_col] = validation_predictions.to_numpy()
+        frame[validation_residual_col] = validation_residuals.to_numpy()
+        frame[validation_fold_col] = validation_folds.to_numpy()
+        frame[validation_role_col] = validation_roles.to_numpy()
+        return frame
+
     if gdf is not None:
         result_gdf = gdf.iloc[source_indices].copy()
-        result_gdf[prediction_col] = all_pred_labels
+        result_gdf = _add_method_columns(result_gdf)
         result_dataset = manager.put_vector(output_name, result_gdf, filename=f"{_safe_name(output_name)}.geojson")
         result_path = Path(manager.get(result_dataset).path)
         result_artifact = _artifact(result_path, "geojson", f"{output_name}.geojson", dataset_name=result_dataset, meta={"layer_kind": "prediction"})
     else:
         result_df = df.iloc[source_indices].copy()
-        result_df[prediction_col] = all_pred_labels
+        result_df = _add_method_columns(result_df)
         result_dataset = manager.put_table(output_name, result_df, filename=f"{_safe_name(output_name)}.csv")
         result_path = Path(manager.get(result_dataset).path)
         result_artifact = _artifact(result_path, "csv", f"{output_name}.csv", dataset_name=result_dataset)
@@ -497,6 +531,33 @@ def _fit_table_model(
     joblib.dump({"pipeline": pipeline, "label_encoder": label_encoder, "features": feature_cols, "target": target_col}, model_path)
     summary_path = manager.derived_dir / f"{_safe_name(output_name)}_summary.json"
     modeling_profile = build_modeling_profile(df, dataset_name=output_name, data_type="vector" if gdf is not None else "table")
+    coordinate_columns = {"lon": resolved_lon_col, "lat": resolved_lat_col} if resolved_lon_col and resolved_lat_col else {}
+    time_column = date_col if date_col and date_col in split_df.columns else ""
+    feature_semantics = {
+        "target": target_col,
+        "feature_columns": feature_cols,
+        "numeric_features": numeric_cols,
+        "categorical_features": categorical_cols,
+        "coordinate_features": [col for col in [resolved_lon_col, resolved_lat_col] if col and col in feature_cols],
+        "time_feature": time_column,
+        "group_feature": group_col if group_col and group_col in split_df.columns else "",
+    }
+    limitations = []
+    if validation_method == "random":
+        limitations.append("random_split_validation")
+    method_metadata = {
+        "validation_method": validation_method,
+        "target_column": target_col,
+        "prediction_column": prediction_col,
+        "cv_prediction_column": validation_prediction_col,
+        "residual_column": residual_col,
+        "cv_fold_column": validation_fold_col,
+        "validation_role_column": validation_role_col,
+        "coordinate_columns": coordinate_columns,
+        "time_column": time_column,
+        "feature_semantics": feature_semantics,
+        "gcp_ready": bool(model_type == "regression" and validation_method != "random" and coordinate_columns),
+    }
     diagnostics = {
         "target_col": target_col,
         "features": feature_cols,
@@ -511,7 +572,9 @@ def _fit_table_model(
         "shap": shap_info,
         "modeling_profile": modeling_profile,
         "modeling_advisor": modeling_advisor,
-        "limitations": [],
+        "feature_semantics": feature_semantics,
+        "method_metadata": method_metadata,
+        "limitations": limitations,
     }
     diagnostics.update(extra_diagnostics or {})
     summary_path.write_text(json.dumps({"metrics": _json_safe(metrics), "diagnostics": _json_safe(diagnostics)}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -544,6 +607,16 @@ def _fit_table_model(
         "task_mode": task_mode,
         "result_dataset": result_dataset,
         "prediction_column": prediction_col,
+        "target_column": target_col,
+        "cv_prediction_column": validation_prediction_col,
+        "residual_column": residual_col,
+        "cv_fold_column": validation_fold_col,
+        "validation_role_column": validation_role_col,
+        "validation_method": validation_method,
+        "coordinate_columns": coordinate_columns,
+        "time_column": time_column,
+        "feature_semantics": feature_semantics,
+        "gcp_ready": method_metadata["gcp_ready"],
         "metrics": _json_safe(metrics),
         "metrics_dataset": metrics_dataset,
         "importance_dataset": importance_dataset,

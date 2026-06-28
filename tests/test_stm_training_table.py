@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 
 from core.config import Settings
 from core.service import GISWorkspaceService
-from core.station_data import stm_archive_to_training_dataframe
+from core.ismn_adapter import ismn_archive_to_observation_dataframe
 from core.tool_contracts import parse_tool_result
 from core.tools.registry import build_tools
 
@@ -45,12 +45,12 @@ def _write_station_archive(path: Path) -> None:
         archive.writestr("SMN-SDR/L1/L1_sm_0.100000_0.100000_20190101_20191231.stm", l1_010)
 
 
-def test_stm_archive_to_training_dataframe_daily_filters_depth_year_and_invalid_values() -> None:
+def test_ismn_archive_to_observation_dataframe_daily_filters_depth_year_and_invalid_values() -> None:
     with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         archive_path = Path(tmp) / "stations.zip"
         _write_station_archive(archive_path)
 
-        df = stm_archive_to_training_dataframe(archive_path, preferred_depth="0.050000", year="2019", aggregate="daily")
+        df = ismn_archive_to_observation_dataframe(archive_path, preferred_depth="0.050000", year="2019", aggregate="daily")
 
         assert list(df.columns) == [
             "station_id",
@@ -72,12 +72,12 @@ def test_stm_archive_to_training_dataframe_daily_filters_depth_year_and_invalid_
         assert set(df["station_id"]) == {"L1", "L2"}
 
 
-def test_stm_archive_to_training_dataframe_hourly_outputs_raw_samples() -> None:
+def test_ismn_archive_to_observation_dataframe_hourly_outputs_raw_samples() -> None:
     with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         archive_path = Path(tmp) / "stations.zip"
         _write_station_archive(archive_path)
 
-        df = stm_archive_to_training_dataframe(archive_path, preferred_depth="0.050000", year="2019", aggregate="none")
+        df = ismn_archive_to_observation_dataframe(archive_path, preferred_depth="0.050000", year="2019", aggregate="none")
 
         assert len(df) == 3
         assert {"date", "time", "soil_moisture"}.issubset(df.columns)
