@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -130,6 +131,174 @@ def _covariate_type_for_raster(raster_name: str) -> str:
     if "precip" in lower or "rain" in lower:
         return "precipitation_mm"
     return "generic"
+
+
+def _is_landcover_like_raster(manager: Any, raster_name: str) -> bool:
+    parts = [str(raster_name or "")]
+    try:
+        record = manager.get(raster_name)
+        meta = getattr(record, "meta", {}) or {}
+        parts.append(str(getattr(record, "path", "") or ""))
+        for key in ("variable", "dataset_type", "source", "product", "title", "description", "layer_kind", "covariate_type"):
+            if key in meta:
+                parts.append(str(meta.get(key) or ""))
+    except Exception:
+        pass
+    text = " ".join(parts).lower()
+    return any(token in text for token in ("lulc", "landcover", "land_cover", "landuse", "land_use", "lc_type"))
+
+
+def _parse_observation_dates(values: pd.Series) -> pd.Series:
+    parsed = pd.to_datetime(values, errors="coerce")
+    return parsed.dt.normalize()
+
+
+def _temporal_specs_for_raster(raster_name: str) -> list[dict[str, Any]]:
+    covariate_type = _covariate_type_for_raster(raster_name)
+    safe = _safe_name(raster_name)
+    if covariate_type == "precipitation_mm":
+        return [
+            {"field": f"raster_{safe}_sum_{window}d", "mode": "sum", "days_before": window - 1, "days_after": 0}
+            for window in (3, 7, 14, 30)
+        ]
+    if covariate_type in {"ndvi", "evi"}:
+        return [{"field": f"raster_{safe}_window_max_7d", "mode": "max", "days_before": 3, "days_after": 3}]
+    if covariate_type in {"lst_celsius", "lst_kelvin"}:
+        return [{"field": f"raster_{safe}_window_median_7d", "mode": "median", "days_before": 3, "days_after": 3}]
+    return [{"field": f"raster_{safe}_window_median_7d", "mode": "median", "days_before": 3, "days_after": 3}]
+
+
+def _aggregate_temporal_values(values: list[float], mode: str) -> float:
+    arr = np.asarray(values, dtype="float64")
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return float("nan")
+    if mode == "sum":
+        return float(np.sum(arr))
+    if mode == "max":
+        return float(np.max(arr))
+    if mode == "min":
+        return float(np.min(arr))
+    if mode == "mean":
+        return float(np.mean(arr))
+    return float(np.median(arr))
+
+
+def _extract_temporal_station_covariates(
+    manager: Any,
+    *,
+    training_dataset: str,
+    temporal_rasters: list[str],
+    output_name: str,
+) -> dict[str, Any]:
+    try:
+        import rasterio
+        from rasterio.warp import transform as transform_coords
+
+        training_df = manager.get_table(training_dataset).copy()
+        required = {"lon", "lat", "date"}
+        missing = sorted(required - set(training_df.columns))
+        if missing:
+            return tool_result_error(
+                "extract_temporal_station_covariates",
+                inputs={"training_dataset": training_dataset, "temporal_rasters": temporal_rasters, "output_name": output_name},
+                error_code="TEMPORAL_STATION_COLUMNS_MISSING",
+                error_title="Missing station temporal columns",
+                user_message="Temporal station feature extraction requires lon, lat, and date columns.",
+                diagnostics={"missing_fields": missing, "available_fields": [str(col) for col in training_df.columns]},
+                next_actions=["Convert station observations with lon/lat/date fields before running STM temporal covariate extraction."],
+            ).to_dict()
+
+        obs_dates = _parse_observation_dates(training_df["date"])
+        lon = pd.to_numeric(training_df["lon"], errors="coerce")
+        lat = pd.to_numeric(training_df["lat"], errors="coerce")
+        temporal_fields: list[str] = []
+        raster_summaries: list[dict[str, Any]] = []
+        for raster_name in temporal_rasters:
+            specs = _temporal_specs_for_raster(raster_name)
+            for spec in specs:
+                training_df[spec["field"]] = np.nan
+                temporal_fields.append(str(spec["field"]))
+
+            raster_path = manager.get_raster_path(raster_name)
+            with rasterio.open(raster_path) as src:
+                xs = lon.to_numpy(dtype="float64", na_value=np.nan)
+                ys = lat.to_numpy(dtype="float64", na_value=np.nan)
+                valid_xy = np.isfinite(xs) & np.isfinite(ys)
+                sample_x = xs.copy()
+                sample_y = ys.copy()
+                if src.crs and str(src.crs) != "EPSG:4326" and bool(valid_xy.any()):
+                    tx, ty = transform_coords("EPSG:4326", src.crs, xs[valid_xy].tolist(), ys[valid_xy].tolist())
+                    sample_x[valid_xy] = tx
+                    sample_y[valid_xy] = ty
+                coords = [(float(x), float(y)) if np.isfinite(x) and np.isfinite(y) else (np.nan, np.nan) for x, y in zip(sample_x, sample_y)]
+
+                band_samples: list[dict[str, Any]] = []
+                for band_index in range(1, src.count + 1):
+                    description = str(src.descriptions[band_index - 1] or "")
+                    band_date_text = _date_from_temporal_text(description) or _date_from_temporal_text(raster_name)
+                    band_date = pd.to_datetime(band_date_text, errors="coerce")
+                    if pd.isna(band_date):
+                        continue
+                    values: list[float] = []
+                    for row_index, coord in enumerate(coords):
+                        if not valid_xy[row_index]:
+                            values.append(float("nan"))
+                            continue
+                        sampled = next(src.sample([coord], indexes=band_index))
+                        value = float(sampled[0]) if len(sampled) else float("nan")
+                        if src.nodata is not None and np.isclose(value, float(src.nodata), equal_nan=False):
+                            value = float("nan")
+                        values.append(value)
+                    band_samples.append({"date": band_date.normalize(), "band": band_index, "values": values})
+
+                for row_index, obs_date in enumerate(obs_dates):
+                    if pd.isna(obs_date):
+                        continue
+                    for spec in specs:
+                        start_date = obs_date - timedelta(days=int(spec["days_before"]))
+                        end_date = obs_date + timedelta(days=int(spec["days_after"]))
+                        values = [
+                            float(item["values"][row_index])
+                            for item in band_samples
+                            if start_date <= item["date"] <= end_date
+                        ]
+                        training_df.at[row_index, spec["field"]] = _aggregate_temporal_values(values, str(spec["mode"]))
+
+            raster_summaries.append(
+                {
+                    "raster_name": raster_name,
+                    "covariate_type": _covariate_type_for_raster(raster_name),
+                    "fields": [str(spec["field"]) for spec in specs],
+                    "band_count": int(len(band_samples)) if "band_samples" in locals() else 0,
+                }
+            )
+
+        saved_name = manager.put_table(output_name, training_df)
+        missing_by_field = {field: int(pd.to_numeric(training_df[field], errors="coerce").isna().sum()) for field in temporal_fields}
+        return tool_result_ok(
+            "extract_temporal_station_covariates",
+            inputs={"training_dataset": training_dataset, "temporal_rasters": temporal_rasters, "output_name": output_name},
+            outputs={
+                "result_dataset": saved_name,
+                "row_count": int(len(training_df)),
+                "temporal_feature_cols": temporal_fields,
+                "temporal_rasters": raster_summaries,
+                "missing_by_field": missing_by_field,
+            },
+            summary=f"Extracted observation-window temporal covariates for {len(training_df)} station row(s).",
+            diagnostics={"temporal_rasters": raster_summaries, "missing_by_field": missing_by_field},
+        ).to_dict()
+    except Exception as exc:
+        return tool_result_error(
+            "extract_temporal_station_covariates",
+            inputs={"training_dataset": training_dataset, "temporal_rasters": temporal_rasters, "output_name": output_name},
+            error_code="TEMPORAL_STATION_FEATURES_FAILED",
+            error_title="Temporal station feature extraction failed",
+            user_message="Failed to sample temporal raster bands around station observation dates.",
+            technical_detail=f"{type(exc).__name__}: {exc}",
+            next_actions=["Check raster band dates, CRS, NoData values, and station lon/lat/date fields."],
+        ).to_dict()
 
 
 def resolve_default_station_archive(manager: Any) -> Path | None:
@@ -487,6 +656,46 @@ def _unified_training_filter(
     ).to_dict()
 
 
+def _categorical_raster_feature_fields(manager: Any, feature_rasters: list[str], raster_fields: list[str]) -> list[str]:
+    fields: list[str] = []
+    seen: set[str] = set()
+    for raster_name in feature_rasters:
+        if not _is_landcover_like_raster(manager, raster_name):
+            continue
+        safe = _safe_name(raster_name).lower()
+        for field in raster_fields:
+            lower = field.lower()
+            if lower == f"raster_{safe}" or lower.startswith(f"raster_{safe}_"):
+                if field not in seen:
+                    fields.append(field)
+                    seen.add(field)
+    for field in raster_fields:
+        lower = field.lower()
+        if any(token in lower for token in ("lulc", "landcover", "land_cover", "landuse", "land_use", "lc_type")) and field not in seen:
+            fields.append(field)
+            seen.add(field)
+    return fields
+
+
+def _read_model_feature_dataset(manager: Any, dataset_name: str) -> tuple[pd.DataFrame, Any | None, str]:
+    record = manager.get(dataset_name)
+    if record.data_type == "vector":
+        gdf = manager.get_vector(dataset_name)
+        return gdf.copy(), gdf.geometry.copy(), "vector"
+    if record.data_type == "table":
+        return manager.get_table(dataset_name), None, "table"
+    raise TypeError(f"{dataset_name} is not a table or vector dataset")
+
+
+def _save_model_feature_dataset(manager: Any, output_name: str, frame: pd.DataFrame, geometry: Any | None, data_type: str) -> str:
+    if data_type == "vector" and geometry is not None:
+        import geopandas as gpd
+
+        gdf = gpd.GeoDataFrame(frame.copy(), geometry=geometry, crs=getattr(geometry, "crs", None))
+        return manager.put_vector(output_name, gdf, filename=f"{_safe_name(output_name)}.geojson")
+    return manager.put_table(output_name, frame)
+
+
 def run_stm_soil_moisture_xgboost_workflow(
     manager: Any,
     *,
@@ -659,6 +868,8 @@ def run_stm_soil_moisture_xgboost_workflow(
     temporal_rasters = _temporal_raster_names(manager, rasters)
     temporal_alignment: dict[str, Any] = {}
     temporal_composites: dict[str, str] = {}
+    temporal_feature_cols: list[str] = []
+    temporal_feature_summary: dict[str, Any] = {}
     if temporal_rasters:
         align_args = {
             "station_dataset": training_dataset,
@@ -703,32 +914,6 @@ def run_stm_soil_moisture_xgboost_workflow(
                 diagnostics={"minimum_samples": min_samples, "temporal_rasters": temporal_rasters},
                 next_actions=["Use a wider overlapping date range, more station observations, or additional temporal rasters."],
             ).to_dict()
-
-        selected_time_range = temporal_alignment.get("selected_time_range") if isinstance(temporal_alignment.get("selected_time_range"), dict) else {}
-        for raster_name in temporal_rasters:
-            composite_args = {
-                "raster_names": raster_name,
-                "output_name": f"{prefix}_{_safe_name(raster_name)}_composite",
-                "covariate_type": _covariate_type_for_raster(raster_name),
-                "start_date": str(selected_time_range.get("start") or ""),
-                "end_date": str(selected_time_range.get("end") or ""),
-            }
-            composite_result = _invoke(tool_map, "build_temporal_covariate_composite", composite_args)
-            steps.append(_step("build_temporal_covariate_composite", composite_args, composite_result))
-            artifacts.extend([item for item in composite_result.get("artifacts", []) if isinstance(item, dict)])
-            if not composite_result.get("ok"):
-                return tool_result_error(
-                    "run_stm_soil_moisture_xgboost_workflow",
-                    inputs=composite_args,
-                    error_code=str(composite_result.get("error_code") or "TEMPORAL_COMPOSITE_FAILED"),
-                    error_title="STM workflow failed",
-                    user_message=str(composite_result.get("user_message") or "Failed to build a temporal raster composite for aligned station dates."),
-                    diagnostics={"steps": steps, "temporal_alignment": temporal_alignment},
-                    next_actions=[str(item) for item in composite_result.get("next_actions", []) if str(item).strip()],
-                ).to_dict()
-            composite_dataset = str(composite_result.get("outputs", {}).get("result_dataset") or "")
-            if composite_dataset:
-                temporal_composites[raster_name] = composite_dataset
 
     study_area_filter: dict[str, Any] = {}
     boundary_dataset = str(study_area_resolution.get("boundary_dataset") or "")
@@ -783,71 +968,114 @@ def run_stm_soil_moisture_xgboost_workflow(
                 next_actions=["Use a larger study area, more station observations, or inspect whether station coordinates match the boundary."],
             ).to_dict()
 
-    feature_rasters = [temporal_composites.get(raster_name, raster_name) for raster_name in rasters]
-    coverage_point_args = {
-        "dataset_name": training_dataset,
-        "x_col": "lon",
-        "y_col": "lat",
-        "crs": "EPSG:4326",
-        "output_name": f"{prefix}_coverage_points",
-    }
-    coverage_point_result = _invoke(tool_map, "table_to_points", coverage_point_args)
-    steps.append(_step("table_to_points", coverage_point_args, coverage_point_result))
-    artifacts.extend([item for item in coverage_point_result.get("artifacts", []) if isinstance(item, dict)])
-    if not coverage_point_result.get("ok"):
-        return tool_result_error(
-            "run_stm_soil_moisture_xgboost_workflow",
-            inputs=coverage_point_args,
-            error_code=str(coverage_point_result.get("error_code") or "POINT_CONVERSION_FAILED"),
-            error_title="STM workflow failed",
-            user_message=str(coverage_point_result.get("user_message") or "Failed to convert unified preprocessing table to points."),
-            diagnostics={"steps": steps},
-        ).to_dict()
-    coverage_point_dataset = str(coverage_point_result.get("outputs", {}).get("result_dataset") or "")
+    if temporal_rasters:
+        temporal_result = _extract_temporal_station_covariates(
+            manager,
+            training_dataset=training_dataset,
+            temporal_rasters=temporal_rasters,
+            output_name=f"{prefix}_temporal_training",
+        )
+        steps.append(
+            _step(
+                "extract_temporal_station_covariates",
+                {"training_dataset": training_dataset, "temporal_rasters": ",".join(temporal_rasters), "output_name": f"{prefix}_temporal_training"},
+                temporal_result,
+            )
+        )
+        artifacts.extend([item for item in temporal_result.get("artifacts", []) if isinstance(item, dict)])
+        if not temporal_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs={"training_dataset": training_dataset, "temporal_rasters": temporal_rasters, "output_prefix": output_prefix},
+                error_code=str(temporal_result.get("error_code") or "TEMPORAL_STATION_FEATURES_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(temporal_result.get("user_message") or "Failed to extract temporal station covariates."),
+                diagnostics={"steps": steps, "temporal_alignment": temporal_alignment},
+                next_actions=[str(item) for item in temporal_result.get("next_actions", []) if str(item).strip()],
+            ).to_dict()
+        temporal_feature_summary = dict(temporal_result.get("outputs") or {})
+        temporal_feature_cols = [str(item) for item in temporal_feature_summary.get("temporal_feature_cols") or [] if str(item).strip()]
+        training_dataset = str(temporal_feature_summary.get("result_dataset") or training_dataset)
+        row_count = int(temporal_feature_summary.get("row_count") or row_count)
 
-    coverage_args = {
-        "point_name": coverage_point_dataset,
-        "raster_names": ",".join(feature_rasters),
-        "output_name": f"{prefix}_coverage_samples",
-        "id_cols": "",
-        "output_mode": "wide",
-        "value_field_prefix": "raster",
-    }
-    coverage_result = _invoke(tool_map, "batch_register_points_to_rasters", coverage_args)
-    steps.append(_step("batch_register_points_to_rasters", coverage_args, coverage_result))
-    artifacts.extend([item for item in coverage_result.get("artifacts", []) if isinstance(item, dict)])
-    if not coverage_result.get("ok"):
-        return tool_result_error(
-            "run_stm_soil_moisture_xgboost_workflow",
-            inputs=coverage_args,
-            error_code=str(coverage_result.get("error_code") or "UNIFIED_COVERAGE_SAMPLING_FAILED"),
-            error_title="STM workflow failed",
-            user_message=str(coverage_result.get("user_message") or "Failed to sample base rasters for unified preprocessing."),
-            diagnostics={"steps": steps},
-            next_actions=[str(item) for item in coverage_result.get("next_actions", []) if str(item).strip()],
-        ).to_dict()
-    coverage_dataset = str(coverage_result.get("outputs", {}).get("result_dataset") or "")
-    coverage_fields = [str(item) for item in coverage_result.get("outputs", {}).get("fields") or [] if str(item).strip()]
-    unified_result = _unified_training_filter(
-        manager,
-        training_dataset=training_dataset,
-        coverage_dataset=coverage_dataset,
-        raster_fields=coverage_fields,
-        output_name=f"{prefix}_unified_training",
-    )
-    steps.append(_step("prepare_unified_training_samples", {"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_name": f"{prefix}_unified_training"}, unified_result))
-    artifacts.extend([item for item in unified_result.get("artifacts", []) if isinstance(item, dict)])
-    if not unified_result.get("ok"):
-        return tool_result_error(
-            "run_stm_soil_moisture_xgboost_workflow",
-            inputs={"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_prefix": output_prefix},
-            error_code=str(unified_result.get("error_code") or "UNIFIED_PREPROCESSING_FAILED"),
-            error_title="STM workflow failed",
-            user_message=str(unified_result.get("user_message") or "Failed to prepare unified training samples before deriving features."),
-            diagnostics={"steps": steps},
-            next_actions=[str(item) for item in unified_result.get("next_actions", []) if str(item).strip()],
-        ).to_dict()
-    unified_outputs = dict(unified_result.get("outputs") or {})
+    feature_rasters = [raster_name for raster_name in rasters if raster_name not in set(temporal_rasters)]
+    if feature_rasters:
+        coverage_point_args = {
+            "dataset_name": training_dataset,
+            "x_col": "lon",
+            "y_col": "lat",
+            "crs": "EPSG:4326",
+            "output_name": f"{prefix}_coverage_points",
+        }
+        coverage_point_result = _invoke(tool_map, "table_to_points", coverage_point_args)
+        steps.append(_step("table_to_points", coverage_point_args, coverage_point_result))
+        artifacts.extend([item for item in coverage_point_result.get("artifacts", []) if isinstance(item, dict)])
+        if not coverage_point_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs=coverage_point_args,
+                error_code=str(coverage_point_result.get("error_code") or "POINT_CONVERSION_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(coverage_point_result.get("user_message") or "Failed to convert unified preprocessing table to points."),
+                diagnostics={"steps": steps},
+            ).to_dict()
+        coverage_point_dataset = str(coverage_point_result.get("outputs", {}).get("result_dataset") or "")
+
+        coverage_args = {
+            "point_name": coverage_point_dataset,
+            "raster_names": ",".join(feature_rasters),
+            "output_name": f"{prefix}_coverage_samples",
+            "id_cols": "",
+            "output_mode": "wide",
+            "value_field_prefix": "raster",
+        }
+        coverage_result = _invoke(tool_map, "batch_register_points_to_rasters", coverage_args)
+        steps.append(_step("batch_register_points_to_rasters", coverage_args, coverage_result))
+        artifacts.extend([item for item in coverage_result.get("artifacts", []) if isinstance(item, dict)])
+        if not coverage_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs=coverage_args,
+                error_code=str(coverage_result.get("error_code") or "UNIFIED_COVERAGE_SAMPLING_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(coverage_result.get("user_message") or "Failed to sample base rasters for unified preprocessing."),
+                diagnostics={"steps": steps},
+                next_actions=[str(item) for item in coverage_result.get("next_actions", []) if str(item).strip()],
+            ).to_dict()
+        coverage_dataset = str(coverage_result.get("outputs", {}).get("result_dataset") or "")
+        coverage_fields = [str(item) for item in coverage_result.get("outputs", {}).get("fields") or [] if str(item).strip()]
+        unified_result = _unified_training_filter(
+            manager,
+            training_dataset=training_dataset,
+            coverage_dataset=coverage_dataset,
+            raster_fields=coverage_fields,
+            output_name=f"{prefix}_unified_training",
+        )
+        steps.append(_step("prepare_unified_training_samples", {"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_name": f"{prefix}_unified_training"}, unified_result))
+        artifacts.extend([item for item in unified_result.get("artifacts", []) if isinstance(item, dict)])
+        if not unified_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs={"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_prefix": output_prefix},
+                error_code=str(unified_result.get("error_code") or "UNIFIED_PREPROCESSING_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(unified_result.get("user_message") or "Failed to prepare unified training samples before deriving features."),
+                diagnostics={"steps": steps},
+                next_actions=[str(item) for item in unified_result.get("next_actions", []) if str(item).strip()],
+            ).to_dict()
+        unified_outputs = dict(unified_result.get("outputs") or {})
+    else:
+        training_dataset = manager.put_table(f"{prefix}_unified_training", manager.get_table(training_dataset))
+        unified_outputs = {
+            "result_dataset": training_dataset,
+            "row_count": int(row_count),
+            "removed_row_count": 0,
+            "removed_station_count": 0,
+            "removed_stations": [],
+            "required_raster_fields": [],
+            "mask_raster_fields": [],
+            "filter_method": "temporal_station_features_only",
+        }
     if study_area_filter:
         unified_outputs["filter_method"] = "study_area_boundary"
         unified_outputs["boundary_dataset"] = boundary_dataset
@@ -879,6 +1107,8 @@ def run_stm_soil_moisture_xgboost_workflow(
                 "raster_features": feature_rasters,
                 "temporal_alignment": temporal_alignment,
                 "temporal_composites": temporal_composites,
+                "temporal_feature_cols": temporal_feature_cols,
+                "temporal_feature_summary": temporal_feature_summary,
                 "study_area_resolution": study_area_resolution,
                 "unified_preprocessing": unified_outputs,
                 "steps": steps,
@@ -938,31 +1168,35 @@ def run_stm_soil_moisture_xgboost_workflow(
         ).to_dict()
     point_dataset = str(point_result.get("outputs", {}).get("result_dataset") or "")
 
-    feature_args = {
-        "point_name": point_dataset,
-        "raster_names": ",".join(feature_rasters),
-        "output_name": f"{prefix}_features",
-        "id_cols": "",
-        "output_mode": "wide",
-        "value_field_prefix": "raster",
-    }
-    feature_result = _invoke(tool_map, "batch_register_points_to_rasters", feature_args)
-    steps.append(_step("batch_register_points_to_rasters", feature_args, feature_result))
-    artifacts.extend([item for item in feature_result.get("artifacts", []) if isinstance(item, dict)])
-    if not feature_result.get("ok"):
-        return tool_result_error(
-            "run_stm_soil_moisture_xgboost_workflow",
-            inputs=feature_args,
-            error_code=str(feature_result.get("error_code") or "RASTER_FEATURE_EXTRACTION_FAILED"),
-            error_title="STM workflow failed",
-            user_message=str(feature_result.get("user_message") or "Failed to sample raster features at station points."),
-            diagnostics={"steps": steps},
-            next_actions=[str(item) for item in feature_result.get("next_actions", []) if str(item).strip()],
-        ).to_dict()
-    feature_dataset = str(feature_result.get("outputs", {}).get("result_dataset") or "")
-    raster_fields = [str(item) for item in feature_result.get("outputs", {}).get("fields") or [] if str(item).strip()]
-    feature_cols = [field for field in ["lon", "lat", "elevation_m", *raster_fields] if field]
-    if not raster_fields:
+    raster_fields: list[str] = []
+    if feature_rasters:
+        feature_args = {
+            "point_name": point_dataset,
+            "raster_names": ",".join(feature_rasters),
+            "output_name": f"{prefix}_features",
+            "id_cols": "",
+            "output_mode": "wide",
+            "value_field_prefix": "raster",
+        }
+        feature_result = _invoke(tool_map, "batch_register_points_to_rasters", feature_args)
+        steps.append(_step("batch_register_points_to_rasters", feature_args, feature_result))
+        artifacts.extend([item for item in feature_result.get("artifacts", []) if isinstance(item, dict)])
+        if not feature_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs=feature_args,
+                error_code=str(feature_result.get("error_code") or "RASTER_FEATURE_EXTRACTION_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(feature_result.get("user_message") or "Failed to sample raster features at station points."),
+                diagnostics={"steps": steps},
+                next_actions=[str(item) for item in feature_result.get("next_actions", []) if str(item).strip()],
+            ).to_dict()
+        feature_dataset = str(feature_result.get("outputs", {}).get("result_dataset") or "")
+        raster_fields = [str(item) for item in feature_result.get("outputs", {}).get("fields") or [] if str(item).strip()]
+    else:
+        feature_dataset = point_dataset
+    feature_cols = [field for field in ["lon", "lat", "elevation_m", *temporal_feature_cols, *raster_fields] if field]
+    if not raster_fields and not temporal_feature_cols:
         return tool_result_ok(
             "run_stm_soil_moisture_xgboost_workflow",
             inputs={"archive_path": archive_path, "raster_names": ",".join(feature_rasters), "output_prefix": output_prefix},
@@ -975,6 +1209,7 @@ def run_stm_soil_moisture_xgboost_workflow(
                 "target_col": target_col,
                 "row_count": row_count,
                 "raster_features": feature_rasters,
+                "temporal_feature_cols": temporal_feature_cols,
                 "steps": steps,
             },
             artifacts=artifacts,
@@ -984,16 +1219,48 @@ def run_stm_soil_moisture_xgboost_workflow(
 
     model_dataset = feature_dataset
     model_feature_cols = list(feature_cols)
+    categorical_feature_cols = _categorical_raster_feature_fields(manager, feature_rasters, raster_fields)
+    if categorical_feature_cols:
+        try:
+            model_df, geometry, model_data_type = _read_model_feature_dataset(manager, model_dataset)
+            for field in categorical_feature_cols:
+                values = pd.to_numeric(model_df[field], errors="coerce")
+                encoded = values.round().astype("Int64").astype("string").astype(object)
+                model_df[field] = encoded.where(values.notna(), np.nan)
+            model_dataset = _save_model_feature_dataset(manager, f"{prefix}_model_features", model_df, geometry, model_data_type)
+            steps.append(
+                {
+                    "tool_name": "encode_categorical_raster_features",
+                    "args": {
+                        "dataset_name": feature_dataset,
+                        "categorical_fields": ",".join(categorical_feature_cols),
+                        "output_name": f"{prefix}_model_features",
+                    },
+                    "ok": True,
+                    "outputs": {
+                        "result_dataset": model_dataset,
+                        "categorical_fields": categorical_feature_cols,
+                    },
+                    "error_code": "",
+                    "user_message": "",
+                }
+            )
+        except Exception as exc:
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs={"dataset_name": feature_dataset, "categorical_fields": categorical_feature_cols, "output_prefix": output_prefix},
+                error_code="CATEGORICAL_RASTER_FEATURES_FAILED",
+                error_title="STM workflow failed",
+                user_message="Failed to convert categorical raster fields before XGBoost modeling.",
+                technical_detail=f"{type(exc).__name__}: {exc}",
+                diagnostics={"steps": steps, "feature_cols": feature_cols},
+                next_actions=["Inspect LULC/landcover sampled values and rerun with valid categorical raster fields."],
+            ).to_dict()
+
     aspect_fields = [field for field in raster_fields if "aspect" in field.lower()]
     if _as_bool(encode_aspect_circular) and aspect_fields:
         try:
-            feature_record = manager.get(feature_dataset)
-            if feature_record.data_type == "table":
-                model_df = manager.get_table(feature_dataset)
-            elif feature_record.data_type == "vector":
-                model_df = pd.DataFrame(manager.get_vector(feature_dataset).drop(columns=["geometry"], errors="ignore"))
-            else:
-                raise TypeError(f"{feature_dataset} is not a table or vector dataset")
+            model_df, geometry, model_data_type = _read_model_feature_dataset(manager, model_dataset)
             added_fields: list[str] = []
             for field in aspect_fields:
                 values = pd.to_numeric(model_df[field], errors="coerce")
@@ -1003,19 +1270,20 @@ def run_stm_soil_moisture_xgboost_workflow(
                 model_df[sin_field] = np.sin(radians)
                 model_df[cos_field] = np.cos(radians)
                 added_fields.extend([sin_field, cos_field])
-            model_dataset = manager.put_table(f"{prefix}_model_features", model_df)
             model_feature_cols = [
                 field
                 for field in feature_cols
                 if field not in set(aspect_fields)
             ] + added_fields
+            aspect_output_name = f"{prefix}_model_features_aspect" if model_dataset != feature_dataset else f"{prefix}_model_features"
+            model_dataset = _save_model_feature_dataset(manager, aspect_output_name, model_df, geometry, model_data_type)
             steps.append(
                 {
                     "tool_name": "engineer_aspect_circular_features",
                     "args": {
-                        "dataset_name": feature_dataset,
+                        "dataset_name": model_dataset,
                         "aspect_fields": ",".join(aspect_fields),
-                        "output_name": f"{prefix}_model_features",
+                        "output_name": aspect_output_name,
                     },
                     "ok": True,
                     "outputs": {
@@ -1073,6 +1341,9 @@ def run_stm_soil_moisture_xgboost_workflow(
             "target_col": target_col,
             "feature_cols": feature_cols,
             "model_feature_cols": model_feature_cols,
+            "temporal_feature_cols": temporal_feature_cols,
+            "temporal_feature_summary": temporal_feature_summary,
+            "categorical_feature_cols": categorical_feature_cols,
             "raster_features": feature_rasters,
             "row_count": row_count,
             "temporal_alignment": temporal_alignment,

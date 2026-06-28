@@ -88,6 +88,26 @@ def _write_temporal_covering_raster(path: Path) -> None:
             dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_NDVI")
 
 
+def _write_daily_multiband_raster(path: Path, *, token: str, base: float, step: float, days: int = 16) -> None:
+    band_dates = [date(2019, 1, 1) + timedelta(days=idx) for idx in range(days)]
+    data = np.stack([np.full((10, 10), base + idx * step, dtype="float32") for idx in range(days)])
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=10,
+        width=10,
+        count=days,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(115.53885 - 0.05, 41.55076 + 0.05, 0.01, 0.01),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(data)
+        for index, current in enumerate(band_dates, start=1):
+            dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_{token}")
+
+
 def _write_lulc_mask_raster(path: Path) -> None:
     data = np.array([[10, 0]], dtype="uint8")
     with rasterio.open(
@@ -254,6 +274,7 @@ def test_stm_xgboost_workflow_filters_lulc_zero_before_derivatives() -> None:
         assert result["outputs"]["unified_preprocessing"]["removed_row_count"] == 12
         assert result["outputs"]["unified_preprocessing"]["removed_station_count"] == 1
         assert result["outputs"]["unified_preprocessing"]["removed_stations"] == ["OUTSIDE"]
+        assert "raster_lulc" in result["outputs"]["model_result"]["diagnostics"]["categorical_features"]
         unified = service.manager.get_table("stm_filtered_unified_training")
         assert set(unified["station_id"]) == {"INSIDE"}
         derivative_index = [step["tool_name"] for step in result["outputs"]["steps"]].index("dem_terrain_derivatives")
@@ -387,8 +408,9 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
         assert result["outputs"]["status"] == "modeled"
         assert result["outputs"]["training_dataset"] == "stm_temporal_unified_training"
         assert result["outputs"]["temporal_alignment"]["selected_time_range"] == {"start": "2019-01-04", "end": "2019-01-13"}
-        assert result["outputs"]["temporal_composites"]["ndvi_daily"] == "stm_temporal_ndvi_daily_composite"
-        assert result["outputs"]["raster_features"] == ["stm_temporal_ndvi_daily_composite"]
+        assert result["outputs"]["temporal_composites"] == {}
+        assert "raster_ndvi_daily_window_max_7d" in result["outputs"]["temporal_feature_cols"]
+        assert "raster_ndvi_daily_window_max_7d" in result["outputs"]["model_feature_cols"]
         assert result["outputs"]["unified_preprocessing"]["removed_row_count"] == 0
         aligned = service.manager.get_table("stm_temporal_aligned_training")
         assert aligned["date"].tolist() == [
@@ -406,14 +428,64 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
         assert [step["tool_name"] for step in result["outputs"]["steps"]][:3] == [
             "convert_stm_station_archive_to_training_table",
             "align_station_raster_time_window",
-            "build_temporal_covariate_composite",
-        ]
-        assert [step["tool_name"] for step in result["outputs"]["steps"]][3:5] == [
             "prepare_study_area_training_samples",
-            "table_to_points",
         ]
-        register_step = next(step for step in result["outputs"]["steps"] if step["tool_name"] == "batch_register_points_to_rasters")
-        assert register_step["args"]["raster_names"] == "stm_temporal_ndvi_daily_composite"
+        assert "build_temporal_covariate_composite" not in [step["tool_name"] for step in result["outputs"]["steps"]]
+        assert "extract_temporal_station_covariates" in [step["tool_name"] for step in result["outputs"]["steps"]]
+
+
+def test_stm_xgboost_workflow_derives_observation_window_temporal_features() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "stations.zip"
+        _write_many_day_station_archive(archive_path)
+        dem_path = service.manager.upload_dir / "dem.tif"
+        ndvi_path = service.manager.upload_dir / "ndvi_daily.tif"
+        lst_path = service.manager.upload_dir / "lst_daily.tif"
+        precip_path = service.manager.upload_dir / "precip_daily.tif"
+        _write_covering_raster(dem_path)
+        _write_daily_multiband_raster(ndvi_path, token="NDVI", base=0.10, step=0.01)
+        _write_daily_multiband_raster(lst_path, token="LST", base=20.0, step=1.0)
+        _write_daily_multiband_raster(precip_path, token="PRECIP", base=1.0, step=1.0)
+        boundary_name = _put_covering_boundary(service)
+        service.manager.put_raster_path("dem", dem_path, meta={"crs": "EPSG:3857"})
+        service.manager.put_raster_path("ndvi_daily", ndvi_path, meta={"crs": "EPSG:4326"})
+        service.manager.put_raster_path("lst_daily", lst_path, meta={"crs": "EPSG:4326"})
+        service.manager.put_raster_path("precip_daily", precip_path, meta={"crs": "EPSG:4326"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "dem,ndvi_daily,lst_daily,precip_daily",
+                    "boundary_name": boundary_name,
+                    "output_prefix": "stm_window",
+                    "aggregate": "daily",
+                    "min_samples": 8,
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        expected_fields = {
+            "raster_ndvi_daily_window_max_7d",
+            "raster_lst_daily_window_median_7d",
+            "raster_precip_daily_sum_3d",
+            "raster_precip_daily_sum_7d",
+            "raster_precip_daily_sum_14d",
+            "raster_precip_daily_sum_30d",
+        }
+        assert expected_fields.issubset(set(result["outputs"]["temporal_feature_cols"]))
+        assert expected_fields.issubset(set(result["outputs"]["model_feature_cols"]))
+        assert "build_temporal_covariate_composite" not in [step["tool_name"] for step in result["outputs"]["steps"]]
+        features = service.manager.get_vector(result["outputs"]["feature_dataset"]).drop(columns=["geometry"], errors="ignore")
+        jan4 = features.loc[features["date"] == "2019-01-04"].iloc[0]
+        assert np.isclose(jan4["raster_ndvi_daily_window_max_7d"], 0.16)
+        assert np.isclose(jan4["raster_lst_daily_window_median_7d"], 23.0)
+        assert np.isclose(jan4["raster_precip_daily_sum_3d"], 9.0)
+        assert np.isclose(jan4["raster_precip_daily_sum_7d"], 10.0)
 
 
 def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> None:

@@ -515,6 +515,18 @@ class DataManager:
             "bounds": tuple(gdf.total_bounds.tolist()) if not gdf.empty else None,
         }
 
+    def _build_raster_meta(self, path: Path) -> dict[str, Any]:
+        with rasterio.open(path) as src:
+            return {
+                "width": src.width,
+                "height": src.height,
+                "count": src.count,
+                "crs": str(src.crs) if src.crs else None,
+                "bounds": tuple(src.bounds),
+                "dtype": str(src.dtypes[0]) if src.dtypes else None,
+                "nodata": src.nodata,
+            }
+
     def _build_document_meta(self, text: str) -> dict[str, Any]:
         lines = [line for line in text.splitlines() if line.strip()]
         words = len(text.split())
@@ -551,17 +563,7 @@ class DataManager:
                 meta=self._scoped_meta({**self._build_vector_meta(gdf), **original_meta}),
             )
         elif ext in RASTER_EXTS:
-            with rasterio.open(actual) as src:
-                meta = {
-                    "width": src.width,
-                    "height": src.height,
-                    "count": src.count,
-                    "crs": str(src.crs) if src.crs else None,
-                    "bounds": tuple(src.bounds),
-                    "dtype": str(src.dtypes[0]) if src.dtypes else None,
-                    "nodata": src.nodata,
-                    **original_meta,
-                }
+            meta = {**self._build_raster_meta(actual), **original_meta}
             self.datasets[dataset_name] = DatasetRecord(
                 name=dataset_name,
                 path=actual,
@@ -819,12 +821,18 @@ class DataManager:
 
     def put_raster_path(self, name: str, path: Path, meta: dict[str, Any] | None = None) -> str:
         dataset_name = self._unique_name(name)
+        raster_meta: dict[str, Any] = {}
+        try:
+            raster_meta = self._build_raster_meta(Path(path))
+        except Exception:
+            raster_meta = {}
+        raster_meta.update(meta or {})
         self.datasets[dataset_name] = DatasetRecord(
             name=dataset_name,
             path=path,
             data_type="raster",
             object_ref=str(path),
-            meta=self._scoped_meta(meta or {}),
+            meta=self._scoped_meta(raster_meta),
         )
         self._sync_dataset_to_database(dataset_name, auto_synced=True)
         return dataset_name
