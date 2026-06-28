@@ -119,6 +119,19 @@ def _temporal_raster_names(manager: Any, raster_names: list[str]) -> list[str]:
     return [name for name in raster_names if _raster_temporal_dates(manager, name)]
 
 
+def _covariate_type_for_raster(raster_name: str) -> str:
+    lower = str(raster_name or "").lower()
+    if "ndvi" in lower:
+        return "ndvi"
+    if "evi" in lower:
+        return "evi"
+    if "lst" in lower:
+        return "lst_celsius"
+    if "precip" in lower or "rain" in lower:
+        return "precipitation_mm"
+    return "generic"
+
+
 def resolve_default_station_archive(manager: Any) -> Path | None:
     workdir = Path(getattr(manager, "workdir", "") or ".")
     roots: list[Path] = []
@@ -282,6 +295,7 @@ def run_stm_soil_moisture_xgboost_workflow(
 
     temporal_rasters = _temporal_raster_names(manager, rasters)
     temporal_alignment: dict[str, Any] = {}
+    temporal_composites: dict[str, str] = {}
     if temporal_rasters:
         align_args = {
             "station_dataset": training_dataset,
@@ -327,7 +341,33 @@ def run_stm_soil_moisture_xgboost_workflow(
                 next_actions=["Use a wider overlapping date range, more station observations, or additional temporal rasters."],
             ).to_dict()
 
-    feature_rasters = list(rasters)
+        selected_time_range = temporal_alignment.get("selected_time_range") if isinstance(temporal_alignment.get("selected_time_range"), dict) else {}
+        for raster_name in temporal_rasters:
+            composite_args = {
+                "raster_names": raster_name,
+                "output_name": f"{prefix}_{_safe_name(raster_name)}_composite",
+                "covariate_type": _covariate_type_for_raster(raster_name),
+                "start_date": str(selected_time_range.get("start") or ""),
+                "end_date": str(selected_time_range.get("end") or ""),
+            }
+            composite_result = _invoke(tool_map, "build_temporal_covariate_composite", composite_args)
+            steps.append(_step("build_temporal_covariate_composite", composite_args, composite_result))
+            artifacts.extend([item for item in composite_result.get("artifacts", []) if isinstance(item, dict)])
+            if not composite_result.get("ok"):
+                return tool_result_error(
+                    "run_stm_soil_moisture_xgboost_workflow",
+                    inputs=composite_args,
+                    error_code=str(composite_result.get("error_code") or "TEMPORAL_COMPOSITE_FAILED"),
+                    error_title="STM workflow failed",
+                    user_message=str(composite_result.get("user_message") or "Failed to build a temporal raster composite for aligned station dates."),
+                    diagnostics={"steps": steps, "temporal_alignment": temporal_alignment},
+                    next_actions=[str(item) for item in composite_result.get("next_actions", []) if str(item).strip()],
+                ).to_dict()
+            composite_dataset = str(composite_result.get("outputs", {}).get("result_dataset") or "")
+            if composite_dataset:
+                temporal_composites[raster_name] = composite_dataset
+
+    feature_rasters = [temporal_composites.get(raster_name, raster_name) for raster_name in rasters]
     for raster_name in list(rasters):
         if not _is_dem_like_raster(manager, raster_name):
             continue
@@ -515,6 +555,7 @@ def run_stm_soil_moisture_xgboost_workflow(
             "raster_features": feature_rasters,
             "row_count": row_count,
             "temporal_alignment": temporal_alignment,
+            "temporal_composites": temporal_composites,
             "model_result": xgb_result,
             "steps": steps,
         },

@@ -177,6 +177,8 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
         assert result["outputs"]["status"] == "modeled"
         assert result["outputs"]["training_dataset"] == "stm_temporal_aligned_training"
         assert result["outputs"]["temporal_alignment"]["selected_time_range"] == {"start": "2019-01-04", "end": "2019-01-13"}
+        assert result["outputs"]["temporal_composites"]["ndvi_daily"] == "stm_temporal_ndvi_daily_composite"
+        assert result["outputs"]["raster_features"] == ["stm_temporal_ndvi_daily_composite"]
         aligned = service.manager.get_table("stm_temporal_aligned_training")
         assert aligned["date"].tolist() == [
             "2019-01-04",
@@ -193,8 +195,14 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
         assert [step["tool_name"] for step in result["outputs"]["steps"]][:3] == [
             "convert_stm_station_archive_to_training_table",
             "align_station_raster_time_window",
-            "table_to_points",
+            "build_temporal_covariate_composite",
         ]
+        assert [step["tool_name"] for step in result["outputs"]["steps"]][3:5] == [
+            "table_to_points",
+            "batch_register_points_to_rasters",
+        ]
+        register_step = next(step for step in result["outputs"]["steps"] if step["tool_name"] == "batch_register_points_to_rasters")
+        assert register_step["args"]["raster_names"] == "stm_temporal_ndvi_daily_composite"
 
 
 def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> None:
