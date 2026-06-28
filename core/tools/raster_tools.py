@@ -1373,9 +1373,40 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     ).to_json()
                 out_image, out_transform = mask(src, geoms, crop=True)
                 out_meta = src.meta.copy()
-                out_meta.update({"height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform})
+                if not out_meta.get("crs"):
+                    try:
+                        registered_crs = (manager.get(raster_name).meta or {}).get("crs")
+                        if registered_crs:
+                            out_meta["crs"] = rasterio.crs.CRS.from_string(str(registered_crs))
+                    except Exception:
+                        pass
+                out_meta.update({"driver": "GTiff", "height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform})
                 with rasterio.open(output_path, "w", **out_meta) as dest:
                     dest.write(out_image)
+                    try:
+                        dest.scales = src.scales
+                        dest.offsets = src.offsets
+                    except Exception:
+                        pass
+                    try:
+                        dataset_tags = src.tags()
+                        if dataset_tags:
+                            dest.update_tags(**dataset_tags)
+                    except Exception:
+                        pass
+                    for band_index in range(1, src.count + 1):
+                        try:
+                            description = (src.descriptions or [])[band_index - 1]
+                            if description:
+                                dest.set_band_description(band_index, description)
+                        except Exception:
+                            pass
+                        try:
+                            band_tags = src.tags(band_index)
+                            if band_tags:
+                                dest.update_tags(band_index, **band_tags)
+                        except Exception:
+                            pass
 
             serializable_meta = {
                 **{k: v for k, v in out_meta.items() if k not in {"crs", "transform"}},
@@ -1415,7 +1446,14 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             geoms = [geom.__geo_interface__ for geom in gdf.geometry if geom is not None]
             out_image, out_transform = mask(src, geoms, crop=True)
             out_meta = src.meta.copy()
-            out_meta.update({"height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform})
+            if not out_meta.get("crs"):
+                try:
+                    registered_crs = (manager.get(raster_name).meta or {}).get("crs")
+                    if registered_crs:
+                        out_meta["crs"] = rasterio.crs.CRS.from_string(str(registered_crs))
+                except Exception:
+                    pass
+            out_meta.update({"driver": "GTiff", "height": out_image.shape[1], "width": out_image.shape[2], "transform": out_transform})
             with rasterio.open(output_path, "w", **out_meta) as dest:
                 dest.write(out_image)
 

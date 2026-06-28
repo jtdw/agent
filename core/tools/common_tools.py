@@ -167,6 +167,7 @@ def build_common_tools(manager: Any) -> list[Any]:
         encode_aspect_circular: bool = True,
         boundary_name: str = "",
         study_area: str = "",
+        representative_date: str = "",
     ) -> str:
         """Run STM station archive conversion, point creation, raster sampling, and conditional XGBoost modeling."""
         return _json(
@@ -182,6 +183,7 @@ def build_common_tools(manager: Any) -> list[Any]:
                 encode_aspect_circular=encode_aspect_circular,
                 boundary_name=boundary_name,
                 study_area=study_area,
+                representative_date=representative_date,
             )
         )
 

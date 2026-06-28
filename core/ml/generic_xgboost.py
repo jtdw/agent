@@ -528,7 +528,17 @@ def _fit_table_model(
     metrics_dataset = manager.put_table(f"{output_name}_metrics", pd.DataFrame([metrics]))
     importance_dataset = manager.put_table(f"{output_name}_feature_importance", importance_df)
     model_path = manager.derived_dir / f"{_safe_name(output_name)}_model.joblib"
-    joblib.dump({"pipeline": pipeline, "label_encoder": label_encoder, "features": feature_cols, "target": target_col}, model_path)
+    joblib.dump(
+        {
+            "pipeline": pipeline,
+            "label_encoder": label_encoder,
+            "features": feature_cols,
+            "target": target_col,
+            "numeric_features": numeric_cols,
+            "categorical_features": categorical_cols,
+        },
+        model_path,
+    )
     summary_path = manager.derived_dir / f"{_safe_name(output_name)}_summary.json"
     modeling_profile = build_modeling_profile(df, dataset_name=output_name, data_type="vector" if gdf is not None else "table")
     coordinate_columns = {"lon": resolved_lon_col, "lat": resolved_lat_col} if resolved_lon_col and resolved_lat_col else {}

@@ -208,6 +208,119 @@ def _temporal_specs_for_raster(raster_name: str) -> list[dict[str, Any]]:
     return [{"field": f"raster_{safe}_window_median_7d", "mode": "median", "days_before": 3, "days_after": 3}]
 
 
+def _raster_sample_field(raster_name: str) -> str:
+    return f"raster_{_safe_name(raster_name)}"
+
+
+def _representative_prediction_date(*, requested: str = "", temporal_alignment: dict[str, Any] | None = None, year: str = "") -> str:
+    requested_date = pd.to_datetime(str(requested or "").strip(), errors="coerce")
+    if not pd.isna(requested_date):
+        return requested_date.strftime("%Y-%m-%d")
+    selected_range = (temporal_alignment or {}).get("selected_time_range") if isinstance(temporal_alignment, dict) else {}
+    if isinstance(selected_range, dict):
+        end_date = pd.to_datetime(str(selected_range.get("end") or "").strip(), errors="coerce")
+        if not pd.isna(end_date):
+            return end_date.strftime("%Y-%m-%d")
+    year_text = str(year or "").strip()
+    if re.fullmatch(r"\d{4}", year_text):
+        return f"{year_text}-07-01"
+    return "2019-07-01"
+
+
+def _model_artifact_path(result: dict[str, Any]) -> str:
+    for artifact in result.get("artifacts", []) or []:
+        if isinstance(artifact, dict) and artifact.get("type") == "model" and str(artifact.get("path") or "").strip():
+            return str(artifact.get("path"))
+    for path in result.get("outputs", {}).get("generated_files", []) or []:
+        text = str(path or "")
+        if text.endswith("_model.joblib"):
+            return text
+    return ""
+
+
+def _prediction_feature_mapping(
+    manager: Any,
+    *,
+    model_feature_cols: list[str],
+    feature_rasters: list[str],
+    temporal_rasters: list[str],
+) -> tuple[dict[str, str], list[str]]:
+    model_features = {str(field) for field in model_feature_cols}
+    mapping: dict[str, str] = {}
+    warnings: list[str] = []
+    dem_candidates: list[str] = []
+    for raster_name in feature_rasters:
+        field = _raster_sample_field(raster_name)
+        if field in model_features:
+            mapping[field] = raster_name
+        if _is_dem_like_raster(manager, raster_name):
+            dem_candidates.append(raster_name)
+    if "elevation_m" in model_features and dem_candidates:
+        mapping["elevation_m"] = dem_candidates[0]
+    for raster_name in temporal_rasters:
+        for spec in _temporal_specs_for_raster(raster_name):
+            field = str(spec.get("field") or "")
+            if field in model_features and field not in mapping:
+                warnings.append(field)
+    return mapping, warnings
+
+
+def _build_temporal_prediction_feature_rasters(
+    tool_map: dict[str, Any],
+    manager: Any,
+    *,
+    temporal_rasters: list[str],
+    model_feature_cols: list[str],
+    representative_date: str,
+    output_prefix: str,
+    boundary_dataset: str = "",
+    steps: list[dict[str, Any]],
+    artifacts: list[dict[str, Any]],
+) -> dict[str, str]:
+    model_features = {str(field) for field in model_feature_cols}
+    rep_date = pd.to_datetime(representative_date, errors="coerce")
+    if pd.isna(rep_date):
+        return {}
+    mapping: dict[str, str] = {}
+    for raster_name in temporal_rasters:
+        composite_source = raster_name
+        if str(boundary_dataset or "").strip():
+            clip_args = {
+                "raster_name": raster_name,
+                "vector_name": boundary_dataset,
+                "output_name": f"{output_prefix}_{_safe_name(raster_name)}_prediction_clip",
+            }
+            clip_result = _invoke(tool_map, "clip_raster_by_vector", clip_args)
+            steps.append(_step("clip_raster_by_vector", clip_args, clip_result))
+            artifacts.extend([item for item in clip_result.get("artifacts", []) if isinstance(item, dict)])
+            if clip_result.get("ok"):
+                composite_source = str(clip_result.get("outputs", {}).get("result_dataset") or raster_name)
+        covariate_type = _covariate_type_for_raster(raster_name)
+        for spec in _temporal_specs_for_raster(raster_name):
+            field = str(spec.get("field") or "")
+            if field not in model_features:
+                continue
+            start_date = (rep_date - timedelta(days=int(spec.get("days_before") or 0))).strftime("%Y-%m-%d")
+            end_date = (rep_date + timedelta(days=int(spec.get("days_after") or 0))).strftime("%Y-%m-%d")
+            composite_args = {
+                "raster_names": composite_source,
+                "output_name": f"{output_prefix}_{_safe_name(field)}_prediction_feature",
+                "covariate_type": covariate_type,
+                "method": str(spec.get("mode") or ""),
+                "band_selection": "auto",
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+            composite_result = _invoke(tool_map, "build_temporal_covariate_composite", composite_args)
+            steps.append(_step("build_temporal_covariate_composite", composite_args, composite_result))
+            artifacts.extend([item for item in composite_result.get("artifacts", []) if isinstance(item, dict)])
+            if composite_result.get("ok"):
+                dataset_name = str(composite_result.get("outputs", {}).get("result_dataset") or "")
+                if dataset_name:
+                    mapping[field] = dataset_name
+    return mapping
+
+
 def _aggregate_temporal_values(values: list[float], mode: str) -> float:
     arr = np.asarray(values, dtype="float64")
     arr = arr[np.isfinite(arr)]
@@ -794,6 +907,7 @@ def run_stm_soil_moisture_xgboost_workflow(
     encode_aspect_circular: bool = True,
     boundary_name: str = "",
     study_area: str = "",
+    representative_date: str = "",
 ) -> dict[str, Any]:
     """Run the conditional STM -> point -> raster feature -> XGBoost workflow."""
     resolved_archive = Path(archive_path) if str(archive_path or "").strip() else resolve_default_station_archive(manager)
@@ -1413,6 +1527,69 @@ def run_stm_soil_moisture_xgboost_workflow(
             next_actions=[str(item) for item in xgb_result.get("next_actions", []) if str(item).strip()],
         ).to_dict()
 
+    prediction_result: dict[str, Any] = {
+        "ok": False,
+        "status": "skipped",
+        "reason": "prediction_feature_mapping_incomplete",
+    }
+    prediction_map_layers: list[dict[str, Any]] = []
+    prediction_images: list[dict[str, Any]] = []
+    prediction_date = _representative_prediction_date(
+        requested=representative_date,
+        temporal_alignment=temporal_alignment,
+        year=year,
+    )
+    prediction_mapping, temporal_missing = _prediction_feature_mapping(
+        manager,
+        model_feature_cols=model_feature_cols,
+        feature_rasters=feature_rasters,
+        temporal_rasters=temporal_rasters,
+    )
+    if temporal_missing:
+        temporal_mapping = _build_temporal_prediction_feature_rasters(
+            tool_map,
+            manager,
+            temporal_rasters=temporal_rasters,
+            model_feature_cols=model_feature_cols,
+            representative_date=prediction_date,
+            output_prefix=prefix,
+            boundary_dataset=boundary_dataset,
+            steps=steps,
+            artifacts=artifacts,
+        )
+        prediction_mapping.update(temporal_mapping)
+    auto_features = {"lon", "lat", "day_of_year", "month", "year"}
+    missing_prediction_features = [
+        field for field in model_feature_cols if field not in prediction_mapping and field not in auto_features
+    ]
+    model_path = _model_artifact_path(xgb_result)
+    if model_path and not missing_prediction_features:
+        prediction_args = {
+            "model_path": model_path,
+            "feature_rasters": ",".join(f"{feature}={dataset}" for feature, dataset in prediction_mapping.items()),
+            "output_name": f"{prefix}_prediction",
+            "boundary_name": boundary_dataset,
+            "representative_date": prediction_date,
+        }
+        prediction_result = _invoke(tool_map, "predict_xgboost_raster_map", prediction_args)
+        steps.append(_step("predict_xgboost_raster_map", prediction_args, prediction_result))
+        artifacts.extend([item for item in prediction_result.get("artifacts", []) if isinstance(item, dict)])
+        prediction_map_layers = [item for item in prediction_result.get("map_layers", []) if isinstance(item, dict)]
+        prediction_images = [item for item in prediction_result.get("images", []) if isinstance(item, dict)]
+    else:
+        prediction_result = {
+            "ok": False,
+            "status": "skipped",
+            "reason": "prediction_feature_mapping_incomplete" if model_path else "model_artifact_missing",
+            "outputs": {
+                "representative_date": prediction_date,
+                "feature_rasters": prediction_mapping,
+                "missing_features": missing_prediction_features,
+                "model_path_found": bool(model_path),
+            },
+        }
+
+    prediction_outputs = prediction_result.get("outputs", {}) if isinstance(prediction_result, dict) else {}
     return tool_result_ok(
         "run_stm_soil_moisture_xgboost_workflow",
         inputs={"archive_path": archive_path, "raster_names": ",".join(feature_rasters), "output_prefix": output_prefix},
@@ -1436,10 +1613,18 @@ def run_stm_soil_moisture_xgboost_workflow(
             "study_area_resolution": study_area_resolution,
             "unified_preprocessing": unified_outputs,
             "model_result": xgb_result,
+            "prediction_status": "mapped" if prediction_result.get("ok") else str(prediction_result.get("reason") or prediction_result.get("status") or "skipped"),
+            "prediction_result": prediction_result,
+            "prediction_raster": str(prediction_outputs.get("result_dataset") or ""),
+            "prediction_preview": str(prediction_outputs.get("preview_path") or ""),
+            "prediction_summary": str(prediction_outputs.get("summary_path") or ""),
+            "prediction_representative_date": prediction_date,
             "steps": steps,
         },
         artifacts=artifacts,
+        map_layers=prediction_map_layers,
+        images=prediction_images,
         summary="Completed STM station training table, point conversion, raster feature sampling, and XGBoost modeling.",
         diagnostics={"step_count": len(steps), "raster_count": len(feature_rasters), "minimum_samples": min_samples},
-        next_actions=["Review model metrics, feature importance, and prediction artifacts before using the model for interpretation."],
+        next_actions=["Review model metrics, feature importance, and prediction maps before using the model for interpretation."],
     ).to_dict()

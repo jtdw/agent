@@ -9,9 +9,14 @@ import joblib
 import numpy as np
 import pandas as pd
 import rasterio
+from pyproj import Transformer
 from rasterio.transform import from_origin
 from shapely.geometry import box
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 from core.config import Settings
 from core.gis_tools import build_tools
@@ -31,7 +36,7 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
         settings.ensure_dirs()
         return GISWorkspaceService(settings)
 
-    def write_raster(self, service: GISWorkspaceService, name: str, data: np.ndarray, transform=None) -> str:
+    def write_raster(self, service: GISWorkspaceService, name: str, data: np.ndarray, transform=None, crs: str = "EPSG:4326") -> str:
         path = service.manager.derived_dir / f"{name}.tif"
         with rasterio.open(
             path,
@@ -41,12 +46,12 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
             width=data.shape[1],
             count=1,
             dtype="float32",
-            crs="EPSG:4326",
+            crs=crs,
             transform=transform or from_origin(0, 4, 1, 1),
             nodata=-9999.0,
         ) as dst:
             dst.write(data.astype("float32"), 1)
-        return service.manager.put_raster_path(name, path, meta={"crs": "EPSG:4326"})
+        return service.manager.put_raster_path(name, path, meta={"crs": crs})
 
     def write_model(self, path: Path) -> Path:
         train = pd.DataFrame(
@@ -109,6 +114,52 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
                 self.assertEqual(int(np.count_nonzero(arr != -9999.0)), 8)
                 self.assertEqual(float(arr[0, 3]), -9999.0)
                 self.assertGreater(float(arr[0, 0]), 0.0)
+
+    def test_predict_xgboost_raster_map_casts_categorical_raster_values_to_training_labels(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            self.write_raster(service, "landcover", np.array([[10, 20], [10, 20]], dtype="float32"))
+            encoder_kwargs = {"handle_unknown": "ignore"}
+            try:
+                encoder = OneHotEncoder(**encoder_kwargs, sparse_output=False)
+            except TypeError:
+                encoder = OneHotEncoder(**encoder_kwargs, sparse=False)
+            pipeline = Pipeline(
+                [
+                    (
+                        "preprocess",
+                        ColumnTransformer(
+                            [("cat", Pipeline([("imputer", SimpleImputer(strategy="most_frequent")), ("onehot", encoder)]), ["landcover"])],
+                            remainder="drop",
+                        ),
+                    ),
+                    ("model", LinearRegression()),
+                ]
+            )
+            train = pd.DataFrame({"landcover": ["10", "20", "10", "20"]})
+            pipeline.fit(train, np.array([1.0, 5.0, 1.0, 5.0], dtype="float32"))
+            model_path = service.manager.derived_dir / "categorical_model.joblib"
+            joblib.dump({"pipeline": pipeline, "features": ["landcover"], "target": "soil_moisture_mean", "categorical_features": ["landcover"]}, model_path)
+            tools = {tool.name: tool for tool in build_tools(service.manager)}
+
+            result = parse_tool_result(
+                tools["predict_xgboost_raster_map"].invoke(
+                    {
+                        "model_path": str(model_path),
+                        "feature_rasters": "landcover=landcover",
+                        "output_name": "categorical_prediction",
+                        "representative_date": "2019-07-15",
+                        "max_prediction_pixels": 1000,
+                        "raster_resampling": "nearest",
+                    }
+                )
+            )
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            with rasterio.open(service.manager.get_raster_path("categorical_prediction")) as src:
+                arr = src.read(1)
+                self.assertLess(float(arr[0, 0]), float(arr[0, 1]))
 
     def test_predict_xgboost_raster_map_can_use_explicit_target_grid(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -180,6 +231,44 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
             with rasterio.open(raster_path) as src:
                 self.assertEqual((src.height, src.width), (2, 2))
                 self.assertEqual(src.transform, from_origin(0, 4, 2, 2))
+
+    def test_predict_xgboost_raster_map_compares_mixed_crs_resolution_in_meters(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            transformer = Transformer.from_crs("EPSG:4326", "EPSG:32650", always_xy=True)
+            x0, y0 = transformer.transform(115.0, 42.0)
+            self.write_raster(
+                service,
+                "dem_utm",
+                np.arange(1, 6401, dtype="float32").reshape(80, 80),
+                transform=from_origin(x0, y0, 30, 30),
+                crs="EPSG:32650",
+            )
+            self.write_raster(
+                service,
+                "precip_1km",
+                np.full((2, 2), 12.0, dtype="float32"),
+                transform=from_origin(115, 42, 0.01, 0.01),
+                crs="EPSG:4326",
+            )
+            model_path = self.write_model(service.manager.derived_dir / "soil_model.joblib")
+            tools = {tool.name: tool for tool in build_tools(service.manager)}
+
+            result = parse_tool_result(
+                tools["predict_xgboost_raster_map"].invoke(
+                    {
+                        "model_path": str(model_path),
+                        "feature_rasters": "dem_elevation=dem_utm,lst_value=precip_1km,ndvi_value=precip_1km",
+                        "output_name": "soil_prediction_mixed_crs_grid",
+                        "representative_date": "2019-07-15",
+                        "max_prediction_pixels": 10000,
+                    }
+                )
+            )
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["outputs"]["reference_raster"], "precip_1km")
 
     def test_predict_xgboost_raster_map_has_planner_tool_card(self) -> None:
         cards = {card["tool_name"]: card for card in list_tool_cards()}

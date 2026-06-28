@@ -261,7 +261,13 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
             "table_to_points",
             "batch_register_points_to_rasters",
             "generic_xgboost_workflow",
+            "predict_xgboost_raster_map",
         ]
+        assert result["outputs"]["prediction_result"]["ok"] is True
+        assert result["outputs"]["prediction_raster"] == "stm_full_prediction"
+        assert service.manager.get(result["outputs"]["prediction_raster"]).data_type == "raster"
+        assert Path(result["outputs"]["prediction_preview"]).exists()
+        assert Path(result["outputs"]["prediction_summary"]).exists()
 
 
 def test_stm_xgboost_workflow_filters_lulc_zero_before_derivatives() -> None:
@@ -454,7 +460,10 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
             "align_station_raster_time_window",
             "prepare_study_area_training_samples",
         ]
-        assert "build_temporal_covariate_composite" not in [step["tool_name"] for step in result["outputs"]["steps"]]
+        step_names = [step["tool_name"] for step in result["outputs"]["steps"]]
+        assert step_names.index("generic_xgboost_workflow") < step_names.index("build_temporal_covariate_composite")
+        assert result["outputs"]["prediction_status"] == "prediction_feature_mapping_incomplete"
+        assert "elevation_m" in result["outputs"]["prediction_result"]["outputs"]["missing_features"]
         assert "extract_temporal_station_covariates" in [step["tool_name"] for step in result["outputs"]["steps"]]
 
 
@@ -503,7 +512,11 @@ def test_stm_xgboost_workflow_derives_observation_window_temporal_features() -> 
         }
         assert expected_fields.issubset(set(result["outputs"]["temporal_feature_cols"]))
         assert expected_fields.issubset(set(result["outputs"]["model_feature_cols"]))
-        assert "build_temporal_covariate_composite" not in [step["tool_name"] for step in result["outputs"]["steps"]]
+        step_names = [step["tool_name"] for step in result["outputs"]["steps"]]
+        assert step_names.index("generic_xgboost_workflow") < step_names.index("build_temporal_covariate_composite")
+        assert "predict_xgboost_raster_map" in step_names
+        assert result["outputs"]["prediction_result"]["tool_name"] == "predict_xgboost_raster_map"
+        assert result["outputs"]["prediction_status"] in {"mapped", "failed"}
         features = service.manager.get_vector(result["outputs"]["feature_dataset"]).drop(columns=["geometry"], errors="ignore")
         jan4 = features.loc[features["date"] == "2019-01-04"].iloc[0]
         assert np.isclose(jan4["raster_ndvi_daily_window_max_7d"], 0.16)

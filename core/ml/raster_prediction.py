@@ -145,7 +145,13 @@ def _read_aligned(path: Path, reference: rasterio.io.DatasetReader, *, resamplin
 def _raster_pixel_area(path: Path) -> float:
     with rasterio.open(path) as src:
         transform = src.transform
-        return float(abs((transform.a * transform.e) - (transform.b * transform.d)))
+        native_area = float(abs((transform.a * transform.e) - (transform.b * transform.d)))
+        if src.crs and src.crs.is_geographic:
+            center_lat = float((src.bounds.top + src.bounds.bottom) / 2.0)
+            meters_per_degree_lat = 111_320.0
+            meters_per_degree_lon = meters_per_degree_lat * max(0.01, float(np.cos(np.deg2rad(center_lat))))
+            return float(abs(transform.a) * meters_per_degree_lon * abs(transform.e) * meters_per_degree_lat)
+        return native_area
 
 
 def _choose_coarsest_feature_raster(manager: DataManager, feature_map: dict[str, str], model_features: list[str]) -> tuple[str, list[dict[str, Any]]]:
@@ -247,6 +253,7 @@ def run_xgboost_raster_prediction(
         bundle = joblib.load(model_file)
         pipeline = bundle.get("pipeline")
         model_features = [str(item) for item in bundle.get("features") or []]
+        categorical_features = {str(item) for item in bundle.get("categorical_features") or []}
         target = str(bundle.get("target") or "prediction")
         if pipeline is None or not callable(getattr(pipeline, "predict", None)):
             raise ValueError("model bundle must contain a pipeline with predict()")
@@ -320,7 +327,12 @@ def run_xgboost_raster_prediction(
                         "year": np.full(end - start, rep_date.year, dtype="int16"),
                     }
                 )
-                pred_frame = pd.DataFrame(frame_data)[model_features]
+                pred_frame = pd.DataFrame(frame_data)
+                for feature in categorical_features.intersection(pred_frame.columns):
+                    values = pd.to_numeric(pred_frame[feature], errors="coerce")
+                    labels = values.round().astype("Int64").astype("string").astype(object)
+                    pred_frame[feature] = labels.where(values.notna(), np.nan)
+                pred_frame = pred_frame[model_features]
                 pred = np.asarray(pipeline.predict(pred_frame), dtype="float32")
                 prediction[rr, cc] = pred
                 pred_parts.append(pred)
@@ -345,6 +357,7 @@ def run_xgboost_raster_prediction(
             "model_path": str(model_file),
             "target": target,
             "features": model_features,
+            "categorical_features": sorted(categorical_features),
             "feature_rasters": feature_map,
             "boundary_name": boundary_name,
             "target_raster_name": str(target_raster_name or "").strip(),
