@@ -124,6 +124,18 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         forbidden_uses=["Do not treat QA as gap filling", "Do not call low-valid-ratio daily rasters reliable"],
     ),
     _card(
+        "build_temporal_covariate_composite",
+        "Build same-grid temporal composites for daily NDVI/LST/precipitation rasters with gaps.",
+        ["data_processing", "raster_composite", "remote_sensing", "soil_moisture", "modeling"],
+        ["raster_names", "output_name"],
+        ["raster_dataset", "summary", "artifact", "map_layer"],
+        optional_inputs=["covariate_type", "method", "band", "min_observations"],
+        input_asset_roles=["daily_ndvi_raster", "daily_lst_raster", "daily_precipitation_raster", "covariate_raster"],
+        preconditions=["Rasters must be loaded and share the same CRS, transform, width, and height"],
+        common_failure_cases=["Input grids are not aligned", "all pixels missing", "categorical rasters need a mode workflow"],
+        forbidden_uses=["Do not use for unaligned rasters", "Do not use continuous composites for landcover classes"],
+    ),
+    _card(
         "raster_zonal_stats",
         "按面状分区统计栅格像元值，并返回注册后的统计表 artifact。",
         ["analysis", "raster_statistics", "zonal_statistics", "data_processing"],
@@ -382,6 +394,10 @@ def candidate_tool_cards(query: str, *, task_type: str = "", limit: int = 8) -> 
         or any(token in raw_query for token in ("缺失", "质量", "有效像元", "有效比例", "日数据", "降水", "土地利用"))
     ):
         synonym_terms.extend(["raster_covariate_quality_check", "raster_quality", "remote_sensing", "quality_summary"])
+    if any(token in lower_query for token in ("ndvi", "lst", "precipitation")) and any(
+        token in lower_query for token in ("temporal", "composite", "gap", "fill", "missing")
+    ):
+        synonym_terms.extend(["build_temporal_covariate_composite", "raster_composite", "remote_sensing"])
     if any(token in raw_query for token in ("站点", "采样", "提取")) and ("栅格" in raw_query or "raster" in lower_query):
         synonym_terms.extend(["raster_sampling", "station_raster_feature_extraction", "table_to_points"])
     if any(token in raw_query for token in ("坡度", "坡向", "地形")) or any(token in lower_query for token in ("slope", "aspect", "terrain")):

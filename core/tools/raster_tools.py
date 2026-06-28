@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import warnings
 from typing import Any
 
 from core.tools import raster_helpers as _helpers
@@ -9,6 +10,7 @@ from core.tools import raster_helpers as _helpers
 RASTER_TOOL_NAMES = {
     'raster_basic_stats',
     'raster_covariate_quality_check',
+    'build_temporal_covariate_composite',
     'raster_zonal_stats',
     'clip_raster_by_vector',
     'raster_mosaic',
@@ -83,6 +85,17 @@ _COVARIATE_TYPE_DEFAULT_RANGES: dict[str, tuple[float | None, float | None]] = {
 }
 
 _CATEGORICAL_COVARIATE_TYPES = {"categorical", "landcover", "land_use", "soil_type"}
+
+_TEMPORAL_COMPOSITE_DEFAULT_METHODS = {
+    "ndvi": "max",
+    "evi": "max",
+    "lst_celsius": "median",
+    "lst_kelvin": "median",
+    "precipitation_mm": "sum",
+    "generic": "median",
+}
+
+_TEMPORAL_COMPOSITE_METHODS = {"max", "median", "mean", "sum", "min"}
 
 
 def _validate_raster_algebra_ast(parsed: ast.Expression, *, variables: set[str]) -> None:
@@ -181,6 +194,31 @@ def _parse_expected_categories(value: str) -> set[int | float]:
             continue
         categories.add(_coerce_category(float(token)))
     return categories
+
+
+def _default_temporal_composite_method(covariate_type: str, method: str) -> str:
+    clean_method = str(method or "").strip().lower()
+    if clean_method:
+        return clean_method
+    return _TEMPORAL_COMPOSITE_DEFAULT_METHODS.get(covariate_type, "median")
+
+
+def _raster_grid_signature(src: Any) -> dict[str, Any]:
+    return {
+        "width": int(src.width),
+        "height": int(src.height),
+        "crs": str(src.crs) if src.crs else "",
+        "transform": tuple(float(value) for value in src.transform[:6]),
+    }
+
+
+def _same_raster_grid(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return (
+        left.get("width") == right.get("width")
+        and left.get("height") == right.get("height")
+        and left.get("crs") == right.get("crs")
+        and np.allclose(left.get("transform") or (), right.get("transform") or (), rtol=0.0, atol=1e-9)
+    )
 
 
 def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> list[Any]:
@@ -498,6 +536,246 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             ).to_json()
         except Exception as exc:
             return _tool_internal_error("raster_covariate_quality_check", inputs, exc)
+
+
+    @tool
+    def build_temporal_covariate_composite(
+        raster_names: str,
+        output_name: str,
+        covariate_type: str = "generic",
+        method: str = "",
+        band: int = 1,
+        min_observations: int = 1,
+    ) -> str:
+        """Build a same-grid temporal composite for daily raster covariates before modeling."""
+        inputs = {
+            "raster_names": raster_names,
+            "output_name": output_name,
+            "covariate_type": covariate_type,
+            "method": method,
+            "band": band,
+            "min_observations": min_observations,
+        }
+        raster_list = _parse_columns(raster_names)
+        if not raster_list:
+            return tool_result_error(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                error_code="RASTER_INPUT_REQUIRED",
+                error_title="Missing raster inputs",
+                user_message="At least one raster dataset is required for temporal compositing.",
+                diagnostics={},
+                next_actions=["Provide loaded raster dataset names separated by commas."],
+            ).to_json()
+        try:
+            clean_covariate_type = _normalize_covariate_type(covariate_type)
+            clean_method = _default_temporal_composite_method(clean_covariate_type, method)
+            band_value = int(band)
+            min_obs = int(min_observations)
+        except Exception as exc:
+            return tool_result_error(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                error_code="TEMPORAL_COMPOSITE_ARGS_INVALID",
+                error_title="Invalid temporal composite arguments",
+                user_message=str(exc),
+                diagnostics={"band": band, "min_observations": min_observations, "method": method},
+                next_actions=["Use integer band/min_observations values and a supported composite method."],
+            ).to_json()
+        if clean_covariate_type in _CATEGORICAL_COVARIATE_TYPES:
+            return tool_result_error(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                error_code="CATEGORICAL_COMPOSITE_UNSUPPORTED",
+                error_title="Categorical temporal composite is not supported yet",
+                user_message="Categorical rasters such as landcover need a mode or priority-rule composite, not continuous statistics.",
+                diagnostics={"covariate_type": clean_covariate_type},
+                next_actions=["Use this tool for continuous covariates such as NDVI, LST, and precipitation; handle categorical rasters with a dedicated mode workflow."],
+            ).to_json()
+        if clean_method not in _TEMPORAL_COMPOSITE_METHODS:
+            return tool_result_error(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                error_code="TEMPORAL_COMPOSITE_METHOD_UNSUPPORTED",
+                error_title="Unsupported composite method",
+                user_message=f"Composite method must be one of: {', '.join(sorted(_TEMPORAL_COMPOSITE_METHODS))}.",
+                diagnostics={"method": clean_method},
+                next_actions=["Use max for NDVI/EVI, median for LST, sum for precipitation, or specify mean/min explicitly."],
+            ).to_json()
+        if min_obs < 1:
+            return tool_result_error(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                error_code="MIN_OBSERVATIONS_INVALID",
+                error_title="Invalid minimum observation count",
+                user_message="min_observations must be at least 1.",
+                diagnostics={"min_observations": min_observations},
+                next_actions=["Use min_observations=1 for a permissive composite or a larger value for stricter quality control."],
+            ).to_json()
+
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_output_path(manager.derived_dir, output_name, allowed_suffixes={".tif", ".tiff"}))
+        for raster_name in raster_list:
+            errors.extend(validate_dataset_exists(manager, raster_name))
+        if not errors:
+            for raster_name in raster_list:
+                errors.extend(validate_raster_readable(manager, raster_name))
+        if errors:
+            return _tool_error_from_validation("build_temporal_covariate_composite", inputs, errors)
+
+        try:
+            arrays: list[np.ndarray] = []
+            source_summaries: list[dict[str, Any]] = []
+            reference_grid: dict[str, Any] | None = None
+            first_path: Path | None = None
+            for raster_name in raster_list:
+                raster_path = manager.get_raster_path(raster_name)
+                if first_path is None:
+                    first_path = Path(raster_path)
+                with rasterio.open(raster_path) as src:
+                    if band_value < 1 or band_value > src.count:
+                        return tool_result_error(
+                            "build_temporal_covariate_composite",
+                            inputs=inputs,
+                            error_code="RASTER_BAND_OUT_OF_RANGE",
+                            error_title="Raster band out of range",
+                            user_message=f"Raster {raster_name} has {src.count} band(s); band {band_value} cannot be read.",
+                            diagnostics={"raster": raster_name, "band": band_value, "band_count": int(src.count)},
+                            next_actions=["Choose a band number between 1 and the raster band count."],
+                        ).to_json()
+                    grid = _raster_grid_signature(src)
+                    if reference_grid is None:
+                        reference_grid = grid
+                    elif not _same_raster_grid(reference_grid, grid):
+                        return tool_result_error(
+                            "build_temporal_covariate_composite",
+                            inputs=inputs,
+                            error_code="RASTER_GRID_MISMATCH",
+                            error_title="Temporal rasters are not aligned",
+                            user_message="All temporal composite inputs must have the same CRS, transform, width, and height.",
+                            diagnostics={"reference": reference_grid, "mismatched_raster": raster_name, "mismatched_grid": grid},
+                            next_actions=["Reproject/resample rasters to a common grid before running the temporal composite."],
+                        ).to_json()
+                    band_arr = src.read(band_value, masked=True)
+                    values = np.asarray(np.ma.array(band_arr).filled(np.nan), dtype="float32")
+                    arrays.append(values)
+                    source_summaries.append(
+                        {
+                            "raster_name": raster_name,
+                            "path": str(raster_path),
+                            "valid_pixels": int(np.count_nonzero(np.isfinite(values))),
+                            "total_pixels": int(values.size),
+                            "crs": grid["crs"],
+                            "width": grid["width"],
+                            "height": grid["height"],
+                        }
+                    )
+
+            stack = np.stack(arrays).astype("float32")
+            valid_observation_count = np.count_nonzero(np.isfinite(stack), axis=0).astype("int16")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                if clean_method == "max":
+                    composite = np.nanmax(stack, axis=0)
+                elif clean_method == "median":
+                    composite = np.nanmedian(stack, axis=0)
+                elif clean_method == "mean":
+                    composite = np.nanmean(stack, axis=0)
+                elif clean_method == "sum":
+                    composite = np.nansum(stack, axis=0)
+                else:
+                    composite = np.nanmin(stack, axis=0)
+            composite = np.asarray(composite, dtype="float32")
+            composite = np.where(valid_observation_count >= min_obs, composite, np.nan).astype("float32")
+            valid_pixels = int(np.count_nonzero(np.isfinite(composite)))
+            all_missing_pixels = int(np.count_nonzero(valid_observation_count == 0))
+            below_min_observation_pixels = int(np.count_nonzero(valid_observation_count < min_obs))
+            valid_values = composite[np.isfinite(composite)]
+            statistics = {
+                "min": float(valid_values.min()) if valid_values.size else None,
+                "max": float(valid_values.max()) if valid_values.size else None,
+                "mean": float(valid_values.mean()) if valid_values.size else None,
+                "valid_count": valid_pixels,
+            }
+            stored_name, output_path, _ = _write_raster_dataset_like(
+                first_path or manager.get_raster_path(raster_list[0]),
+                output_name,
+                composite,
+                source_tool="build_temporal_covariate_composite",
+                meta_updates={
+                    "source_rasters": raster_list,
+                    "covariate_type": clean_covariate_type,
+                    "composite_method": clean_method,
+                    "min_observations": min_obs,
+                },
+            )
+            summary_path = manager.derived_dir / f"{_artifact_safe_name(stored_name)}_temporal_composite_summary.json"
+            summary_payload = {
+                "result_dataset": stored_name,
+                "covariate_type": clean_covariate_type,
+                "method": clean_method,
+                "band": band_value,
+                "min_observations": min_obs,
+                "source_raster_count": int(len(raster_list)),
+                "valid_pixel_count": valid_pixels,
+                "all_missing_pixel_count": all_missing_pixels,
+                "below_min_observation_pixels": below_min_observation_pixels,
+                "statistics": statistics,
+                "valid_observation_count": {
+                    "min": int(valid_observation_count.min()) if valid_observation_count.size else 0,
+                    "max": int(valid_observation_count.max()) if valid_observation_count.size else 0,
+                    "mean": float(valid_observation_count.mean()) if valid_observation_count.size else 0.0,
+                },
+                "source_rasters": source_summaries,
+            }
+            summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            summary_artifact = manager.register_artifact(
+                path=str(summary_path),
+                type="summary",
+                title=f"{stored_name} temporal composite summary",
+                description="Temporal raster covariate composite diagnostics.",
+                quality_status="ok",
+                preview_available=True,
+                dataset_id=stored_name,
+                source_tool="build_temporal_covariate_composite",
+            )
+            return tool_result_ok(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                outputs={
+                    **_map_ready_outputs(manager, stored_name, source_tool="build_temporal_covariate_composite"),
+                    "path": str(output_path),
+                    "summary_path": str(summary_path),
+                    "method": clean_method,
+                    "covariate_type": clean_covariate_type,
+                    "source_raster_count": int(len(raster_list)),
+                    "valid_pixel_count": valid_pixels,
+                    "all_missing_pixel_count": all_missing_pixels,
+                    "below_min_observation_pixels": below_min_observation_pixels,
+                    "statistics": statistics,
+                },
+                artifacts=[
+                    ArtifactInfo(f"raster:{output_path.name}", str(output_path), "raster", f"{stored_name} temporal composite", "", "created", False),
+                    summary_artifact,
+                ],
+                map_layers=[{"layer_id": _map_layer_id(stored_name), "name": stored_name, "dataset_name": stored_name, "type": "raster"}],
+                summary=f"Built {clean_method} temporal composite {stored_name} from {len(raster_list)} raster(s).",
+                diagnostics={
+                    "source_rasters": source_summaries,
+                    "method": clean_method,
+                    "covariate_type": clean_covariate_type,
+                    "valid_observation_count": summary_payload["valid_observation_count"],
+                    "reference_grid": reference_grid or {},
+                    "min_observations": min_obs,
+                },
+                next_actions=[
+                    "Run raster_covariate_quality_check on the composite before modeling.",
+                    "Use the composite raster as an XGBoost covariate when daily rasters contain gaps.",
+                    "Keep the summary artifact with model evidence and uncertainty diagnostics.",
+                ],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("build_temporal_covariate_composite", inputs, exc)
 
 
     @tool
@@ -1404,6 +1682,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
     return [
         raster_basic_stats,
         raster_covariate_quality_check,
+        build_temporal_covariate_composite,
         raster_zonal_stats,
         clip_raster_by_vector,
         raster_mosaic,

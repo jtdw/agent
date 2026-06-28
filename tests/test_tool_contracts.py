@@ -1221,6 +1221,112 @@ class ToolContractTests(unittest.TestCase):
         self.assertEqual(precipitation_candidates[0], "raster_covariate_quality_check")
         self.assertEqual(landcover_candidates[0], "raster_covariate_quality_check")
 
+    def test_temporal_covariate_composite_uses_ndvi_default_max(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            transform = from_origin(0, 2, 1, 1)
+            rasters = {
+                "ndvi_day_1": np.array([[0.1, -9999.0], [0.3, -9999.0]], dtype="float32"),
+                "ndvi_day_2": np.array([[0.4, 0.2], [-9999.0, -9999.0]], dtype="float32"),
+                "ndvi_day_3": np.array([[0.2, 0.7], [0.5, -9999.0]], dtype="float32"),
+            }
+            for name, data in rasters.items():
+                raster_path = Path(tmp) / f"{name}.tif"
+                with rasterio.open(
+                    raster_path,
+                    "w",
+                    driver="GTiff",
+                    height=data.shape[0],
+                    width=data.shape[1],
+                    count=1,
+                    dtype="float32",
+                    crs="EPSG:4326",
+                    transform=transform,
+                    nodata=-9999.0,
+                ) as dst:
+                    dst.write(data, 1)
+                service.manager.put_raster_path(name, raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["build_temporal_covariate_composite"].invoke(
+                {
+                    "raster_names": "ndvi_day_1,ndvi_day_2,ndvi_day_3",
+                    "output_name": "ndvi_composite",
+                    "covariate_type": "ndvi",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["tool_name"], "build_temporal_covariate_composite")
+            self.assertEqual(result["outputs"]["method"], "max")
+            self.assertEqual(result["outputs"]["source_raster_count"], 3)
+            self.assertEqual(result["outputs"]["valid_pixel_count"], 3)
+            self.assertEqual(result["outputs"]["all_missing_pixel_count"], 1)
+            with rasterio.open(result["outputs"]["path"]) as src:
+                out = src.read(1)
+                self.assertTrue(np.allclose(out, np.array([[0.4, 0.7], [0.5, -9999.0]], dtype="float32")))
+                self.assertEqual(src.nodata, -9999.0)
+            self.assertTrue(any(artifact["type"] == "raster" for artifact in result["artifacts"]))
+            self.assertTrue(any(artifact["type"] == "summary" for artifact in result["artifacts"]))
+            self.assertTrue(result["map_layers"])
+            self.assertEqual(result["diagnostics"]["valid_observation_count"]["max"], 3)
+
+    def test_temporal_covariate_composite_sums_precipitation(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            transform = from_origin(0, 2, 1, 1)
+            rasters = {
+                "precip_day_1": np.array([[1.0, -9999.0], [3.0, -9999.0]], dtype="float32"),
+                "precip_day_2": np.array([[2.5, 4.0], [-9999.0, -9999.0]], dtype="float32"),
+            }
+            for name, data in rasters.items():
+                raster_path = Path(tmp) / f"{name}.tif"
+                with rasterio.open(
+                    raster_path,
+                    "w",
+                    driver="GTiff",
+                    height=data.shape[0],
+                    width=data.shape[1],
+                    count=1,
+                    dtype="float32",
+                    crs="EPSG:4326",
+                    transform=transform,
+                    nodata=-9999.0,
+                ) as dst:
+                    dst.write(data, 1)
+                service.manager.put_raster_path(name, raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["build_temporal_covariate_composite"].invoke(
+                {
+                    "raster_names": "precip_day_1,precip_day_2",
+                    "output_name": "precip_total",
+                    "covariate_type": "precipitation_mm",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["outputs"]["method"], "sum")
+            with rasterio.open(result["outputs"]["path"]) as src:
+                out = src.read(1)
+                self.assertTrue(np.allclose(out, np.array([[3.5, 4.0], [3.0, -9999.0]], dtype="float32")))
+            self.assertEqual(result["diagnostics"]["valid_observation_count"]["min"], 0)
+            self.assertEqual(result["outputs"]["all_missing_pixel_count"], 1)
+
+    def test_temporal_covariate_composite_has_planner_tool_card(self) -> None:
+        from core.tool_cards import candidate_tool_cards, list_tool_cards
+
+        names = {card["tool_name"] for card in list_tool_cards()}
+        candidates = [
+            card["tool_name"]
+            for card in candidate_tool_cards("build temporal NDVI LST precipitation composite for missing daily rasters", task_type="data_processing", limit=8)
+        ]
+
+        self.assertIn("build_temporal_covariate_composite", names)
+        self.assertEqual(candidates[0], "build_temporal_covariate_composite")
+
     def test_batch_register_invalid_mode_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
