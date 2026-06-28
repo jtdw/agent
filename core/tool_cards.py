@@ -289,22 +289,24 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
     ),
     _card(
         "predict_xgboost_raster_map",
-        "Use a trained XGBoost model bundle to predict a full-basin soil moisture raster map from DEM, NDVI, LST, or other feature rasters.",
+        "Use a trained XGBoost model bundle to predict a full-basin soil moisture raster map from DEM, NDVI, LST, or other feature rasters. If target_raster_name is not provided, the prediction defaults to the coarsest, lowest-resolution feature raster grid.",
         ["modeling", "xgboost", "soil_moisture", "raster_prediction", "map_generation"],
         ["model_path", "feature_rasters", "output_name"],
         ["prediction_raster", "map_artifact", "summary_json"],
-        optional_inputs=["boundary_name", "representative_date", "max_prediction_pixels", "raster_resampling", "chunk_size"],
+        optional_inputs=["boundary_name", "target_raster_name", "representative_date", "max_prediction_pixels", "raster_resampling", "chunk_size"],
         input_asset_roles=["trained_xgboost_model", "feature_rasters", "optional_basin_boundary"],
         preconditions=[
             "model_path must point to a model artifact inside the current workspace",
             "feature_rasters must map model feature names to loaded raster dataset names",
             "boundary_name, when provided, must be a vector dataset with CRS",
+            "target_raster_name can override the output grid; otherwise the coarsest, lowest-resolution feature raster is used as the template",
             "date features are representative snapshot metadata unless date-matched rasters are supplied",
         ],
         common_failure_cases=[
             "model path is outside the workspace",
             "required feature raster mapping is missing",
             "feature rasters have no valid overlap after reprojection",
+            "the coarsest default template is too coarse for the user's requested map detail",
             "reference raster exceeds max_prediction_pixels",
         ],
         forbidden_uses=[

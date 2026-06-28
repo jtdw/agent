@@ -182,7 +182,8 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
                 self.assertEqual(src.transform, from_origin(0, 4, 2, 2))
 
     def test_predict_xgboost_raster_map_has_planner_tool_card(self) -> None:
-        names = {card["tool_name"] for card in list_tool_cards()}
+        cards = {card["tool_name"]: card for card in list_tool_cards()}
+        names = set(cards)
         candidates = {
             card["tool_name"]
             for card in candidate_tool_cards("XGBoost soil moisture full basin raster prediction map", task_type="modeling", limit=12)
@@ -190,6 +191,11 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
 
         self.assertIn("predict_xgboost_raster_map", names)
         self.assertIn("predict_xgboost_raster_map", candidates)
+        card = cards["predict_xgboost_raster_map"]
+        self.assertIn("target_raster_name", card["optional_inputs"])
+        searchable_text = " ".join([card["capability"], *card["preconditions"], *card["common_failure_cases"]]).lower()
+        self.assertIn("coarsest", searchable_text)
+        self.assertIn("lowest-resolution", searchable_text)
 
     def test_planner_builds_and_executes_full_basin_xgboost_raster_prediction(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
