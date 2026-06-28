@@ -1315,6 +1315,56 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(result["diagnostics"]["valid_observation_count"]["min"], 0)
             self.assertEqual(result["outputs"]["all_missing_pixel_count"], 1)
 
+    def test_temporal_covariate_composite_reads_single_multiband_raster_as_time_series(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = Path(tmp) / "ndvi_multiband.tif"
+            data = np.array(
+                [
+                    [[0.1, -9999.0], [0.3, -9999.0]],
+                    [[0.4, 0.2], [-9999.0, -9999.0]],
+                    [[0.2, 0.7], [0.5, -9999.0]],
+                ],
+                dtype="float32",
+            )
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=data.shape[1],
+                width=data.shape[2],
+                count=data.shape[0],
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(0, 2, 1, 1),
+                nodata=-9999.0,
+            ) as dst:
+                dst.write(data)
+                dst.set_band_description(1, "2019_01_01_2019_01_01_NDVI")
+                dst.set_band_description(2, "2019_01_02_2019_01_02_NDVI")
+                dst.set_band_description(3, "2019_01_03_2019_01_03_NDVI")
+            service.manager.put_raster_path("ndvi_multiband", raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["build_temporal_covariate_composite"].invoke(
+                {
+                    "raster_names": "ndvi_multiband",
+                    "output_name": "ndvi_multiband_composite",
+                    "covariate_type": "ndvi",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["outputs"]["method"], "max")
+            self.assertEqual(result["outputs"]["source_raster_count"], 1)
+            self.assertEqual(result["outputs"]["source_band_count"], 3)
+            self.assertEqual(result["outputs"]["input_layout"], "single_multiband")
+            self.assertEqual(result["diagnostics"]["source_bands"][0]["description"], "2019_01_01_2019_01_01_NDVI")
+            with rasterio.open(result["outputs"]["path"]) as src:
+                out = src.read(1)
+                self.assertTrue(np.allclose(out, np.array([[0.4, 0.7], [0.5, -9999.0]], dtype="float32")))
+
     def test_temporal_covariate_composite_has_planner_tool_card(self) -> None:
         from core.tool_cards import candidate_tool_cards, list_tool_cards
 

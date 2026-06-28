@@ -546,6 +546,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
         method: str = "",
         band: int = 1,
         min_observations: int = 1,
+        band_selection: str = "auto",
     ) -> str:
         """Build a same-grid temporal composite for daily raster covariates before modeling."""
         inputs = {
@@ -555,6 +556,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             "method": method,
             "band": band,
             "min_observations": min_observations,
+            "band_selection": band_selection,
         }
         raster_list = _parse_columns(raster_names)
         if not raster_list:
@@ -572,6 +574,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             clean_method = _default_temporal_composite_method(clean_covariate_type, method)
             band_value = int(band)
             min_obs = int(min_observations)
+            clean_band_selection = str(band_selection or "auto").strip().lower()
         except Exception as exc:
             return tool_result_error(
                 "build_temporal_covariate_composite",
@@ -581,6 +584,16 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 user_message=str(exc),
                 diagnostics={"band": band, "min_observations": min_observations, "method": method},
                 next_actions=["Use integer band/min_observations values and a supported composite method."],
+            ).to_json()
+        if clean_band_selection not in {"auto", "single", "all"}:
+            return tool_result_error(
+                "build_temporal_covariate_composite",
+                inputs=inputs,
+                error_code="BAND_SELECTION_UNSUPPORTED",
+                error_title="Unsupported band selection",
+                user_message="band_selection must be auto, single, or all.",
+                diagnostics={"band_selection": band_selection},
+                next_actions=["Use auto for daily multi-band rasters, single to read one band, or all to force all bands from one raster."],
             ).to_json()
         if clean_covariate_type in _CATEGORICAL_COVARIATE_TYPES:
             return tool_result_error(
@@ -626,14 +639,20 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
         try:
             arrays: list[np.ndarray] = []
             source_summaries: list[dict[str, Any]] = []
+            source_bands: list[dict[str, Any]] = []
             reference_grid: dict[str, Any] | None = None
             first_path: Path | None = None
+            input_layout = "multiple_single_band"
             for raster_name in raster_list:
                 raster_path = manager.get_raster_path(raster_name)
                 if first_path is None:
                     first_path = Path(raster_path)
                 with rasterio.open(raster_path) as src:
-                    if band_value < 1 or band_value > src.count:
+                    use_all_bands = len(raster_list) == 1 and src.count > 1 and clean_band_selection in {"auto", "all"}
+                    band_indexes = list(range(1, src.count + 1)) if use_all_bands else [band_value]
+                    if use_all_bands:
+                        input_layout = "single_multiband"
+                    if any(index < 1 or index > src.count for index in band_indexes):
                         return tool_result_error(
                             "build_temporal_covariate_composite",
                             inputs=inputs,
@@ -656,15 +675,29 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                             diagnostics={"reference": reference_grid, "mismatched_raster": raster_name, "mismatched_grid": grid},
                             next_actions=["Reproject/resample rasters to a common grid before running the temporal composite."],
                         ).to_json()
-                    band_arr = src.read(band_value, masked=True)
-                    values = np.asarray(np.ma.array(band_arr).filled(np.nan), dtype="float32")
-                    arrays.append(values)
+                    raster_valid_pixels = 0
+                    for band_index in band_indexes:
+                        band_arr = src.read(band_index, masked=True)
+                        values = np.asarray(np.ma.array(band_arr).filled(np.nan), dtype="float32")
+                        arrays.append(values)
+                        band_valid_pixels = int(np.count_nonzero(np.isfinite(values)))
+                        raster_valid_pixels += band_valid_pixels
+                        source_bands.append(
+                            {
+                                "raster_name": raster_name,
+                                "band": int(band_index),
+                                "description": str(src.descriptions[band_index - 1] or ""),
+                                "valid_pixels": band_valid_pixels,
+                                "total_pixels": int(values.size),
+                            }
+                        )
                     source_summaries.append(
                         {
                             "raster_name": raster_name,
                             "path": str(raster_path),
-                            "valid_pixels": int(np.count_nonzero(np.isfinite(values))),
-                            "total_pixels": int(values.size),
+                            "band_count": int(len(band_indexes)),
+                            "valid_pixels": raster_valid_pixels,
+                            "total_pixels": int(src.width * src.height * len(band_indexes)),
                             "crs": grid["crs"],
                             "width": grid["width"],
                             "height": grid["height"],
@@ -704,6 +737,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 source_tool="build_temporal_covariate_composite",
                 meta_updates={
                     "source_rasters": raster_list,
+                    "source_band_count": int(len(arrays)),
+                    "input_layout": input_layout,
                     "covariate_type": clean_covariate_type,
                     "composite_method": clean_method,
                     "min_observations": min_obs,
@@ -715,8 +750,11 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 "covariate_type": clean_covariate_type,
                 "method": clean_method,
                 "band": band_value,
+                "band_selection": clean_band_selection,
                 "min_observations": min_obs,
                 "source_raster_count": int(len(raster_list)),
+                "source_band_count": int(len(arrays)),
+                "input_layout": input_layout,
                 "valid_pixel_count": valid_pixels,
                 "all_missing_pixel_count": all_missing_pixels,
                 "below_min_observation_pixels": below_min_observation_pixels,
@@ -727,6 +765,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "mean": float(valid_observation_count.mean()) if valid_observation_count.size else 0.0,
                 },
                 "source_rasters": source_summaries,
+                "source_bands": source_bands,
             }
             summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             summary_artifact = manager.register_artifact(
@@ -749,6 +788,8 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     "method": clean_method,
                     "covariate_type": clean_covariate_type,
                     "source_raster_count": int(len(raster_list)),
+                    "source_band_count": int(len(arrays)),
+                    "input_layout": input_layout,
                     "valid_pixel_count": valid_pixels,
                     "all_missing_pixel_count": all_missing_pixels,
                     "below_min_observation_pixels": below_min_observation_pixels,
@@ -762,6 +803,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 summary=f"Built {clean_method} temporal composite {stored_name} from {len(raster_list)} raster(s).",
                 diagnostics={
                     "source_rasters": source_summaries,
+                    "source_bands": source_bands,
                     "method": clean_method,
                     "covariate_type": clean_covariate_type,
                     "valid_observation_count": summary_payload["valid_observation_count"],
