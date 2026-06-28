@@ -184,6 +184,41 @@ def _aggregate_temporal_values(values: list[float], mode: str) -> float:
     return float(np.median(arr))
 
 
+def _raster_band_scale_offset(src: Any, band: int = 1) -> tuple[float, float]:
+    index = max(0, int(band or 1) - 1)
+    scale = 1.0
+    offset = 0.0
+    try:
+        if index < len(src.scales) and src.scales[index] is not None:
+            scale = float(src.scales[index])
+    except Exception:
+        scale = 1.0
+    try:
+        if index < len(src.offsets) and src.offsets[index] is not None:
+            offset = float(src.offsets[index])
+    except Exception:
+        offset = 0.0
+    try:
+        tags = src.tags(int(band or 1))
+        if "scale_factor" in tags:
+            scale = float(tags["scale_factor"])
+        if "add_offset" in tags:
+            offset = float(tags["add_offset"])
+    except Exception:
+        pass
+    return scale, offset
+
+
+def _apply_raster_scale_offset(value: Any, scale: float, offset: float) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        return float("nan")
+    if not np.isfinite(numeric):
+        return float("nan")
+    return float(numeric * float(scale) + float(offset))
+
+
 def _extract_temporal_station_covariates(
     manager: Any,
     *,
@@ -240,6 +275,7 @@ def _extract_temporal_station_covariates(
                     band_date = pd.to_datetime(band_date_text, errors="coerce")
                     if pd.isna(band_date):
                         continue
+                    scale, offset = _raster_band_scale_offset(src, band_index)
                     values: list[float] = []
                     for row_index, coord in enumerate(coords):
                         if not valid_xy[row_index]:
@@ -249,7 +285,7 @@ def _extract_temporal_station_covariates(
                         value = float(sampled[0]) if len(sampled) else float("nan")
                         if src.nodata is not None and np.isclose(value, float(src.nodata), equal_nan=False):
                             value = float("nan")
-                        values.append(value)
+                        values.append(_apply_raster_scale_offset(value, scale, offset))
                     band_samples.append({"date": band_date.normalize(), "band": band_index, "values": values})
 
                 for row_index, obs_date in enumerate(obs_dates):

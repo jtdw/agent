@@ -1060,6 +1060,41 @@ def _geometry_to_sample_point(geom):
     return geom.representative_point()
 
 
+def _raster_band_scale_offset(src, band: int = 1) -> tuple[float, float]:
+    index = max(0, int(band or 1) - 1)
+    scale = 1.0
+    offset = 0.0
+    try:
+        if index < len(src.scales) and src.scales[index] is not None:
+            scale = float(src.scales[index])
+    except Exception:
+        scale = 1.0
+    try:
+        if index < len(src.offsets) and src.offsets[index] is not None:
+            offset = float(src.offsets[index])
+    except Exception:
+        offset = 0.0
+    try:
+        tags = src.tags(int(band or 1))
+        if "scale_factor" in tags:
+            scale = float(tags["scale_factor"])
+        if "add_offset" in tags:
+            offset = float(tags["add_offset"])
+    except Exception:
+        pass
+    return scale, offset
+
+
+def _apply_raster_scale_offset(value: Any, scale: float, offset: float) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        return np.nan
+    if not np.isfinite(numeric):
+        return np.nan
+    return float(numeric * float(scale) + float(offset))
+
+
 def _sample_raster_to_geometries(points: gpd.GeoDataFrame, raster_path: Path, band: int = 1) -> pd.Series:
     with rasterio.open(raster_path) as src:
         pts = points.copy()
@@ -1080,12 +1115,13 @@ def _sample_raster_to_geometries(points: gpd.GeoDataFrame, raster_path: Path, ba
         if coords:
             raw_values = list(src.sample(coords, indexes=band))
             nodata = src.nodata
+            scale, offset = _raster_band_scale_offset(src, band)
             values: list[float] = []
             for raw in raw_values:
                 val = raw[0] if len(raw) else np.nan
                 if nodata is not None and np.isfinite(val) and np.isclose(val, nodata):
                     val = np.nan
-                values.append(float(val) if np.isfinite(val) else np.nan)
+                values.append(_apply_raster_scale_offset(val, scale, offset))
             sampled.loc[valid_index] = values
         return sampled
 

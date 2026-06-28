@@ -88,7 +88,7 @@ def _write_temporal_covering_raster(path: Path) -> None:
             dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_NDVI")
 
 
-def _write_daily_multiband_raster(path: Path, *, token: str, base: float, step: float, days: int = 16) -> None:
+def _write_daily_multiband_raster(path: Path, *, token: str, base: float, step: float, days: int = 16, scale: float = 1.0) -> None:
     band_dates = [date(2019, 1, 1) + timedelta(days=idx) for idx in range(days)]
     data = np.stack([np.full((10, 10), base + idx * step, dtype="float32") for idx in range(days)])
     with rasterio.open(
@@ -104,6 +104,8 @@ def _write_daily_multiband_raster(path: Path, *, token: str, base: float, step: 
         nodata=-9999.0,
     ) as dst:
         dst.write(data)
+        dst.scales = tuple([scale] * days)
+        dst.offsets = tuple([0.0] * days)
         for index, current in enumerate(band_dates, start=1):
             dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_{token}")
 
@@ -446,7 +448,7 @@ def test_stm_xgboost_workflow_derives_observation_window_temporal_features() -> 
         _write_covering_raster(dem_path)
         _write_daily_multiband_raster(ndvi_path, token="NDVI", base=0.10, step=0.01)
         _write_daily_multiband_raster(lst_path, token="LST", base=20.0, step=1.0)
-        _write_daily_multiband_raster(precip_path, token="PRECIP", base=1.0, step=1.0)
+        _write_daily_multiband_raster(precip_path, token="PRECIP", base=100.0, step=100.0, scale=0.01)
         boundary_name = _put_covering_boundary(service)
         service.manager.put_raster_path("dem", dem_path, meta={"crs": "EPSG:3857"})
         service.manager.put_raster_path("ndvi_daily", ndvi_path, meta={"crs": "EPSG:4326"})

@@ -1562,6 +1562,46 @@ class ToolContractTests(unittest.TestCase):
             self.assertIn("dataset", artifact_types)
             self.assertIn("file", artifact_types)
 
+    def test_batch_register_applies_raster_scale_and_offset(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = Path(tmp) / "scaled_precip.tif"
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=1,
+                width=1,
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(0, 1, 1, 1),
+                nodata=-9999.0,
+            ) as dst:
+                dst.write(np.array([[584.0]], dtype="float32"), 1)
+                dst.scales = (0.01,)
+                dst.offsets = (0.0,)
+            service.manager.put_raster_path("scaled_precip", raster_path)
+            service.manager.put_vector(
+                "sample_points",
+                gpd.GeoDataFrame({"site_id": ["a"], "geometry": [Point(0.5, 0.5)]}, crs="EPSG:4326"),
+            )
+
+            raw = self.tool_map(service)["batch_register_points_to_rasters"].invoke(
+                {
+                    "point_name": "sample_points",
+                    "raster_names": "scaled_precip",
+                    "output_name": "registered_scaled",
+                    "output_mode": "wide",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            sampled = service.manager.get_vector("registered_scaled").drop(columns=["geometry"], errors="ignore")
+            self.assertAlmostEqual(float(sampled.iloc[0]["raster_scaled_precip"]), 5.84, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()
