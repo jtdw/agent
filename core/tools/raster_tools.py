@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import ast
+import json
 from typing import Any
 
 from core.tools import raster_helpers as _helpers
 
 RASTER_TOOL_NAMES = {
     'raster_basic_stats',
+    'raster_covariate_quality_check',
     'raster_zonal_stats',
     'clip_raster_by_vector',
     'raster_mosaic',
@@ -135,6 +137,23 @@ def _validate_raster_algebra_ast(parsed: ast.Expression, *, variables: set[str])
             if not isinstance(node.func.value, ast.Name) or node.func.value.id != "np" or node.func.attr not in _RASTER_ALGEBRA_NP_FUNCTIONS:
                 raise ValueError(f"栅格表达式只允许调用白名单 NumPy 函数: np.{node.func.attr}")
 
+def _parse_expected_ranges(value: str) -> dict[str, tuple[float, float]]:
+    ranges: dict[str, tuple[float, float]] = {}
+    for item in str(value or "").replace(";", ",").split(","):
+        token = item.strip()
+        if not token:
+            continue
+        if "=" not in token or ":" not in token:
+            raise ValueError(f"expected range must use raster=min:max: {token}")
+        name, raw_range = token.split("=", 1)
+        lower, upper = raw_range.split(":", 1)
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError(f"expected range is missing raster name: {token}")
+        ranges[clean_name] = (float(lower), float(upper))
+    return ranges
+
+
 def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> list[Any]:
 
     def _default_nodata_for_dtype(dtype: str) -> float | int:
@@ -243,6 +262,185 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 ).to_json()
         except Exception as exc:
             return _tool_internal_error("raster_basic_stats", inputs, exc)
+
+
+    @tool
+    def raster_covariate_quality_check(
+        raster_names: str,
+        output_name: str,
+        band: int = 1,
+        min_valid_ratio: float = 0.6,
+        expected_ranges: str = "",
+    ) -> str:
+        """Check daily raster covariates such as NDVI/LST for NoData coverage and value-range issues before modeling."""
+        inputs = {
+            "raster_names": raster_names,
+            "output_name": output_name,
+            "band": band,
+            "min_valid_ratio": min_valid_ratio,
+            "expected_ranges": expected_ranges,
+        }
+        raster_list = _parse_columns(raster_names)
+        if not raster_list:
+            return tool_result_error(
+                "raster_covariate_quality_check",
+                inputs=inputs,
+                error_code="RASTER_INPUT_REQUIRED",
+                error_title="Missing raster inputs",
+                user_message="At least one raster dataset is required for covariate quality checking.",
+                diagnostics={},
+                next_actions=["Provide one or more raster dataset names separated by commas."],
+            ).to_json()
+        try:
+            band_value = int(band)
+            threshold = float(min_valid_ratio)
+            range_rules = _parse_expected_ranges(expected_ranges)
+        except Exception as exc:
+            return tool_result_error(
+                "raster_covariate_quality_check",
+                inputs=inputs,
+                error_code="COVARIATE_QA_ARGS_INVALID",
+                error_title="Invalid covariate QA arguments",
+                user_message=str(exc),
+                diagnostics={"band": band, "min_valid_ratio": min_valid_ratio, "expected_ranges": expected_ranges},
+                next_actions=["Use band as an integer, min_valid_ratio between 0 and 1, and expected_ranges like ndvi=-1:1."],
+            ).to_json()
+        if not 0 <= threshold <= 1:
+            return tool_result_error(
+                "raster_covariate_quality_check",
+                inputs=inputs,
+                error_code="VALID_RATIO_THRESHOLD_INVALID",
+                error_title="Invalid valid-ratio threshold",
+                user_message="min_valid_ratio must be between 0 and 1.",
+                diagnostics={"min_valid_ratio": min_valid_ratio},
+                next_actions=["Use a threshold such as 0.6 for rough screening or 0.8 for stricter daily covariates."],
+            ).to_json()
+        errors: list[dict[str, Any]] = []
+        errors.extend(validate_output_path(manager.derived_dir, output_name))
+        for raster_name in raster_list:
+            errors.extend(validate_dataset_exists(manager, raster_name))
+        if not errors:
+            for raster_name in raster_list:
+                errors.extend(validate_raster_readable(manager, raster_name))
+        if errors:
+            return _tool_error_from_validation("raster_covariate_quality_check", inputs, errors)
+
+        try:
+            summaries: list[dict[str, Any]] = []
+            warnings: list[str] = []
+            for raster_name in raster_list:
+                raster_path = manager.get_raster_path(raster_name)
+                with rasterio.open(raster_path) as src:
+                    if band_value < 1 or band_value > src.count:
+                        return tool_result_error(
+                            "raster_covariate_quality_check",
+                            inputs=inputs,
+                            error_code="RASTER_BAND_OUT_OF_RANGE",
+                            error_title="Raster band out of range",
+                            user_message=f"Raster {raster_name} has {src.count} band(s); band {band_value} cannot be read.",
+                            diagnostics={"raster": raster_name, "band": band_value, "band_count": int(src.count)},
+                            next_actions=["Choose a band number between 1 and the raster band count."],
+                        ).to_json()
+                    arr = src.read(band_value, masked=True)
+                    total_pixels = int(src.width * src.height)
+                    valid = np.ma.array(arr).compressed().astype("float64")
+                    valid_pixels = int(valid.size)
+                    nodata_pixels = int(total_pixels - valid_pixels)
+                    valid_ratio = float(valid_pixels / total_pixels) if total_pixels else 0.0
+                    missing_ratio = float(nodata_pixels / total_pixels) if total_pixels else 1.0
+                    lower, upper = range_rules.get(raster_name, (None, None))
+                    out_of_range_pixels = 0
+                    if valid_pixels and lower is not None and upper is not None:
+                        out_of_range_pixels = int(np.count_nonzero((valid < float(lower)) | (valid > float(upper))))
+                    quality = "ok"
+                    reasons: list[str] = []
+                    if valid_ratio < threshold:
+                        quality = "failed"
+                        reasons.append("valid_ratio_below_threshold")
+                    if out_of_range_pixels > 0:
+                        quality = "failed"
+                        reasons.append("values_outside_expected_range")
+                    if quality == "ok" and nodata_pixels > 0:
+                        quality = "warning"
+                        reasons.append("nodata_present")
+                    if quality != "ok":
+                        warnings.append(f"{raster_name}: {', '.join(reasons)}")
+                    summaries.append(
+                        {
+                            "raster_name": raster_name,
+                            "band": band_value,
+                            "quality": quality,
+                            "reasons": reasons,
+                            "total_pixels": total_pixels,
+                            "valid_pixels": valid_pixels,
+                            "nodata_pixels": nodata_pixels,
+                            "valid_ratio": valid_ratio,
+                            "missing_ratio": missing_ratio,
+                            "out_of_range_pixels": out_of_range_pixels,
+                            "expected_min": lower,
+                            "expected_max": upper,
+                            "min": float(np.nanmin(valid)) if valid_pixels else None,
+                            "mean": float(np.nanmean(valid)) if valid_pixels else None,
+                            "max": float(np.nanmax(valid)) if valid_pixels else None,
+                            "crs": str(src.crs) if src.crs else "",
+                            "width": int(src.width),
+                            "height": int(src.height),
+                            "nodata": float(src.nodata) if src.nodata is not None else None,
+                        }
+                    )
+            if any(item["quality"] == "failed" for item in summaries):
+                overall_quality = "failed"
+            elif any(item["quality"] == "warning" for item in summaries):
+                overall_quality = "warning"
+            else:
+                overall_quality = "ok"
+            table_rows = []
+            for item in summaries:
+                row = dict(item)
+                row["reasons"] = ",".join(str(reason) for reason in item.get("reasons", []))
+                table_rows.append(row)
+            summary_dataset = manager.put_table(output_name, pd.DataFrame(table_rows))
+            summary_path = manager.derived_dir / f"{_artifact_safe_name(output_name)}_covariate_quality_summary.json"
+            summary_payload = {
+                "overall_quality": overall_quality,
+                "min_valid_ratio": threshold,
+                "raster_count": int(len(summaries)),
+                "rasters": summaries,
+                "recommended_workflow": "Use temporal compositing or gap filling before modeling when quality is warning or failed.",
+            }
+            summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            artifact = manager.register_artifact(
+                path=str(summary_path),
+                type="summary",
+                title=f"{output_name} covariate quality summary",
+                description="Daily raster covariate NoData and value-range QA summary.",
+                quality_status=overall_quality,
+                preview_available=True,
+                dataset_id=summary_dataset,
+                source_tool="raster_covariate_quality_check",
+            )
+            return tool_result_ok(
+                "raster_covariate_quality_check",
+                inputs=inputs,
+                outputs={
+                    "summary_dataset": summary_dataset,
+                    "overall_quality": overall_quality,
+                    "raster_count": int(len(summaries)),
+                    "summary_path": str(summary_path),
+                },
+                artifacts=[artifact],
+                tables=[{"table_id": summary_dataset, "title": summary_dataset}],
+                summary=f"Checked {len(summaries)} raster covariate(s); overall quality is {overall_quality}.",
+                diagnostics={"rasters": summaries, "min_valid_ratio": threshold},
+                warnings=warnings,
+                next_actions=[
+                    "Use temporal compositing for daily NDVI/LST rasters with low valid coverage.",
+                    "Run gap filling before XGBoost prediction when NoData or out-of-range pixels are present.",
+                    "Keep valid-mask and fill-method diagnostics for downstream uncertainty analysis.",
+                ],
+            ).to_json()
+        except Exception as exc:
+            return _tool_internal_error("raster_covariate_quality_check", inputs, exc)
 
 
     @tool
@@ -1148,6 +1346,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
 
     return [
         raster_basic_stats,
+        raster_covariate_quality_check,
         raster_zonal_stats,
         clip_raster_by_vector,
         raster_mosaic,

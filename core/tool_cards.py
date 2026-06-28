@@ -112,6 +112,18 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         forbidden_uses=["不能凭文件名推断统计值"],
     ),
     _card(
+        "raster_covariate_quality_check",
+        "QA daily NDVI/LST rasters for NoData, valid ratio, and value range.",
+        ["data_processing", "raster_quality", "remote_sensing", "soil_moisture", "modeling"],
+        ["raster_names", "output_name"],
+        ["quality_summary", "table_dataset", "artifact"],
+        optional_inputs=["band", "min_valid_ratio", "expected_ranges"],
+        input_asset_roles=["daily_ndvi_raster", "daily_lst_raster", "covariate_raster"],
+        preconditions=["Rasters must be loaded", "expected_ranges uses raster=min:max"],
+        common_failure_cases=["NoData coverage too high", "values outside expected range", "band out of range"],
+        forbidden_uses=["Do not treat QA as gap filling or compositing", "Do not call low-valid-ratio daily products reliable"],
+    ),
+    _card(
         "raster_zonal_stats",
         "按面状分区统计栅格像元值，并返回注册后的统计表 artifact。",
         ["analysis", "raster_statistics", "zonal_statistics", "data_processing"],
@@ -365,6 +377,11 @@ def candidate_tool_cards(query: str, *, task_type: str = "", limit: int = 8) -> 
     terms = {token.lower() for token in raw_query.replace("_", " ").split() if token.strip()}
     lower_query = raw_query.lower()
     synonym_terms: list[str] = []
+    if any(token in lower_query for token in ("ndvi", "lst")) and (
+        any(token in lower_query for token in ("missing", "nodata", "quality", "valid ratio", "valid pixel"))
+        or any(token in raw_query for token in ("缺失", "质量", "有效像元", "有效比例", "日数据"))
+    ):
+        synonym_terms.extend(["raster_covariate_quality_check", "raster_quality", "remote_sensing", "quality_summary"])
     if any(token in raw_query for token in ("站点", "采样", "提取")) and ("栅格" in raw_query or "raster" in lower_query):
         synonym_terms.extend(["raster_sampling", "station_raster_feature_extraction", "table_to_points"])
     if any(token in raw_query for token in ("坡度", "坡向", "地形")) or any(token in lower_query for token in ("slope", "aspect", "terrain")):

@@ -1062,6 +1062,78 @@ class ToolContractTests(unittest.TestCase):
             self.assertEqual(result["outputs"]["valid_count"], 9)
             self.assertIn("mean", result["outputs"])
 
+    def test_raster_covariate_quality_check_flags_nodata_and_out_of_range_pixels(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            raster_path = Path(tmp) / "ndvi_day.tif"
+            data = np.array(
+                [
+                    [0.1, 0.2, -9999.0, 1.2],
+                    [0.3, -0.4, -9999.0, 0.5],
+                    [0.6, 0.7, 0.8, -9999.0],
+                    [0.9, 0.95, -9999.0, -9999.0],
+                ],
+                dtype="float32",
+            )
+            with rasterio.open(
+                raster_path,
+                "w",
+                driver="GTiff",
+                height=data.shape[0],
+                width=data.shape[1],
+                count=1,
+                dtype="float32",
+                crs="EPSG:4326",
+                transform=from_origin(0, 4, 1, 1),
+                nodata=-9999.0,
+            ) as dst:
+                dst.write(data, 1)
+            service.manager.put_raster_path("ndvi_20190715", raster_path, meta={"crs": "EPSG:4326"})
+
+            raw = self.tool_map(service)["raster_covariate_quality_check"].invoke(
+                {
+                    "raster_names": "ndvi_20190715",
+                    "output_name": "ndvi_qa",
+                    "band": 1,
+                    "min_valid_ratio": 0.8,
+                    "expected_ranges": "ndvi_20190715=-1:1",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["tool_name"], "raster_covariate_quality_check")
+            self.assertEqual(result["outputs"]["overall_quality"], "failed")
+            self.assertEqual(result["outputs"]["raster_count"], 1)
+            self.assertEqual(result["outputs"]["summary_dataset"], "ndvi_qa")
+            raster_summary = result["diagnostics"]["rasters"][0]
+            self.assertEqual(raster_summary["valid_pixels"], 11)
+            self.assertEqual(raster_summary["nodata_pixels"], 5)
+            self.assertAlmostEqual(raster_summary["valid_ratio"], 11 / 16)
+            self.assertEqual(raster_summary["out_of_range_pixels"], 1)
+            self.assertEqual(raster_summary["quality"], "failed")
+            self.assertTrue(result["artifacts"])
+            self.assertEqual(result["artifacts"][0]["type"], "summary")
+            self.assertTrue(result["next_actions"])
+
+    def test_raster_covariate_quality_check_has_planner_tool_card(self) -> None:
+        from core.tool_cards import candidate_tool_cards, list_tool_cards
+
+        names = {card["tool_name"] for card in list_tool_cards()}
+        candidates = {
+            card["tool_name"]
+            for card in candidate_tool_cards("daily NDVI LST covariate quality check missing data", task_type="data_processing", limit=12)
+        }
+        chinese_candidates = [
+            card["tool_name"]
+            for card in candidate_tool_cards("检查日数据 NDVI LST 缺失和有效像元比例", task_type="data_processing", limit=8)
+        ]
+
+        self.assertIn("raster_covariate_quality_check", names)
+        self.assertIn("raster_covariate_quality_check", candidates)
+        self.assertEqual(chinese_candidates[0], "raster_covariate_quality_check")
+
     def test_batch_register_invalid_mode_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
