@@ -163,6 +163,81 @@ class PresentationResultTests(unittest.TestCase):
         self.assertNotIn("E:/agent", rendered)
         self.assertNotIn("workspace/derived", rendered)
 
+    def test_gcp_uncertainty_result_exposes_images_and_diagnostics_metrics(self) -> None:
+        bundle = build_presentation_bundle(
+            task_goal="explain the GCP uncertainty result and show its interval width map",
+            task_plan_summary={"primary_goal": "gcp_uncertainty_result_review"},
+            coordinator_status="succeeded",
+            normalized_results=[
+                {
+                    "status": "succeeded",
+                    "step_id": "gcp",
+                    "tool_name": "geographical_conformal_prediction",
+                    "outputs": {
+                        "model_result_id": "gcp_shandian_001",
+                        "result_dataset": "shandian_xgb_gcp_predictions",
+                        "metrics_dataset": "shandian_xgb_gcp_metrics",
+                        "metrics_json_path": "E:/agent/workspace/derived/gcp_metrics.json",
+                        "report_path": "E:/agent/workspace/derived/gcp_report.md",
+                        "summary_path": "E:/agent/workspace/derived/gcp_summary.json",
+                    },
+                    "artifacts": [
+                        {
+                            "artifact_id": "artifact_gcp_predictions",
+                            "path": "E:/agent/workspace/derived/gcp_predictions.csv",
+                            "title": "gcp_predictions.csv",
+                            "type": "dataset",
+                        },
+                        {
+                            "artifact_id": "artifact_gcp_metrics",
+                            "path": "E:/agent/workspace/derived/gcp_metrics.json",
+                            "title": "gcp_metrics.json",
+                            "type": "gcp_metrics_json",
+                        },
+                        {
+                            "artifact_id": "artifact_gcp_width_map",
+                            "path": "E:/agent/workspace/plots/gcp_interval_width_spatial.png",
+                            "title": "GCP interval width spatial distribution",
+                            "type": "image",
+                        },
+                    ],
+                    "images": [
+                        {
+                            "path": "E:/agent/workspace/plots/gcp_interval_width_spatial.png",
+                            "title": "GCP interval width spatial distribution",
+                        }
+                    ],
+                    "diagnostics": {
+                        "metrics": [
+                            {
+                                "target_coverage": 0.9,
+                                "empirical_coverage": 0.8889,
+                                "mean_interval_width": 0.0412,
+                                "interval_score": 0.0527,
+                                "effective_method": "spatially_weighted_gcp",
+                            }
+                        ]
+                    },
+                    "warnings": ["Coverage is slightly below the nominal 90% target."],
+                    "errors": [],
+                    "next_actions": ["Inspect high uncertainty regions or samples."],
+                }
+            ],
+        )
+
+        presentation = bundle["presentation_result"]
+        rendered = json.dumps(bundle, ensure_ascii=False)
+
+        self.assertEqual(presentation["status"], "succeeded")
+        self.assertEqual([item["artifact_id"] for item in presentation["image_refs"]], ["artifact_gcp_width_map"])
+        self.assertIn("target_coverage=0.9", presentation["result_highlights"])
+        self.assertIn("empirical_coverage=0.8889", presentation["result_highlights"])
+        self.assertIn("mean_interval_width=0.0412", presentation["result_highlights"])
+        self.assertIn("interval_score=0.0527", presentation["result_highlights"])
+        self.assertIn("effective_method=spatially_weighted_gcp", presentation["result_highlights"])
+        self.assertNotIn("E:/agent", rendered)
+        self.assertNotIn("workspace/plots", rendered)
+
     def test_failure_waiting_and_blocked_have_status_specific_messages(self) -> None:
         failed = build_presentation_result(
             task_goal="clip raster",

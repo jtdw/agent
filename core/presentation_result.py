@@ -165,11 +165,30 @@ def _metric_highlights(outputs: dict[str, Any]) -> list[str]:
         item = outputs.get(key)
         if isinstance(item, dict):
             candidates.append(item)
+        elif isinstance(item, list):
+            candidates.extend(entry for entry in item if isinstance(entry, dict))
     if isinstance(outputs.get("diagnostics"), dict):
         candidates.append(outputs["diagnostics"])
     highlights: list[str] = []
     for metrics in candidates:
-        for key in ("RMSE", "MAE", "R2", "R", "NSE", "Bias", "PICP", "MPIW", "target_coverage", "empirical_coverage"):
+        for key in (
+            "RMSE",
+            "MAE",
+            "R2",
+            "R",
+            "NSE",
+            "Bias",
+            "PICP",
+            "MPIW",
+            "target_coverage",
+            "empirical_coverage",
+            "mean_interval_width",
+            "median_interval_width",
+            "interval_width_std",
+            "interval_score",
+            "effective_method",
+            "method",
+        ):
             value = metrics.get(key)
             if isinstance(value, (int, float)):
                 highlights.append(f"{key}={value:.4g}")
@@ -233,6 +252,8 @@ def build_presentation_result(
             if value:
                 data_sources.append(value)
         result_highlights.extend(_metric_highlights(outputs))
+        diagnostics = _as_dict(result.get("diagnostics"))
+        result_highlights.extend(_metric_highlights(diagnostics))
         for key in ("result_dataset", "model_result_id", "feature_count", "row_count", "target", "representative_date", "valid_prediction_pixels"):
             value = _clean_text(outputs.get(key), 100)
             if value:
