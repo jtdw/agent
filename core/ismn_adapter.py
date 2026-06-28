@@ -510,20 +510,53 @@ def profile_ismn_archive(
         }
     try:
         with zipfile.ZipFile(path, "r") as archive:
+            all_stm = _stm_names(archive.namelist())
             selected = _choose_stm_depth_files(archive.namelist())
+            rows: list[dict[str, Any]] = []
+            for name in all_stm:
+                try:
+                    raw = archive.read(name).decode("utf-8", errors="replace")
+                except Exception:
+                    continue
+                rows.extend(_parse_stm_rows(raw, name, year=""))
         if selected:
-            df = ismn_archive_to_observation_dataframe(path, aggregate="none")
-            depths = []
+            df = pd.DataFrame(rows) if rows else _empty_observation_dataframe("none")
             if not df.empty:
-                depth_pairs = df[["depth_m"]].drop_duplicates().to_dict(orient="records") if "depth_m" in df else []
-                depths = [{"depth_from": item.get("depth_m"), "depth_to": item.get("depth_m")} for item in depth_pairs]
+                df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                df = df[df["date"].notna()].copy()
+                df = df.sort_values(["station_id", "depth_from", "date", "time"]).reset_index(drop=True)
+            depths = []
+            station_time_ranges: list[dict[str, Any]] = []
+            if not df.empty:
+                depth_pairs = df[["depth_from", "depth_to"]].drop_duplicates().sort_values(["depth_from", "depth_to"]).to_dict(orient="records") if {"depth_from", "depth_to"}.issubset(df.columns) else []
+                depths = [{"depth_from": item.get("depth_from"), "depth_to": item.get("depth_to")} for item in depth_pairs]
+                if {"station_id", "depth_m", "date_time"}.issubset(df.columns) and not {"depth_from", "depth_to"}.issubset(df.columns):
+                    df = df.copy()
+                    df["depth_from"] = df["depth_m"]
+                    df["depth_to"] = df["depth_m"]
+                if {"station_id", "depth_from", "depth_to", "date_time"}.issubset(df.columns):
+                    grouped = df.groupby(["station_id", "depth_from", "depth_to"], dropna=False)["date_time"]
+                    for key, values in grouped:
+                        station_id, depth_from, depth_to = key
+                        station_time_ranges.append(
+                            {
+                                "station_id": str(station_id),
+                                "depth_from": None if pd.isna(depth_from) else float(depth_from),
+                                "depth_to": None if pd.isna(depth_to) else float(depth_to),
+                                "start": str(values.min()),
+                                "end": str(values.max()),
+                                "row_count": int(values.count()),
+                            }
+                        )
+                    station_time_ranges.sort(key=lambda item: (str(item.get("station_id") or ""), str(item.get("depth_from") or "")))
             profile = {
                 "networks": sorted([str(item) for item in df.get("network", pd.Series(dtype=str)).dropna().unique()]) if not df.empty else [],
                 "stations": sorted([str(item) for item in df.get("station_id", pd.Series(dtype=str)).dropna().unique()]) if not df.empty else [],
                 "station_count": int(df["station_id"].nunique()) if not df.empty and "station_id" in df else 0,
-                "sensor_count": len(selected),
+                "sensor_count": len(all_stm),
                 "variables": ["soil_moisture"],
                 "depths": depths,
+                "station_time_ranges": station_time_ranges,
                 "time_range": {
                     "start": str(df["date_time"].min()) if not df.empty and "date_time" in df else "",
                     "end": str(df["date_time"].max()) if not df.empty and "date_time" in df else "",
