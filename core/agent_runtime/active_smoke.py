@@ -53,11 +53,23 @@ def _continue_current_step(plan, current_step, remaining_steps, execution_trace,
     }
 
 
+def _deterministic_planner_fallback(prompt, context, deterministic_plan, *, client=None, enabled=None):
+    return {
+        "status": "error",
+        "mode": "shadow",
+        "planner_source": "runtime_active:deterministic_fallback_smoke",
+        "reason": "deterministic active smoke forces planner fallback",
+    }
+
+
 @contextmanager
 def _coordinator_patch(mode: str):
     normalized = str(mode or "").strip().lower()
     if normalized == "deterministic":
-        with mock.patch("core.coordinated_executor.build_coordinator_decision", side_effect=_continue_current_step):
+        with mock.patch("core.coordinated_executor.build_coordinator_decision", side_effect=_continue_current_step), mock.patch(
+            "core.agent_runtime.planner.build_shadow_llm_task_plan",
+            side_effect=_deterministic_planner_fallback,
+        ):
             yield
         return
     if normalized == "llm":

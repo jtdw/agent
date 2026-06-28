@@ -236,3 +236,14 @@ def test_service_active_smoke_can_run_opt_in_xgboost_raster_prediction_case(tmp_
     assert "[internal_path]" not in str(presentation)
     assert ":\\\\" not in str(presentation)
     assert case["safe_tool_execution"]["external_download_tools_executed"] == []
+
+
+def test_deterministic_active_smoke_forces_runtime_planner_fallback() -> None:
+    from core.agent_runtime.active_smoke import _coordinator_patch
+    from core.agent_runtime import planner
+
+    with _coordinator_patch("deterministic"):
+        result = planner.build_shadow_llm_task_plan("predict a raster map", {}, {}, enabled=True)
+
+    assert result["status"] == "error"
+    assert result["planner_source"] == "runtime_active:deterministic_fallback_smoke"
