@@ -97,14 +97,53 @@ def _date_from_temporal_text(value: str) -> str:
     return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
+def _date_from_netcdf_time_value(value: Any, units: str) -> str:
+    raw = str(value or "").strip()
+    unit_text = str(units or "").strip()
+    if not raw or not unit_text:
+        return ""
+    match = re.search(r"days\s+since\s+(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}:\d{2})?", unit_text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    base = pd.to_datetime(match.group(1), errors="coerce")
+    if pd.isna(base):
+        return ""
+    try:
+        offset_days = float(raw)
+    except Exception:
+        return ""
+    return (base + pd.to_timedelta(offset_days, unit="D")).strftime("%Y-%m-%d")
+
+
+def _date_from_raster_band(src: Any, raster_name: str, band_index: int) -> str:
+    description = ""
+    try:
+        description = str((src.descriptions or [])[int(band_index) - 1] or "")
+    except Exception:
+        description = ""
+    date_value = _date_from_temporal_text(description)
+    if date_value:
+        return date_value
+    try:
+        band_tags = src.tags(int(band_index))
+        time_value = band_tags.get("NETCDF_DIM_time") or band_tags.get("time")
+        units = src.tags().get("time#units") or band_tags.get("time#units") or ""
+        date_value = _date_from_netcdf_time_value(time_value, units)
+        if date_value:
+            return date_value
+    except Exception:
+        pass
+    return _date_from_temporal_text(raster_name)
+
+
 def _raster_temporal_dates(manager: Any, raster_name: str) -> set[str]:
     dates: set[str] = set()
     try:
         import rasterio
 
         with rasterio.open(manager.get_raster_path(raster_name)) as src:
-            for description in src.descriptions or ():
-                date_value = _date_from_temporal_text(str(description or ""))
+            for band_index in range(1, src.count + 1):
+                date_value = _date_from_raster_band(src, raster_name, band_index)
                 if date_value:
                     dates.add(date_value)
     except Exception:
@@ -122,13 +161,14 @@ def _temporal_raster_names(manager: Any, raster_names: list[str]) -> list[str]:
 
 def _covariate_type_for_raster(raster_name: str) -> str:
     lower = str(raster_name or "").lower()
+    tokens = {token for token in re.split(r"[^a-z0-9]+", lower) if token}
     if "ndvi" in lower:
         return "ndvi"
     if "evi" in lower:
         return "evi"
     if "lst" in lower:
         return "lst_celsius"
-    if "precip" in lower or "rain" in lower:
+    if "precip" in lower or "rain" in lower or tokens.intersection({"prep", "prcp", "rainfall"}):
         return "precipitation_mm"
     return "generic"
 
@@ -266,22 +306,29 @@ def _extract_temporal_station_covariates(
                     tx, ty = transform_coords("EPSG:4326", src.crs, xs[valid_xy].tolist(), ys[valid_xy].tolist())
                     sample_x[valid_xy] = tx
                     sample_y[valid_xy] = ty
-                coords = [(float(x), float(y)) if np.isfinite(x) and np.isfinite(y) else (np.nan, np.nan) for x, y in zip(sample_x, sample_y)]
+                coord_index_by_row = np.full(len(training_df), -1, dtype="int64")
+                coord_lookup: dict[tuple[float, float], int] = {}
+                coords: list[tuple[float, float]] = []
+                for row_index, (x, y) in enumerate(zip(sample_x, sample_y)):
+                    if not valid_xy[row_index] or not np.isfinite(x) or not np.isfinite(y):
+                        continue
+                    coord = (float(x), float(y))
+                    sample_index = coord_lookup.get(coord)
+                    if sample_index is None:
+                        sample_index = len(coords)
+                        coord_lookup[coord] = sample_index
+                        coords.append(coord)
+                    coord_index_by_row[row_index] = sample_index
 
                 band_samples: list[dict[str, Any]] = []
                 for band_index in range(1, src.count + 1):
-                    description = str(src.descriptions[band_index - 1] or "")
-                    band_date_text = _date_from_temporal_text(description) or _date_from_temporal_text(raster_name)
+                    band_date_text = _date_from_raster_band(src, raster_name, band_index)
                     band_date = pd.to_datetime(band_date_text, errors="coerce")
                     if pd.isna(band_date):
                         continue
                     scale, offset = _raster_band_scale_offset(src, band_index)
                     values: list[float] = []
-                    for row_index, coord in enumerate(coords):
-                        if not valid_xy[row_index]:
-                            values.append(float("nan"))
-                            continue
-                        sampled = next(src.sample([coord], indexes=band_index))
+                    for sampled in src.sample(coords, indexes=band_index):
                         value = float(sampled[0]) if len(sampled) else float("nan")
                         if src.nodata is not None and np.isclose(value, float(src.nodata), equal_nan=False):
                             value = float("nan")
@@ -294,8 +341,9 @@ def _extract_temporal_station_covariates(
                     for spec in specs:
                         start_date = obs_date - timedelta(days=int(spec["days_before"]))
                         end_date = obs_date + timedelta(days=int(spec["days_after"]))
+                        sample_index = int(coord_index_by_row[row_index])
                         values = [
-                            float(item["values"][row_index])
+                            float(item["values"][sample_index]) if sample_index >= 0 else float("nan")
                             for item in band_samples
                             if start_date <= item["date"] <= end_date
                         ]
@@ -307,6 +355,7 @@ def _extract_temporal_station_covariates(
                     "covariate_type": _covariate_type_for_raster(raster_name),
                     "fields": [str(spec["field"]) for spec in specs],
                     "band_count": int(len(band_samples)) if "band_samples" in locals() else 0,
+                    "unique_sample_point_count": int(len(coords)) if "coords" in locals() else 0,
                 }
             )
 

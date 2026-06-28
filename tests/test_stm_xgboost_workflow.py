@@ -110,6 +110,28 @@ def _write_daily_multiband_raster(path: Path, *, token: str, base: float, step: 
             dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_{token}")
 
 
+def _write_netcdf_style_daily_raster(path: Path, *, token: str, base: float, step: float, days: int = 16, scale: float = 1.0) -> None:
+    data = np.stack([np.full((10, 10), base + idx * step, dtype="float32") for idx in range(days)])
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=10,
+        width=10,
+        count=days,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(115.53885 - 0.05, 41.55076 + 0.05, 0.01, 0.01),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(data)
+        dst.scales = tuple([scale] * days)
+        dst.offsets = tuple([0.0] * days)
+        dst.update_tags(**{"time#units": "days since 2019-01-01 00:00:00"})
+        for index in range(1, days + 1):
+            dst.update_tags(index, NETCDF_VARNAME=token, NETCDF_DIM_time=str(index - 1), units="mm day-1")
+
+
 def _write_lulc_mask_raster(path: Path) -> None:
     data = np.array([[10, 0]], dtype="uint8")
     with rasterio.open(
@@ -488,6 +510,40 @@ def test_stm_xgboost_workflow_derives_observation_window_temporal_features() -> 
         assert np.isclose(jan4["raster_lst_daily_window_median_7d"], 23.0)
         assert np.isclose(jan4["raster_precip_daily_sum_3d"], 9.0)
         assert np.isclose(jan4["raster_precip_daily_sum_7d"], 10.0)
+
+
+def test_stm_xgboost_workflow_reads_netcdf_time_tags_for_precipitation_windows() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "stations.zip"
+        _write_many_day_station_archive(archive_path)
+        precip_path = service.manager.upload_dir / "china_1km_prep_2019.nc"
+        _write_netcdf_style_daily_raster(precip_path, token="prep", base=100.0, step=100.0, scale=0.01)
+        boundary_name = _put_covering_boundary(service)
+        service.manager.put_raster_path("china_1km_prep_2019", precip_path, meta={"crs": "EPSG:4326"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "china_1km_prep_2019",
+                    "boundary_name": boundary_name,
+                    "output_prefix": "stm_netcdf_precip",
+                    "aggregate": "daily",
+                    "min_samples": 8,
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        assert result["outputs"]["status"] == "modeled"
+        assert "china_1km_prep_2019" in result["outputs"]["temporal_alignment"]["raster_time_ranges"][0]["raster_name"]
+        assert "raster_china_1km_prep_2019_sum_30d" in result["outputs"]["temporal_feature_cols"]
+        features = service.manager.get_vector(result["outputs"]["feature_dataset"]).drop(columns=["geometry"], errors="ignore")
+        jan4 = features.loc[features["date"] == "2019-01-04"].iloc[0]
+        assert np.isclose(jan4["raster_china_1km_prep_2019_sum_3d"], 9.0)
 
 
 def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> None:

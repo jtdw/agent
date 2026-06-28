@@ -283,6 +283,45 @@ def _date_from_temporal_text(value: str) -> str:
     return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
 
 
+def _date_from_netcdf_time_value(value: Any, units: str) -> str:
+    raw = str(value or "").strip()
+    unit_text = str(units or "").strip()
+    if not raw or not unit_text:
+        return ""
+    match = re.search(r"days\s+since\s+(\d{4}-\d{2}-\d{2})(?:[ T]\d{2}:\d{2}:\d{2})?", unit_text, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    base = pd.to_datetime(match.group(1), errors="coerce")
+    if pd.isna(base):
+        return ""
+    try:
+        offset_days = float(raw)
+    except Exception:
+        return ""
+    return (base + pd.to_timedelta(offset_days, unit="D")).strftime("%Y-%m-%d")
+
+
+def _date_from_raster_band(src: Any, raster_name: str, band_index: int) -> str:
+    description = ""
+    try:
+        description = str((src.descriptions or [])[int(band_index) - 1] or "")
+    except Exception:
+        description = ""
+    date_value = _date_from_temporal_text(description)
+    if date_value:
+        return date_value
+    try:
+        band_tags = src.tags(int(band_index))
+        time_value = band_tags.get("NETCDF_DIM_time") or band_tags.get("time")
+        units = src.tags().get("time#units") or band_tags.get("time#units") or ""
+        date_value = _date_from_netcdf_time_value(time_value, units)
+        if date_value:
+            return date_value
+    except Exception:
+        pass
+    return _date_from_temporal_text(raster_name)
+
+
 def _parse_optional_iso_date(value: str) -> Any:
     text = str(value or "").strip()
     if not text:
@@ -296,8 +335,8 @@ def _parse_optional_iso_date(value: str) -> Any:
 def _date_set_from_raster(path: Any, raster_name: str) -> set[str]:
     dates: set[str] = set()
     with rasterio.open(path) as src:
-        for description in src.descriptions or ():
-            date_value = _date_from_temporal_text(str(description or ""))
+        for band_index in range(1, src.count + 1):
+            date_value = _date_from_raster_band(src, raster_name, band_index)
             if date_value:
                 dates.add(date_value)
     if not dates:
@@ -746,8 +785,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                     band_indexes: list[int] = []
                     band_dates: dict[int, str] = {}
                     for candidate_index in candidate_band_indexes:
-                        description = str(src.descriptions[candidate_index - 1] or "")
-                        band_date = _date_from_temporal_text(description) or _date_from_temporal_text(raster_name)
+                        band_date = _date_from_raster_band(src, raster_name, candidate_index)
                         band_dates[candidate_index] = band_date
                         if start_filter or end_filter:
                             parsed_band_date = _parse_optional_iso_date(band_date)
