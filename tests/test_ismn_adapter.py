@@ -6,7 +6,12 @@ from tempfile import TemporaryDirectory
 
 from core.config import Settings
 from core.data_manager import DataManager
-from core.ismn_adapter import list_ismn_archives, profile_ismn_archive
+from core.ismn_adapter import (
+    import_ismn_soil_moisture_archive,
+    ismn_archive_to_observation_dataframe,
+    list_ismn_archives,
+    profile_ismn_archive,
+)
 
 
 class FakeISMNInterface:
@@ -169,3 +174,44 @@ def test_profile_local_stm_archive_reports_all_available_depths() -> None:
         assert profile["sensor_count"] == 2
         assert profile["time_range"] == {"start": "2018-07-25 00:00", "end": "2019-01-01 00:00"}
         assert [item["depth_from"] for item in profile["station_time_ranges"]] == [0.05, 0.2]
+
+
+def test_stm_archive_observation_reader_filters_station_depth_and_dates() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        archive_path = Path(tmp) / "official_ismn.zip"
+        _write_stm_zip_with_multiple_depths(archive_path)
+
+        df = ismn_archive_to_observation_dataframe(
+            archive_path,
+            aggregate="none",
+            station="ST_A",
+            depth_from=0.2,
+            depth_to=0.2,
+            start_date="2019-01-01",
+            end_date="2019-12-31",
+        )
+
+        assert len(df) == 1
+        assert df.iloc[0]["station_id"] == "ST_A"
+        assert df.iloc[0]["depth_m"] == 0.2
+        assert df.iloc[0]["date"] == "2019-01-01"
+        assert df.iloc[0]["soil_moisture"] == 0.28
+
+
+def test_import_ismn_archive_reports_no_rows_for_unmatched_filters() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        manager = DataManager(Path(tmp) / "workspace")
+        archive_path = Path(tmp) / "official_ismn.zip"
+        _write_stm_zip_with_mixed_station_dates(archive_path)
+
+        result = import_ismn_soil_moisture_archive(
+            manager,
+            archive_path,
+            station="ST_A",
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+        )
+
+        assert result["ok"] is False
+        assert result["error_code"] == "ISMN_NO_ROWS_MATCH_FILTERS"
+        assert "available_time_range" in result["diagnostics"]

@@ -87,8 +87,35 @@ def _safe_float(value: str | None) -> float | None:
     return parsed
 
 
+def _filter_values(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        raw = value
+    else:
+        raw = str(value or "").split(",")
+    return {str(item).strip().lower() for item in raw if str(item or "").strip()}
+
+
+def _safe_date(value: Any) -> pd.Timestamp | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    parsed = pd.to_datetime(text, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed
+
+
 def _stm_names(names: list[str]) -> list[str]:
     return [name for name in names if name.lower().endswith(".stm") and "/" in name]
+
+
+def _depth_from_name(name: str) -> tuple[float | None, float | None]:
+    match = re.search(r"_sm_([0-9.]+)_([0-9.]+)_", name)
+    if not match:
+        return (None, None)
+    return (_safe_float(match.group(1)), _safe_float(match.group(2)))
 
 
 def _choose_stm_depth_files(names: list[str], preferred_depth: str = "0.050000") -> list[str]:
@@ -108,6 +135,28 @@ def _choose_stm_depth_files(names: list[str], preferred_depth: str = "0.050000")
     stm.sort(key=depth_key)
     first_depth = depth_key(stm[0])[0]
     return [name for name in stm if abs(depth_key(name)[0] - first_depth) < 1e-9]
+
+
+def _choose_stm_files(
+    names: list[str],
+    *,
+    preferred_depth: str = "0.050000",
+    depth_from: float | None = None,
+    depth_to: float | None = None,
+) -> list[str]:
+    if depth_from is None and depth_to is None:
+        return _choose_stm_depth_files(names, preferred_depth=preferred_depth)
+    selected: list[str] = []
+    for name in _stm_names(names):
+        file_from, file_to = _depth_from_name(name)
+        if file_from is None or file_to is None:
+            continue
+        if depth_from is not None and abs(file_from - float(depth_from)) > 1e-9:
+            continue
+        if depth_to is not None and abs(file_to - float(depth_to)) > 1e-9:
+            continue
+        selected.append(name)
+    return sorted(selected)
 
 
 def _parse_stm_rows(raw: str, source_file: str, *, year: str = "") -> list[dict[str, Any]]:
@@ -186,6 +235,12 @@ def ismn_archive_to_observation_dataframe(
     preferred_depth: str = "0.050000",
     year: str = "2019",
     aggregate: str = "daily",
+    network: str = "",
+    station: str = "",
+    depth_from: float | None = None,
+    depth_to: float | None = None,
+    start_date: str = "",
+    end_date: str = "",
 ) -> pd.DataFrame:
     """Read local ISMN-style STM observations into a modeling table.
 
@@ -202,7 +257,7 @@ def ismn_archive_to_observation_dataframe(
 
     rows: list[dict[str, Any]] = []
     with zipfile.ZipFile(path, "r") as archive:
-        for name in _choose_stm_depth_files(archive.namelist(), preferred_depth=preferred_depth):
+        for name in _choose_stm_files(archive.namelist(), preferred_depth=preferred_depth, depth_from=depth_from, depth_to=depth_to):
             try:
                 raw = archive.read(name).decode("utf-8", errors="replace")
             except Exception:
@@ -212,8 +267,38 @@ def ismn_archive_to_observation_dataframe(
         return _empty_observation_dataframe(mode)
 
     df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df = df[df["date"].notna()].copy()
+    date_values = pd.to_datetime(df["date"], errors="coerce")
+    df = df[date_values.notna()].copy()
+    date_values = date_values.loc[df.index]
+    network_values = _filter_values(network)
+    if network_values and "network" in df.columns:
+        df = df[df["network"].astype(str).str.lower().isin(network_values)].copy()
+        date_values = date_values.loc[df.index]
+    station_values = _filter_values(station)
+    if station_values:
+        station_mask = pd.Series(False, index=df.index)
+        for column in ("station_id", "station"):
+            if column in df.columns:
+                station_mask = station_mask | df[column].astype(str).str.lower().isin(station_values)
+        df = df[station_mask].copy()
+        date_values = date_values.loc[df.index]
+    if depth_from is not None and "depth_from" in df.columns:
+        df = df[(pd.to_numeric(df["depth_from"], errors="coerce") - float(depth_from)).abs() <= 1e-9].copy()
+        date_values = date_values.loc[df.index]
+    if depth_to is not None and "depth_to" in df.columns:
+        df = df[(pd.to_numeric(df["depth_to"], errors="coerce") - float(depth_to)).abs() <= 1e-9].copy()
+        date_values = date_values.loc[df.index]
+    start = _safe_date(start_date)
+    if start is not None:
+        df = df[date_values >= start].copy()
+        date_values = date_values.loc[df.index]
+    end = _safe_date(end_date)
+    if end is not None:
+        df = df[date_values <= end].copy()
+        date_values = date_values.loc[df.index]
+    if df.empty:
+        return _empty_observation_dataframe(mode)
+    df["date"] = date_values.dt.strftime("%Y-%m-%d")
     df = df.sort_values(["station_id", "date", "time"]).reset_index(drop=True)
     if mode in {"none", "hourly", "raw"}:
         return df[["network", "station_id", "station", "lon", "lat", "elevation_m", "depth_m", "date", "time", "date_time", "soil_moisture", "source_file"]]
@@ -601,7 +686,7 @@ def import_ismn_soil_moisture_archive(
     profile = profile_ismn_archive(archive_path, interface_factory=interface_factory)
     if not profile.get("ok"):
         return profile
-    aggregate = str(filters.get("aggregate") or "daily")
+    aggregate = str(filters.get("aggregation") or filters.get("aggregate") or "daily")
     preferred_depth = str(filters.get("preferred_depth") or filters.get("depth") or "0.050000")
     year = str(filters.get("year") or "")
     try:
@@ -610,19 +695,61 @@ def import_ismn_soil_moisture_archive(
             preferred_depth=preferred_depth,
             year=year,
             aggregate=aggregate,
+            network=str(filters.get("network") or ""),
+            station=str(filters.get("station") or ""),
+            depth_from=filters.get("depth_from"),
+            depth_to=filters.get("depth_to"),
+            start_date=str(filters.get("start_date") or ""),
+            end_date=str(filters.get("end_date") or ""),
         )
     except Exception:
         df = pd.DataFrame(columns=["network", "station", "date_time", "soil_moisture", "lon", "lat"])
-    dataset_name = manager.put_table(output_name, df)
     target_col = "soil_moisture_mean" if aggregate.strip().lower() == "daily" else "soil_moisture"
+    if df.empty:
+        profile_data = profile.get("profile", {}) if isinstance(profile.get("profile"), dict) else {}
+        return {
+            "ok": False,
+            "error_code": "ISMN_NO_ROWS_MATCH_FILTERS",
+            "user_message": "No ISMN soil-moisture rows matched the requested station, depth, or time filters.",
+            "next_actions": [
+                "Use profile_ismn_archive to inspect available station, depth, and time ranges.",
+                "Choose a station/depth/time range that overlaps the archive's actual observations.",
+            ],
+            "diagnostics": {
+                "requested_filters": {
+                    "network": str(filters.get("network") or ""),
+                    "station": str(filters.get("station") or ""),
+                    "depth_from": filters.get("depth_from"),
+                    "depth_to": filters.get("depth_to"),
+                    "start_date": str(filters.get("start_date") or ""),
+                    "end_date": str(filters.get("end_date") or ""),
+                    "aggregation": aggregate,
+                    "preferred_depth": preferred_depth,
+                },
+                "available_time_range": profile_data.get("time_range", {}),
+                "available_depths": profile_data.get("depths", []),
+                "station_time_ranges": profile_data.get("station_time_ranges", [])[:50],
+            },
+        }
+    dataset_name = manager.put_table(output_name, df)
+    actual_time_col = "date_time" if "date_time" in df.columns else "date"
+    actual_start = str(df[actual_time_col].min()) if actual_time_col in df.columns and not df.empty else ""
+    actual_end = str(df[actual_time_col].max()) if actual_time_col in df.columns and not df.empty else ""
     card = build_data_semantic_card(
         dataset_name=dataset_name,
         source_kind="ismn_archive",
         scientific_roles=["soil_moisture_observation", "model_target_candidate", "gcp_calibration_candidate"],
         variables=[{"name": target_col, "standard_name": "soil_moisture", "unit": "m3/m3", "role": "target"}],
         spatial={"has_coordinates": True, "lon_col": "lon", "lat_col": "lat", "crs": "EPSG:4326"},
-        temporal={"has_time": True, "time_col": "date_time" if "date_time" in df.columns else "date"},
-        quality={"policy": str(filters.get("quality_policy") or "good_or_usable_only")},
+        temporal={"has_time": True, "time_col": actual_time_col, "actual_start": actual_start, "actual_end": actual_end},
+        quality={"policy": str(filters.get("quality_policy") or "good_or_usable_only"), "filters": {
+            "network": str(filters.get("network") or ""),
+            "station": str(filters.get("station") or ""),
+            "depth_from": filters.get("depth_from"),
+            "depth_to": filters.get("depth_to"),
+            "start_date": str(filters.get("start_date") or ""),
+            "end_date": str(filters.get("end_date") or ""),
+        }},
         modeling={"can_train_xgboost": True, "can_calibrate_gcp": True, "recommended_target": target_col},
         row_count=int(len(df)),
         lineage={"created_by_tool": "import_ismn_soil_moisture_archive"},
@@ -638,5 +765,7 @@ def import_ismn_soil_moisture_archive(
         "target_col": target_col,
         "semantic_card": safe_card,
         "profile": profile.get("profile", {}),
+        "filters": safe_card.get("quality", {}).get("filters", {}),
+        "actual_time_range": {"start": actual_start, "end": actual_end},
         "warnings": warnings,
     }
