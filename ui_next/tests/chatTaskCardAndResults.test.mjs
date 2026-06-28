@@ -37,6 +37,10 @@ assert.match(taskCard, /下一步建议/, 'ResultGroups must render canonical ne
 assert.match(renderer, /interaction_type/, 'ChatMessageRenderer must consume explicit backend interaction_type metadata');
 assert.match(taskCard, /function ResultGroups/, 'Task card boundary must group canonical PresentationResult artifacts through ResultGroups');
 assert.match(taskCard, /推荐查看/, 'ResultGroups must include the recommended group');
+assert.match(taskCard, /id:\s*['"]maps['"]/, 'ResultGroups must include a dedicated maps/prediction artifact group');
+assert.match(taskCard, /result-group-map-layers/, 'ResultGroups must expose map_layer_refs through a stable map-layer test id');
+assert.match(taskCard, /isMapPredictionArtifact/, 'ResultGroups must classify map-ready prediction rasters before generic data artifacts');
+assert.match(taskCard, /map_ready|prediction|raster|geotiff|tif/i, 'ResultGroups must recognize STM prediction/map raster artifacts');
 assert.match(taskCard, /数据结果/, 'ResultGroups must include the data group');
 assert.match(taskCard, /图像预览/, 'ResultGroups must include the image preview group');
 assert.match(taskCard, /模型与报告/, 'ResultGroups must include the model/report group');

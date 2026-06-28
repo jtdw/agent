@@ -398,15 +398,34 @@ function presentationArtifacts(result: PresentationResult) {
   ];
 }
 
+function isMapPredictionArtifact(artifact: ChatArtifact) {
+  const storageHint = [artifact.filename, artifact.type, artifact.kind].join(' ');
+  const searchable = [
+    artifact.artifact_id,
+    artifact.filename,
+    artifact.name,
+    artifact.title,
+    artifact.type,
+    artifact.kind,
+  ].join(' ');
+  if (/image|plot|png|jpg|jpeg|webp|json|report|metrics|pdf|md/i.test(storageHint) && !/map_ready|raster|geotiff|\btif\b|\.tif\b|\.tiff\b/i.test(searchable)) {
+    return false;
+  }
+  return /map_ready|raster|geotiff|\btif\b|\.tif\b|\.tiff\b/i.test(searchable) || (/prediction/i.test(searchable) && /map|layer/i.test(searchable));
+}
+
 function groupPresentationArtifacts(result: PresentationResult) {
   const artifacts = presentationArtifacts(result);
   const imageIds = new Set((result.image_refs || []).map((item) => item.artifact_id));
-  const modelOrReport = artifacts.filter((artifact) => /model|report|metrics|pdf|md|json/i.test(`${artifact.type || ''} ${artifact.title || ''}`));
+  const maps = artifacts.filter((artifact) => isMapPredictionArtifact(artifact));
+  const mapIds = new Set(maps.map((artifact) => artifact.artifact_id));
+  const modelOrReport = artifacts.filter((artifact) => !mapIds.has(artifact.artifact_id) && /model|report|metrics|pdf|md|json/i.test(`${artifact.type || ''} ${artifact.title || ''}`));
   const images = artifacts.filter((artifact) => imageIds.has(artifact.artifact_id) || /image|plot|png|jpg|jpeg|webp/i.test(`${artifact.type || ''} ${artifact.title || ''}`));
-  const data = artifacts.filter((artifact) => !modelOrReport.some((item) => item.artifact_id === artifact.artifact_id) && !images.some((item) => item.artifact_id === artifact.artifact_id));
+  const data = artifacts.filter((artifact) => !mapIds.has(artifact.artifact_id) && !modelOrReport.some((item) => item.artifact_id === artifact.artifact_id) && !images.some((item) => item.artifact_id === artifact.artifact_id));
   const recommended = artifacts.slice(0, 5);
   return [
     { id: 'recommended', title: '推荐查看', icon: ListChecks, artifacts: recommended },
+    { id: 'maps', title: '预测地图', icon: Layers, artifacts: maps },
     { id: 'data', title: '数据结果', icon: Database, artifacts: data },
     { id: 'images', title: '图像预览', icon: ImageIcon, artifacts: images },
     { id: 'models', title: '模型与报告', icon: FileBarChart, artifacts: modelOrReport },
@@ -476,7 +495,7 @@ export function ResultGroups({
         );
       })}
       {Boolean(result.map_layer_refs?.length) && (
-        <div className="rounded-2xl border border-slate-200/75 bg-white/78 p-3 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950/35 dark:text-slate-300">
+        <div data-testid="result-group-map-layers" className="rounded-2xl border border-slate-200/75 bg-white/78 p-3 text-xs leading-5 text-slate-600 dark:border-slate-800 dark:bg-slate-950/35 dark:text-slate-300">
           <div className="mb-1 flex items-center gap-2 font-black"><Layers size={14} />地图图层</div>
           {result.map_layer_refs?.slice(0, showAll ? 20 : 5).map((layer) => <div key={layer.layer_id}>{layer.name || layer.layer_id}</div>)}
         </div>
