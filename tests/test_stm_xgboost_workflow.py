@@ -49,6 +49,26 @@ def _write_covering_raster(path: Path) -> None:
         dst.write(data, 1)
 
 
+def _write_temporal_covering_raster(path: Path) -> None:
+    band_dates = [date(2019, 1, 4) + timedelta(days=idx) for idx in range(10)]
+    data = np.stack([np.full((10, 10), 0.2 + idx * 0.01, dtype="float32") for idx in range(len(band_dates))])
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=10,
+        width=10,
+        count=len(band_dates),
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(115.53885 - 0.05, 41.55076 + 0.05, 0.01, 0.01),
+        nodata=-9999.0,
+    ) as dst:
+        dst.write(data)
+        for index, current in enumerate(band_dates, start=1):
+            dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_NDVI")
+
+
 def _service(tmp: str) -> GISWorkspaceService:
     return GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
 
@@ -127,6 +147,53 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
             "batch_register_points_to_rasters",
             "engineer_aspect_circular_features",
             "generic_xgboost_workflow",
+        ]
+
+
+def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "stations.zip"
+        _write_many_day_station_archive(archive_path)
+        raster_path = service.manager.upload_dir / "ndvi_daily.tif"
+        _write_temporal_covering_raster(raster_path)
+        service.manager.put_raster_path("ndvi_daily", raster_path, meta={"crs": "EPSG:4326"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "ndvi_daily",
+                    "output_prefix": "stm_temporal",
+                    "aggregate": "daily",
+                    "min_samples": 3,
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        assert result["outputs"]["status"] == "modeled"
+        assert result["outputs"]["training_dataset"] == "stm_temporal_aligned_training"
+        assert result["outputs"]["temporal_alignment"]["selected_time_range"] == {"start": "2019-01-04", "end": "2019-01-13"}
+        aligned = service.manager.get_table("stm_temporal_aligned_training")
+        assert aligned["date"].tolist() == [
+            "2019-01-04",
+            "2019-01-05",
+            "2019-01-06",
+            "2019-01-07",
+            "2019-01-08",
+            "2019-01-09",
+            "2019-01-10",
+            "2019-01-11",
+            "2019-01-12",
+            "2019-01-13",
+        ]
+        assert [step["tool_name"] for step in result["outputs"]["steps"]][:3] == [
+            "convert_stm_station_archive_to_training_table",
+            "align_station_raster_time_window",
+            "table_to_points",
         ]
 
 

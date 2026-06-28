@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,36 @@ def _as_bool(value: Any) -> bool:
     if normalized in {"0", "false", "no", "off", "disabled"}:
         return False
     return True
+
+
+def _date_from_temporal_text(value: str) -> str:
+    match = re.search(r"((?:19|20)\d{2})[_-]?(\d{2})[_-]?(\d{2})", str(value or ""))
+    if not match:
+        return ""
+    return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+
+
+def _raster_temporal_dates(manager: Any, raster_name: str) -> set[str]:
+    dates: set[str] = set()
+    try:
+        import rasterio
+
+        with rasterio.open(manager.get_raster_path(raster_name)) as src:
+            for description in src.descriptions or ():
+                date_value = _date_from_temporal_text(str(description or ""))
+                if date_value:
+                    dates.add(date_value)
+    except Exception:
+        return dates
+    if not dates:
+        date_value = _date_from_temporal_text(raster_name)
+        if date_value:
+            dates.add(date_value)
+    return dates
+
+
+def _temporal_raster_names(manager: Any, raster_names: list[str]) -> list[str]:
+    return [name for name in raster_names if _raster_temporal_dates(manager, name)]
 
 
 def resolve_default_station_archive(manager: Any) -> Path | None:
@@ -248,6 +279,53 @@ def run_stm_soil_moisture_xgboost_workflow(
             diagnostics={"minimum_samples": min_samples},
             next_actions=["Use a wider year range, hourly aggregate mode, or additional station data."],
         ).to_dict()
+
+    temporal_rasters = _temporal_raster_names(manager, rasters)
+    temporal_alignment: dict[str, Any] = {}
+    if temporal_rasters:
+        align_args = {
+            "station_dataset": training_dataset,
+            "raster_names": ",".join(temporal_rasters),
+            "output_name": f"{prefix}_aligned_training",
+            "date_col": "date",
+            "station_col": "station_id",
+            "min_observations_per_station": 1,
+        }
+        align_result = _invoke(tool_map, "align_station_raster_time_window", align_args)
+        steps.append(_step("align_station_raster_time_window", align_args, align_result))
+        artifacts.extend([item for item in align_result.get("artifacts", []) if isinstance(item, dict)])
+        if not align_result.get("ok"):
+            return tool_result_error(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs=align_args,
+                error_code=str(align_result.get("error_code") or "TEMPORAL_ALIGNMENT_FAILED"),
+                error_title="STM workflow failed",
+                user_message=str(align_result.get("user_message") or "Failed to align station observations with temporal raster bands."),
+                diagnostics={"steps": steps, "temporal_rasters": temporal_rasters},
+                next_actions=[str(item) for item in align_result.get("next_actions", []) if str(item).strip()],
+            ).to_dict()
+        temporal_alignment = dict(align_result.get("outputs") or {})
+        training_dataset = str(temporal_alignment.get("result_dataset") or training_dataset)
+        row_count = int(temporal_alignment.get("row_count") or row_count)
+        if row_count < int(min_samples):
+            return tool_result_ok(
+                "run_stm_soil_moisture_xgboost_workflow",
+                inputs={"archive_path": archive_path, "raster_names": ",".join(rasters), "output_prefix": output_prefix},
+                outputs={
+                    "status": "needs_more_samples_after_temporal_alignment",
+                    "source_archive": archive_path,
+                    "training_dataset": training_dataset,
+                    "target_col": target_col,
+                    "row_count": row_count,
+                    "raster_features": rasters,
+                    "temporal_alignment": temporal_alignment,
+                    "steps": steps,
+                },
+                artifacts=artifacts,
+                summary="Station-raster temporal alignment succeeded, but too few aligned samples remain for XGBoost.",
+                diagnostics={"minimum_samples": min_samples, "temporal_rasters": temporal_rasters},
+                next_actions=["Use a wider overlapping date range, more station observations, or additional temporal rasters."],
+            ).to_dict()
 
     feature_rasters = list(rasters)
     for raster_name in list(rasters):
@@ -436,6 +514,7 @@ def run_stm_soil_moisture_xgboost_workflow(
             "model_feature_cols": model_feature_cols,
             "raster_features": feature_rasters,
             "row_count": row_count,
+            "temporal_alignment": temporal_alignment,
             "model_result": xgb_result,
             "steps": steps,
         },
