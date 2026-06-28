@@ -97,9 +97,15 @@ def _resolve_model_path(manager: DataManager, model_path: str) -> Path:
     if not str(model_path or "").strip():
         raise ValueError("model_path is required")
     raw = Path(str(model_path).strip())
-    candidate = raw if raw.is_absolute() else manager.workdir / raw
-    resolved = candidate.resolve(strict=False)
     workdir = manager.workdir.resolve()
+    if raw.is_absolute():
+        resolved = raw.resolve(strict=False)
+    else:
+        cwd_candidate = (Path.cwd() / raw).resolve(strict=False)
+        if cwd_candidate.exists():
+            resolved = cwd_candidate
+        else:
+            resolved = (manager.workdir / raw).resolve(strict=False)
     if not (resolved == workdir or resolved.is_relative_to(workdir)):
         raise PermissionError("model_path must be inside the current workspace")
     if not resolved.exists() or not resolved.is_file():

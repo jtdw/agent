@@ -115,6 +115,43 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
                 self.assertEqual(float(arr[0, 3]), -9999.0)
                 self.assertGreater(float(arr[0, 0]), 0.0)
 
+    def test_predict_xgboost_raster_map_accepts_registered_relative_model_artifact_path(self) -> None:
+        outputs_dir = Path.cwd() / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=outputs_dir, ignore_cleanup_errors=True) as tmp:
+            relative_root = Path(tmp).resolve().relative_to(Path.cwd().resolve())
+            settings = Settings(api_key="", workdir=relative_root / "workspace")
+            settings.ensure_dirs()
+            service = GISWorkspaceService(settings)
+            service.set_request_context(user_id="relative_model_user", create_if_missing=True)
+            self.write_raster(service, "dem", np.arange(1, 17, dtype="float32").reshape(4, 4))
+            self.write_raster(service, "lst", np.full((4, 4), 12.0, dtype="float32"))
+            self.write_raster(service, "ndvi", np.full((4, 4), 0.35, dtype="float32"))
+            basin = gpd.GeoDataFrame({"name": ["basin"], "geometry": [box(0, 0, 2, 4)]}, crs="EPSG:4326")
+            service.manager.put_vector("basin", basin)
+            model_path = self.write_model(service.manager.derived_dir / "relative_soil_model.joblib")
+            model_artifact = service.manager.register_artifact(
+                path=str(model_path),
+                type="model",
+                title="relative_soil_model.joblib",
+                source_tool="test",
+            )
+            tools = {tool.name: tool for tool in build_tools(service.manager)}
+
+            raw = tools["predict_xgboost_raster_map"].invoke(
+                {
+                    "model_path": str(model_artifact["path"]),
+                    "feature_rasters": "dem_elevation=dem,lst_value=lst,ndvi_value=ndvi",
+                    "boundary_name": "basin",
+                    "output_name": "relative_soil_prediction",
+                    "representative_date": "2019-07-15",
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertEqual(result["status"], "succeeded", result)
+            self.assertTrue(any(artifact["type"] == "raster" for artifact in result["artifacts"]))
+
     def test_predict_xgboost_raster_map_casts_categorical_raster_values_to_training_labels(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))

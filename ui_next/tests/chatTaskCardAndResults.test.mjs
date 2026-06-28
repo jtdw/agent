@@ -41,6 +41,8 @@ assert.match(taskCard, /id:\s*['"]maps['"]/, 'ResultGroups must include a dedica
 assert.match(taskCard, /result-group-map-layers/, 'ResultGroups must expose map_layer_refs through a stable map-layer test id');
 assert.match(taskCard, /isMapPredictionArtifact/, 'ResultGroups must classify map-ready prediction rasters before generic data artifacts');
 assert.match(taskCard, /map_ready|prediction|raster|geotiff|tif/i, 'ResultGroups must recognize STM prediction/map raster artifacts');
+assert.match(taskCard, /storageHint = \[artifact\.filename, artifact\.name, artifact\.title/, 'Map artifact classification must inspect titles before treating prediction summaries as rasters');
+assert.match(taskCard, /summary\|json/, 'Map artifact classification must keep summary JSON artifacts out of the prediction map group');
 assert.match(taskCard, /数据结果/, 'ResultGroups must include the data group');
 assert.match(taskCard, /图像预览/, 'ResultGroups must include the image preview group');
 assert.match(taskCard, /模型与报告/, 'ResultGroups must include the model/report group');

@@ -399,7 +399,8 @@ function presentationArtifacts(result: PresentationResult) {
 }
 
 function isMapPredictionArtifact(artifact: ChatArtifact) {
-  const storageHint = [artifact.filename, artifact.type, artifact.kind].join(' ');
+  const storageHint = [artifact.filename, artifact.name, artifact.title, artifact.type, artifact.kind].join(' ');
+  const rasterTypeHint = [artifact.type, artifact.kind].join(' ');
   const searchable = [
     artifact.artifact_id,
     artifact.filename,
@@ -408,7 +409,7 @@ function isMapPredictionArtifact(artifact: ChatArtifact) {
     artifact.type,
     artifact.kind,
   ].join(' ');
-  if (/image|plot|png|jpg|jpeg|webp|json|report|metrics|pdf|md/i.test(storageHint) && !/map_ready|raster|geotiff|\btif\b|\.tif\b|\.tiff\b/i.test(searchable)) {
+  if (/image|plot|png|jpg|jpeg|webp|summary|json|report|metrics|pdf|md/i.test(storageHint) && !/map_ready|raster|geotiff|\btif\b|\.tif\b|\.tiff\b/i.test(rasterTypeHint)) {
     return false;
   }
   return /map_ready|raster|geotiff|\btif\b|\.tif\b|\.tiff\b/i.test(searchable) || (/prediction/i.test(searchable) && /map|layer/i.test(searchable));
