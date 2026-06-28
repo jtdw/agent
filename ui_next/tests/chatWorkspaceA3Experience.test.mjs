@@ -66,9 +66,10 @@ assert.match(rail, /实时过程流/, 'TaskSummaryRail subtitle should be Chines
 assert.doesNotMatch(rail, /Live process rail/, 'TaskSummaryRail should not show English rail subtitles');
 assert.match(harness, /GIS 智能体视觉验收/, 'Visual harness title should be Chinese');
 assert.doesNotMatch(harness, /GIS Agent Visual Harness/, 'Visual harness should not expose English title copy');
-assert.match(harness, /边界校验预览/, 'Visual harness map layer fixture should be Chinese');
-assert.match(harness, /查看边界检查报告/, 'Visual harness next action should be Chinese');
-assert.match(harness, /添加校验预览图层/, 'Visual harness map action should be Chinese');
+assert.match(harness, /STM XGBoost 全流域预测图/, 'Visual harness should use the prediction-map task fixture');
+assert.match(harness, /xgboost_raster_prediction/, 'Visual harness should expose the prediction raster fixture');
+assert.match(harness, /打开预测地图图层/, 'Visual harness next action should stay Chinese');
+assert.match(harness, /下载 GeoTIFF 与 summary JSON/, 'Visual harness download action should stay Chinese');
 
 const messages = [
   { id: 'u1', role: 'user', content: '执行分析' },

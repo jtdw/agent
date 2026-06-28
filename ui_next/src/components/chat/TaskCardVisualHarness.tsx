@@ -3,59 +3,91 @@ import { TaskSummaryRail } from './TaskSummaryRail';
 import { buildChatTaskSummary } from './chatWorkspaceModel';
 import type { ChatMessage, PresentationResult } from '@/lib/api';
 
+const harnessResult: PresentationResult = {
+  status: 'succeeded',
+  concise_summary: '已完成 XGBoost 土壤水分全流域预测，并生成预测栅格、PNG 预览、summary JSON 和地图图层。',
+  executed_steps: [
+    {
+      step_id: 'predict_raster_map',
+      tool_name: 'predict_xgboost_raster_map',
+      status: 'succeeded'
+    }
+  ],
+  result_highlights: [
+    'result_dataset=xgboost_raster_prediction',
+    'target=soil_moisture_mean',
+    'representative_date=2019-07-15',
+    'valid_prediction_pixels=49'
+  ],
+  artifact_refs: [
+    {
+      artifact_id: 'artifact_prediction_raster',
+      title: 'xgboost_raster_prediction.tif',
+      type: 'raster',
+      source_step_id: 'predict_raster_map',
+      source_tool: 'predict_xgboost_raster_map'
+    },
+    {
+      artifact_id: 'artifact_prediction_preview',
+      title: 'xgboost_raster_prediction.png',
+      type: 'png',
+      source_step_id: 'predict_raster_map',
+      source_tool: 'predict_xgboost_raster_map'
+    },
+    {
+      artifact_id: 'artifact_prediction_summary',
+      title: 'xgboost_raster_prediction_summary.json',
+      type: 'summary',
+      source_step_id: 'predict_raster_map',
+      source_tool: 'predict_xgboost_raster_map'
+    }
+  ],
+  map_layer_refs: [
+    {
+      layer_id: 'dataset_xgboost_raster_prediction',
+      name: 'xgboost_raster_prediction',
+      source_step_id: 'predict_raster_map',
+      source_tool: 'predict_xgboost_raster_map'
+    }
+  ],
+  image_refs: [
+    {
+      artifact_id: 'artifact_prediction_preview',
+      title: 'xgboost_raster_prediction.png',
+      source_step_id: 'predict_raster_map',
+      source_tool: 'predict_xgboost_raster_map'
+    }
+  ],
+  next_action_suggestions: ['打开预测地图图层', '下载 GeoTIFF 与 summary JSON']
+};
+
 const harnessMessage: ChatMessage = {
   id: 'task_harness_running_message',
   role: 'assistant',
   content: '',
   meta: {
     task_id: 'task_harness_running',
-    status: 'running',
-    progress: 46,
-    phase: 'validate',
-    current_step: '正在校验上传边界与目标栅格范围',
+    status: 'succeeded',
+    progress: 100,
+    phase: 'presentation',
+    current_step: '已生成 XGBoost 预测地图与可下载成果',
     realtime_sync: 'live',
     interaction_type: 'tool_task',
     task_card: {
       task_id: 'task_harness_running',
-      title: '工作区数据检查与建模准备',
-      current_step: '正在校验上传边界与目标栅格范围'
+      title: 'STM XGBoost 全流域预测图',
+      current_step: '已生成 XGBoost 预测地图与可下载成果'
     },
     execution_summary: {
-      summary: '读取当前工作区上下文，校验输入数据，再准备工具调用与成果注册。'
+      summary: '已完成预测制图，前端应把 GeoTIFF、PNG、summary JSON 和地图图层分组展示。'
     },
-    presentation_result: {
-      artifact_refs: [
-        { artifact_id: 'artifact_harness_report', title: '边界检查报告.md', type: 'document' },
-        { artifact_id: 'artifact_harness_grid', title: '目标栅格预览.tif', type: 'raster' }
-      ],
-      map_layer_refs: [
-        { layer_id: 'layer_harness_boundary', name: '边界校验预览' }
-      ],
-      next_action_suggestions: [
-        '查看边界检查报告',
-        '添加校验预览图层'
-      ]
-    },
+    presentation_result: harnessResult,
     management_view: {
-      status: 'running',
-      user_message: '正在检查字段、坐标系和空间范围。',
-      available_actions: ['cancel']
+      status: 'succeeded',
+      user_message: '预测地图、预览图和模型报告已注册到当前会话。',
+      available_actions: ['view_artifacts', 'add_to_map']
     }
   }
-};
-
-const harnessResult: PresentationResult = {
-  status: 'running',
-  concise_summary: '智能体正在确认数据结构、坐标系和后续 GIS 工具参数。',
-  result_highlights: ['已读取当前会话上下文', '正在校验字段与空间范围'],
-  data_sources: ['workspace_upload_boundary.geojson', 'workspace_dem_preview.tif'],
-  next_action_suggestions: ['确认边界与栅格范围一致', '完成后注册地图图层与下载成果'],
-  executed_steps: [
-    { step_id: 'read-context', tool_name: '工作区画像', status: 'succeeded' },
-    { step_id: 'validate-inputs', tool_name: '矢量校验', status: 'running' },
-    { step_id: 'register-outputs', tool_name: '成果注册', status: 'queued' }
-  ],
-  warnings: []
 };
 
 export function TaskCardVisualHarness() {
