@@ -99,6 +99,60 @@ _TEMPORAL_COMPOSITE_DEFAULT_METHODS = {
 _TEMPORAL_COMPOSITE_METHODS = {"max", "median", "mean", "sum", "min"}
 
 
+def _dem_only_d8_flow_accumulation(elevation: np.ndarray, xres: float, yres: float) -> np.ndarray:
+    valid = np.isfinite(elevation)
+    height, width = elevation.shape
+    receiver_row = np.full((height, width), -1, dtype="int32")
+    receiver_col = np.full((height, width), -1, dtype="int32")
+    best_drop = np.zeros((height, width), dtype="float32")
+    neighbors = (
+        (-1, -1, float(np.hypot(xres, yres))),
+        (-1, 0, yres),
+        (-1, 1, float(np.hypot(xres, yres))),
+        (0, -1, xres),
+        (0, 1, xres),
+        (1, -1, float(np.hypot(xres, yres))),
+        (1, 0, yres),
+        (1, 1, float(np.hypot(xres, yres))),
+    )
+    for dy, dx, distance in neighbors:
+        row_start = max(0, -dy)
+        row_end = min(height, height - dy)
+        col_start = max(0, -dx)
+        col_end = min(width, width - dx)
+        center = elevation[row_start:row_end, col_start:col_end]
+        neighbor = elevation[row_start + dy:row_end + dy, col_start + dx:col_end + dx]
+        candidate_drop = (center - neighbor) / distance
+        candidate_valid = (
+            valid[row_start:row_end, col_start:col_end]
+            & valid[row_start + dy:row_end + dy, col_start + dx:col_end + dx]
+            & np.isfinite(candidate_drop)
+            & (candidate_drop > best_drop[row_start:row_end, col_start:col_end])
+            & (candidate_drop > 0.0)
+        )
+        local_rows, local_cols = np.nonzero(candidate_valid)
+        if local_rows.size == 0:
+            continue
+        rows = local_rows + row_start
+        cols = local_cols + col_start
+        best_drop[rows, cols] = candidate_drop[local_rows, local_cols]
+        receiver_row[rows, cols] = rows + dy
+        receiver_col[rows, cols] = cols + dx
+
+    accumulation = np.zeros((height, width), dtype="float32")
+    accumulation[valid] = 1.0
+    flat_elevation = elevation.ravel()
+    flat_valid_indices = np.flatnonzero(valid.ravel())
+    ordered = flat_valid_indices[np.argsort(flat_elevation[flat_valid_indices])[::-1]]
+    flat_accumulation = accumulation.ravel()
+    flat_receiver = (receiver_row * width + receiver_col).ravel()
+    for flat_index in ordered:
+        receiver = int(flat_receiver[flat_index])
+        if receiver >= 0:
+            flat_accumulation[receiver] += flat_accumulation[flat_index]
+    return accumulation
+
+
 def _validate_raster_algebra_ast(parsed: ast.Expression, *, variables: set[str]) -> None:
     allowed_nodes = (
         ast.Expression,
@@ -1405,7 +1459,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             errors.extend(validate_raster_readable(manager, dem_name))
             errors.extend(validate_crs(manager, dem_name))
         requested = [item.strip().lower() for item in str(derivatives or "").split(",") if item.strip()] or ["slope", "aspect", "terrain"]
-        invalid = [item for item in requested if item not in {"slope", "aspect", "terrain", "tpi", "tri"}]
+        invalid = [item for item in requested if item not in {"slope", "aspect", "terrain", "tpi", "tri", "twi"}]
         units = str(slope_units or "degree").strip().lower()
         if units not in {"degree", "percent"}:
             return tool_result_error(
@@ -1448,6 +1502,20 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
             tpi = arr - neighborhood_mean
             tri = np.sqrt(gx * gx + gy * gy)
             arrays = {"slope": slope, "aspect": aspect, "terrain": tpi, "tpi": tpi, "tri": tri}
+            diagnostics = {"source_dem": dem_name, "slope_units": units, "nodata": -9999.0}
+            if "twi" in requested:
+                flow_accumulation = _dem_only_d8_flow_accumulation(arr, xres, yres)
+                cell_size = float(np.sqrt(xres * yres)) or 1.0
+                tan_slope = np.maximum(slope_rise_run, 0.001)
+                twi = np.log((flow_accumulation * cell_size) / tan_slope)
+                arrays["twi"] = np.where(np.isfinite(arr) & np.isfinite(twi), twi, np.nan)
+                diagnostics.update(
+                    {
+                        "hydrology_method": "dem_only_d8",
+                        "twi_formula": "ln((flow_accumulation * cell_size) / tan_slope)",
+                        "twi_limitations": "DEM-only approximation; no sink filling, stream burning, river distance, or external hydrology inputs.",
+                    }
+                )
             datasets: list[str] = []
             artifacts: list[ArtifactInfo] = []
             statistics: dict[str, dict[str, float | int | None]] = {}
@@ -1486,7 +1554,7 @@ def build_raster_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -
                 },
                 artifacts=artifacts,
                 map_layers=map_layers,
-                diagnostics={"source_dem": dem_name, "slope_units": units, "nodata": -9999.0},
+                diagnostics=diagnostics,
                 summary=f"Created DEM derivative datasets: {', '.join(datasets)}.",
             ).to_json()
         except Exception as exc:

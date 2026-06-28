@@ -65,9 +65,15 @@ class CoreGisWorkflowCompletionTests(unittest.TestCase):
             self.assertIn("ToolResult/v1", str(cards[name].get("result_schema")))
             self.assertTrue(cards[name].get("preconditions"), name)
             self.assertTrue(cards[name].get("forbidden_uses"), name)
+        dem_card_text = str(cards["dem_terrain_derivatives"]).lower()
+        self.assertIn("twi", dem_card_text)
+        self.assertIn("dem-only", dem_card_text)
+        self.assertIn("d8", dem_card_text)
 
         candidate_names = {card["tool_name"] for card in candidate_tool_cards("DEM 坡度 NDVI 栅格计算 缓冲区 空间连接 站点 栅格 采样", task_type="data_processing", limit=20)}
         self.assertTrue(expected & candidate_names)
+        terrain_candidate_names = {card["tool_name"] for card in candidate_tool_cards("soil moisture DEM TWI terrain factor", task_type="modeling", limit=8)}
+        self.assertIn("dem_terrain_derivatives", terrain_candidate_names)
 
     def test_chinese_tool_card_retrieval_includes_sampling_prerequisite_tools(self) -> None:
         names = {
@@ -131,6 +137,39 @@ class CoreGisWorkflowCompletionTests(unittest.TestCase):
             self.assertGreaterEqual(len(result["artifacts"]), 2)
             for artifact in result["artifacts"]:
                 self.assertTrue(Path(artifact["path"]).exists())
+
+    def test_dem_terrain_derivatives_creates_dem_only_twi(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            values = np.array(
+                [
+                    [120, 118, 116, 114, 112],
+                    [118, 116, 114, 112, 110],
+                    [116, 114, 112, 110, 108],
+                    [114, 112, 110, 108, 106],
+                    [112, 110, 108, 106, 104],
+                ],
+                dtype="float32",
+            )
+            dem_path = self.write_raster(Path(tmp) / "dem_3857.tif", crs="EPSG:3857", values=values)
+            service.manager.put_raster_path("dem_3857", dem_path, meta={"crs": "EPSG:3857"})
+            tools = self.tool_map(service)
+
+            result = parse_tool_result(
+                tools["dem_terrain_derivatives"].invoke(
+                    {"dem_name": "dem_3857", "output_prefix": "terrain", "derivatives": "slope,tpi,twi"}
+                )
+            )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(set(result["outputs"]["derivatives"]), {"slope", "tpi", "twi"})
+            self.assertIn("terrain_twi", result["outputs"]["datasets"])
+            self.assertEqual(result["diagnostics"]["hydrology_method"], "dem_only_d8")
+            self.assertEqual(result["outputs"]["statistics"]["twi"]["valid_count"], 25)
+            with rasterio.open(service.manager.get_raster_path("terrain_twi")) as src:
+                twi = src.read(1)
+                self.assertTrue(np.isfinite(twi[twi != src.nodata]).all())
+                self.assertGreater(float(np.nanmax(np.where(twi == src.nodata, np.nan, twi))), 0.0)
 
     def test_raster_algebra_ndvi_and_point_sampling_return_real_artifacts(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
