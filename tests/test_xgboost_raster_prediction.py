@@ -146,6 +146,41 @@ class XGBoostRasterPredictionToolTests(unittest.TestCase):
                 self.assertEqual((src.height, src.width), (2, 2))
                 self.assertEqual(src.transform, from_origin(0, 4, 2, 2))
 
+    def test_predict_xgboost_raster_map_defaults_to_coarsest_feature_grid(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            self.write_raster(service, "dem", np.arange(1, 17, dtype="float32").reshape(4, 4))
+            self.write_raster(
+                service,
+                "lst",
+                np.full((2, 2), 12.0, dtype="float32"),
+                transform=from_origin(0, 4, 2, 2),
+            )
+            self.write_raster(service, "ndvi", np.full((4, 4), 0.35, dtype="float32"))
+            model_path = self.write_model(service.manager.derived_dir / "soil_model.joblib")
+            tools = {tool.name: tool for tool in build_tools(service.manager)}
+
+            raw = tools["predict_xgboost_raster_map"].invoke(
+                {
+                    "model_path": str(model_path),
+                    "feature_rasters": "dem_elevation=dem,lst_value=lst,ndvi_value=ndvi",
+                    "output_name": "soil_prediction_coarse_grid",
+                    "representative_date": "2019-07-15",
+                    "max_prediction_pixels": 1000,
+                }
+            )
+            result = parse_tool_result(raw)
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(result["outputs"]["reference_raster"], "lst")
+            self.assertEqual(result["diagnostics"]["reference_source"], "coarsest_feature_raster")
+            self.assertEqual(result["outputs"]["valid_prediction_pixels"], 4)
+            raster_path = service.manager.get_raster_path("soil_prediction_coarse_grid")
+            with rasterio.open(raster_path) as src:
+                self.assertEqual((src.height, src.width), (2, 2))
+                self.assertEqual(src.transform, from_origin(0, 4, 2, 2))
+
     def test_predict_xgboost_raster_map_has_planner_tool_card(self) -> None:
         names = {card["tool_name"] for card in list_tool_cards()}
         candidates = {

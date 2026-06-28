@@ -142,6 +142,27 @@ def _read_aligned(path: Path, reference: rasterio.io.DatasetReader, *, resamplin
         return destination, valid
 
 
+def _raster_pixel_area(path: Path) -> float:
+    with rasterio.open(path) as src:
+        transform = src.transform
+        return float(abs((transform.a * transform.e) - (transform.b * transform.d)))
+
+
+def _choose_coarsest_feature_raster(manager: DataManager, feature_map: dict[str, str], model_features: list[str]) -> tuple[str, list[dict[str, Any]]]:
+    candidates: list[dict[str, Any]] = []
+    for order, feature in enumerate(model_features):
+        raster_name = feature_map.get(feature)
+        if not raster_name:
+            continue
+        pixel_area = _raster_pixel_area(manager.get_raster_path(raster_name))
+        candidates.append({"feature": feature, "raster": raster_name, "pixel_area": pixel_area, "order": order})
+    if not candidates:
+        raise ValueError("feature_rasters must include at least one model feature raster")
+    chosen = max(candidates, key=lambda item: (float(item["pixel_area"]), -int(item["order"])))
+    diagnostics = [{key: value for key, value in item.items() if key != "order"} for item in candidates]
+    return str(chosen["raster"]), diagnostics
+
+
 def _load_boundary_mask(manager: DataManager, boundary_name: str, reference: rasterio.io.DatasetReader) -> np.ndarray:
     if not str(boundary_name or "").strip():
         return np.ones((reference.height, reference.width), dtype=bool)
@@ -242,8 +263,9 @@ def run_xgboost_raster_prediction(
             )
 
         rep_date = _parse_representative_date(representative_date)
-        first_feature = next(feature for feature in model_features if feature in feature_map)
-        reference_name = str(target_raster_name or "").strip() or feature_map[first_feature]
+        explicit_reference_name = str(target_raster_name or "").strip()
+        coarsest_reference_name, reference_candidates = _choose_coarsest_feature_raster(manager, feature_map, model_features)
+        reference_name = explicit_reference_name or coarsest_reference_name
         reference_path = manager.get_raster_path(reference_name)
         arrays: dict[str, np.ndarray] = {}
         masks: list[np.ndarray] = []
@@ -327,7 +349,8 @@ def run_xgboost_raster_prediction(
             "boundary_name": boundary_name,
             "target_raster_name": str(target_raster_name or "").strip(),
             "reference_raster": reference_name,
-            "reference_source": "target_raster_name" if str(target_raster_name or "").strip() else "first_model_feature",
+            "reference_source": "target_raster_name" if explicit_reference_name else "coarsest_feature_raster",
+            "reference_candidates": reference_candidates,
             "representative_date": rep_date.isoformat(),
             "crs": str(profile.get("crs") or ""),
             "width": int(profile["width"]),
