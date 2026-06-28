@@ -32,6 +32,7 @@ SUPPORTED_WORKFLOW_TOOLS = {
     "dem_terrain_derivatives",
     "plot_dataset",
     "generic_xgboost_workflow",
+    "predict_xgboost_raster_map",
     "train_xgboost_fusion_model",
     "train_rf_fusion_model",
     "geographical_conformal_prediction",

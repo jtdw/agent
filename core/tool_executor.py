@@ -24,6 +24,7 @@ DEFAULT_DETERMINISTIC_TOOLS = {
     "vector_spatial_join",
     "export_dataset",
     "generic_xgboost_workflow",
+    "predict_xgboost_raster_map",
     "submit_commercial_download_job",
 }
 

@@ -252,6 +252,32 @@ _TOOL_CARDS: tuple[dict[str, Any], ...] = (
         forbidden_uses=["不能伪造 RMSE/MAE/R2/NSE 或模型产物", "不能在缺少目标变量时训练"],
     ),
     _card(
+        "predict_xgboost_raster_map",
+        "Use a trained XGBoost model bundle to predict a full-basin soil moisture raster map from DEM, NDVI, LST, or other feature rasters.",
+        ["modeling", "xgboost", "soil_moisture", "raster_prediction", "map_generation"],
+        ["model_path", "feature_rasters", "output_name"],
+        ["prediction_raster", "map_artifact", "summary_json"],
+        optional_inputs=["boundary_name", "representative_date", "max_prediction_pixels", "raster_resampling", "chunk_size"],
+        input_asset_roles=["trained_xgboost_model", "feature_rasters", "optional_basin_boundary"],
+        preconditions=[
+            "model_path must point to a model artifact inside the current workspace",
+            "feature_rasters must map model feature names to loaded raster dataset names",
+            "boundary_name, when provided, must be a vector dataset with CRS",
+            "date features are representative snapshot metadata unless date-matched rasters are supplied",
+        ],
+        common_failure_cases=[
+            "model path is outside the workspace",
+            "required feature raster mapping is missing",
+            "feature rasters have no valid overlap after reprojection",
+            "reference raster exceeds max_prediction_pixels",
+        ],
+        forbidden_uses=[
+            "Do not use it before a model has been trained and saved",
+            "Do not claim the output is a daily dynamic product when NDVI/LST are static snapshots",
+            "Do not pass .env, cookies, storage_state, database, or secret files as model_path",
+        ],
+    ),
+    _card(
         "train_xgboost_fusion_model",
         "训练表格或点数据的 XGBoost 回归模型，支持经纬度字段驱动的空间分块验证、残差、特征重要性、精度指标和模型文件输出。",
         ["modeling", "xgboost", "soil_moisture", "spatial_validation"],

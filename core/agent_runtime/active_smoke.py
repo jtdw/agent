@@ -11,12 +11,14 @@ from unittest import mock
 from uuid import uuid4
 
 import geopandas as gpd
+import joblib
 import numpy as np
 import pandas as pd
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Point
 from shapely.geometry import box
+from sklearn.linear_model import LinearRegression
 
 from core.data_semantics import attach_semantic_card_to_dataset, build_data_semantic_card
 from core.agent_runtime.context import AgentRuntimeContext
@@ -242,6 +244,51 @@ def _semantic_gcp_result_uncertainty_map(service: GISWorkspaceService) -> dict[s
     }
 
 
+def _xgboost_raster_prediction_map(service: GISWorkspaceService) -> dict[str, Any]:
+    dem_name = _write_smoke_raster(service, "dem")
+    lst_name = _write_smoke_raster(service, "lst")
+    ndvi_name = _write_smoke_raster(service, "ndvi")
+    service.manager.put_vector(
+        "basin",
+        gpd.GeoDataFrame({"name": ["a"], "geometry": [box(1.0, 1.0, 8.0, 8.0)]}, crs="EPSG:4326"),
+    )
+    features = ["dem_elevation", "lst_value", "ndvi_value", "lon", "lat", "day_of_year", "month", "year"]
+    train = pd.DataFrame(
+        {
+            "dem_elevation": [1.0, 2.0, 3.0, 4.0],
+            "lst_value": [10.0, 11.0, 12.0, 13.0],
+            "ndvi_value": [0.2, 0.3, 0.4, 0.5],
+            "lon": [1.5, 2.5, 3.5, 4.5],
+            "lat": [8.5, 7.5, 6.5, 5.5],
+            "day_of_year": [196, 196, 196, 196],
+            "month": [7, 7, 7, 7],
+            "year": [2019, 2019, 2019, 2019],
+        }
+    )
+    target = train["dem_elevation"] * 0.05 + train["lst_value"] * 0.01 + train["ndvi_value"] * 0.2
+    model = LinearRegression().fit(train[features], target)
+    model_path = service.manager.derived_dir / "soil_xgb_model.joblib"
+    joblib.dump({"pipeline": model, "features": features, "target": "soil_moisture_mean"}, model_path)
+    model_artifact = service.manager.register_artifact(
+        path=str(model_path),
+        type="model",
+        title="soil_xgb_model.joblib",
+        preview_available=False,
+        source_tool="active_smoke",
+    )
+    return {
+        "prompt": "use the selected previous XGBoost model to predict a full basin soil moisture raster map for 2019-07-15",
+        "frontend_context": {
+            "active_dataset_id": dem_name,
+            "selected_layer_id": "basin",
+            "selected_artifact_id": str(model_artifact.get("artifact_id") or ""),
+            "selected_artifact_type": "model",
+        },
+        "expected_tools": ["predict_xgboost_raster_map"],
+        "diagnostics": {"rasters": [dem_name, lst_name, ndvi_name], "model_path": str(model_path)},
+    }
+
+
 class _RuntimeOnlyAgent:
     def __init__(self, runtime: GISAgentRuntime) -> None:
         self.agent_runtime = runtime
@@ -270,6 +317,7 @@ SMOKE_CASES: dict[str, CaseSetup] = {
     "active_vector_clip_map": _active_vector_clip_map,
     "active_table_to_points_map": _active_table_to_points_map,
     "semantic_gcp_result_uncertainty_map": _semantic_gcp_result_uncertainty_map,
+    "xgboost_raster_prediction_map": _xgboost_raster_prediction_map,
 }
 
 DEFAULT_SMOKE_CASE_IDS = [

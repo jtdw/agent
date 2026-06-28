@@ -200,3 +200,28 @@ def test_service_active_smoke_can_run_opt_in_semantic_gcp_result_map_case(tmp_pa
     assert "table_to_points" in case["executed_tools"]
     assert "plot_dataset" in case["executed_tools"]
     assert "generic_xgboost_workflow" not in case["executed_tools"]
+
+
+def test_service_active_smoke_can_run_opt_in_xgboost_raster_prediction_case(tmp_path, monkeypatch) -> None:
+    from core.agent_runtime.active_smoke import run_service_active_smoke
+
+    monkeypatch.setenv("GIS_AGENT_RUNTIME_V2", "1")
+    monkeypatch.setenv("GIS_AGENT_RUNTIME_MODE", "active")
+    monkeypatch.setenv("GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER", "1")
+
+    report = run_service_active_smoke(
+        output_path=tmp_path / "xgboost_raster_prediction.json",
+        workspace_dir=tmp_path / "workspace",
+        coordinator_mode="deterministic",
+        case_ids=["xgboost_raster_prediction_map"],
+    )
+
+    case = report["cases"][0]
+    assert report["summary"]["case_count"] == 1
+    assert report["summary"]["failed"] == 0
+    assert case["ok"] is True
+    assert "predict_xgboost_raster_map" in case["executed_tools"]
+    assert "generic_xgboost_workflow" not in case["executed_tools"]
+    assert "train_xgboost_fusion_model" not in case["executed_tools"]
+    assert case["safe_tool_execution"]["artifact_count"] >= 3
+    assert case["safe_tool_execution"]["external_download_tools_executed"] == []

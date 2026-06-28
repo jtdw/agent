@@ -9,6 +9,7 @@ from core.tools import ml_helpers as _helpers
 
 ML_TOOL_NAMES = {
     'generic_xgboost_workflow',
+    'predict_xgboost_raster_map',
     'evaluate_prediction_accuracy',
     'geographical_conformal_prediction',
     'btch_fusion_model',
@@ -168,6 +169,34 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
             max_prediction_pixels=max_prediction_pixels,
             raster_resampling=raster_resampling,
             categorical_strategy=categorical_strategy,
+        )
+        return _json(result.to_dict())
+
+
+    @tool
+    def predict_xgboost_raster_map(
+        model_path: str,
+        feature_rasters: str,
+        output_name: str,
+        boundary_name: str = "",
+        representative_date: str = "",
+        max_prediction_pixels: int = 5000000,
+        raster_resampling: str = "bilinear",
+        chunk_size: int = 250000,
+    ) -> str:
+        """Use a trained XGBoost model bundle to predict a map-ready raster from aligned or alignable feature rasters."""
+        from core.ml.raster_prediction import run_xgboost_raster_prediction
+
+        result = run_xgboost_raster_prediction(
+            manager,
+            model_path=model_path,
+            feature_rasters=feature_rasters,
+            output_name=output_name,
+            boundary_name=boundary_name,
+            representative_date=representative_date,
+            max_prediction_pixels=max_prediction_pixels,
+            raster_resampling=raster_resampling,
+            chunk_size=chunk_size,
         )
         return _json(result.to_dict())
 
@@ -2632,6 +2661,7 @@ def build_ml_tools(manager: Any, *, legacy_tools: list[Any] | None = None) -> li
 
     return [
         generic_xgboost_workflow,
+        predict_xgboost_raster_map,
         evaluate_prediction_accuracy,
         geographical_conformal_prediction,
         btch_fusion_model,

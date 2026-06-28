@@ -567,6 +567,16 @@ def _manager_precondition_errors(manager: Any | None, tool_name: str, args: dict
         features = [field.strip() for field in str(args.get("feature_cols") or "").split(",") if field.strip()]
         errors.extend(validate_model_target(manager, dataset_name, target))
         errors.extend(validate_required_fields(manager, dataset_name, features))
+    elif tool_name == "predict_xgboost_raster_map":
+        raster_names: list[str] = []
+        for item in re.split(r"[,;\n]+", str(args.get("feature_rasters") or "")):
+            if "=" in item:
+                raster_names.append(item.split("=", 1)[1].strip())
+        for raster_name in raster_names:
+            errors.extend(validate_dataset_exists(manager, raster_name))
+        boundary_name = str(args.get("boundary_name") or "")
+        if boundary_name:
+            errors.extend(validate_dataset_exists(manager, boundary_name))
     elif tool_name == "vector_clip_by_vector":
         errors.extend(validate_dataset_exists(manager, str(args.get("clip_name") or "")))
     elif tool_name == "export_dataset":
@@ -626,6 +636,13 @@ def _build_validated_tool_args(plan: dict[str, Any], slots: dict[str, Any], cont
         _accept_tool_args(plan, manager, "plot_dataset", args)
         plan["execution_steps"].append(f"根据任务槽位解析，将使用字段 {column}。")
     elif task_type == "modeling":
+        if "predict_xgboost_raster_map" in plan.get("recommended_tools", []) or _prompt_requests_xgboost_raster_prediction(str(plan.get("user_prompt") or "")):
+            args, missing = _xgboost_raster_prediction_args(plan, str(plan.get("user_prompt") or ""), context)
+            if missing:
+                _add_missing_inputs(plan, missing, "Please provide the trained model artifact and DEM/LST/NDVI feature rasters before full-basin prediction.")
+                return
+            _accept_tool_args(plan, manager, "predict_xgboost_raster_map", args)
+            return
         target = str(slots.get("target_variable") or plan.get("resolved_fields", {}).get("target_col") or "")
         features = slots.get("feature_fields") or plan.get("resolved_fields", {}).get("feature_fields") or []
         features = [str(field) for field in features if str(field or "").strip()]
@@ -868,6 +885,28 @@ def _build_gcp_workflow(plan: dict[str, Any], gcp_args: dict[str, Any]) -> bool:
 
 def _build_modeling_workflow(plan: dict[str, Any], prompt: str, secondary_intents: list[str], manager: Any | None = None) -> bool:
     validated = _as_dict(plan.get("validated_tool_args"))
+    if "predict_xgboost_raster_map" in validated:
+        predict_args = validated["predict_xgboost_raster_map"]
+        workflow = [
+            {
+                "step_id": "predict_raster_map",
+                "tool_name": "predict_xgboost_raster_map",
+                "step_type": "raster_prediction",
+                "validated_tool_args": predict_args,
+                "expected_outputs": ["prediction raster", "map preview", "summary"],
+                "stop_on_failure": True,
+            },
+            {
+                "step_id": "interpret_prediction_map",
+                "tool_name": "interpret_result",
+                "validated_tool_args": {"referenced_step": "predict_raster_map"},
+                "depends_on": ["predict_raster_map"],
+                "expected_outputs": ["prediction map explanation"],
+                "stop_on_failure": False,
+            },
+        ]
+        plan["workflow_plan"] = workflow
+        return True
     if "generic_xgboost_workflow" in validated:
         model_tool = "generic_xgboost_workflow"
     elif "train_rf_fusion_model" in validated:
@@ -1035,6 +1074,98 @@ def _raster_dataset_for_variable(variable: str, raster_names: list[str]) -> str:
         if key and key in normalized:
             return name
     return ""
+
+
+def _prompt_requests_xgboost_raster_prediction(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    has_model = any(token in text for token in ("xgboost", "xgb"))
+    has_prediction = any(token in text for token in ("predict", "prediction", "map", "raster", "basin", "watershed", "全域", "流域", "栅格", "出图", "制图", "预测图"))
+    has_training = any(token in text for token in ("train", "training", "训练", "建模训练"))
+    return has_model and has_prediction and not has_training
+
+
+def _recent_model_artifact_path(context: dict[str, Any], slots: dict[str, Any]) -> str:
+    candidates: list[Any] = []
+    ref = slots.get("referenced_artifact")
+    if isinstance(ref, dict):
+        candidates.append(ref)
+    for key in ("recent_artifacts", "active_artifacts"):
+        items = context.get(key)
+        if isinstance(items, list):
+            candidates.extend(item for item in items if isinstance(item, dict))
+    for item in candidates:
+        artifact_type = str(item.get("type") or item.get("kind") or "").lower()
+        path = str(item.get("path") or item.get("absolute_path") or "")
+        title = str(item.get("title") or item.get("name") or path).lower()
+        if artifact_type == "model" or path.lower().endswith((".joblib", ".pkl", ".pickle")) or "model" in title:
+            return path
+    return ""
+
+
+def _dataset_name_matches_any(name: str, aliases: tuple[str, ...]) -> bool:
+    normalized = re.sub(r"[^0-9a-z]+", "", str(name or "").lower())
+    return any(alias and alias in normalized for alias in aliases)
+
+
+def _feature_raster_dataset(context: dict[str, Any], aliases: tuple[str, ...]) -> str:
+    for name in _available_dataset_names_by_type(context, "raster"):
+        if _dataset_name_matches_any(name, aliases):
+            return name
+    return ""
+
+
+def _xgboost_raster_feature_mapping(context: dict[str, Any]) -> tuple[str, list[str]]:
+    feature_specs = [
+        ("dem_elevation", ("dem", "elevation", "terrain")),
+        ("lst_value", ("lst", "landsurfacetemperature", "temperature", "temp")),
+        ("ndvi_value", ("ndvi", "vegetation")),
+    ]
+    mapping: list[str] = []
+    missing: list[str] = []
+    for feature, aliases in feature_specs:
+        dataset = _feature_raster_dataset(context, aliases)
+        if dataset:
+            mapping.append(f"{feature}={dataset}")
+        else:
+            missing.append(feature)
+    return ",".join(mapping), missing
+
+
+def _xgboost_raster_boundary_name(plan: dict[str, Any], context: dict[str, Any]) -> str:
+    resolved = _as_dict(_as_dict(plan.get("resolved_objects")).get("clip_boundary"))
+    if resolved.get("ok"):
+        data = _as_dict(resolved.get("data"))
+        return str(data.get("dataset_id") or resolved.get("name") or data.get("name") or resolved.get("id") or "")
+    vector_names = _available_dataset_names_by_type(context, "vector")
+    for name in vector_names:
+        if _dataset_name_matches_any(name, ("basin", "boundary", "watershed", "studyarea", "mask")):
+            return name
+    return vector_names[0] if len(vector_names) == 1 else ""
+
+
+def _representative_date_from_prompt(prompt: str) -> str:
+    match = re.search(r"\b(20\d{2}|19\d{2})-(\d{2})-(\d{2})\b", str(prompt or ""))
+    return match.group(0) if match else ""
+
+
+def _xgboost_raster_prediction_args(plan: dict[str, Any], prompt: str, context: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    slots = _as_dict(plan.get("slots"))
+    model_path = _recent_model_artifact_path(context, slots)
+    feature_rasters, missing_features = _xgboost_raster_feature_mapping(context)
+    boundary_name = _xgboost_raster_boundary_name(plan, context)
+    missing: list[str] = []
+    if not model_path:
+        missing.append("trained model artifact")
+    if missing_features:
+        missing.append("feature rasters: " + ", ".join(missing_features))
+    args = {
+        "model_path": model_path,
+        "feature_rasters": feature_rasters,
+        "boundary_name": boundary_name,
+        "output_name": _extract_output_name(prompt, "xgboost_raster_prediction"),
+        "representative_date": _representative_date_from_prompt(prompt),
+    }
+    return args, missing
 
 
 def _raster_algebra_args_from_prompt(prompt: str, context: dict[str, Any]) -> dict[str, str]:
@@ -1519,6 +1650,13 @@ def _attach_tool_preconditions(plan: dict[str, Any]) -> None:
             required_fields=["target_col", "feature_cols when using table/vector/sample_raster mode"],
             optional_inputs=["mode", "task_type", "sample_dataset_name", "x_col", "y_col", "date_col", "group_col", "split_method"],
         ),
+        "predict_xgboost_raster_map": ToolPrecondition(
+            name="predict_xgboost_raster_map",
+            required_inputs=["model_path", "feature_rasters", "output_name"],
+            required_dataset_type="model artifact + raster features",
+            required_crs="required for feature rasters; boundary CRS required when supplied",
+            optional_inputs=["boundary_name", "representative_date", "max_prediction_pixels", "raster_resampling", "chunk_size"],
+        ),
         "train_xgboost_fusion_model": ToolPrecondition(
             name="train_xgboost_fusion_model",
             required_inputs=["dataset_name", "target_col", "feature_cols", "output_name"],
@@ -1787,6 +1925,7 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             task_type = "map_generation"
     dataset = _dataset_name(context)
     plan = _default_plan(task_type)
+    plan["user_prompt"] = text
     plan["semantic_parse"] = semantic
     confidence = float(intent.get("confidence") or 0.0)
     if confidence <= 0 and semantic.get("confidence"):
@@ -1909,6 +2048,17 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
                 ["map field"],
                 "请指定要制图的字段或主题；如果不确定，我可以先预览字段并推荐适合制图的列。",
             )
+    elif task_type == "modeling" and _prompt_requests_xgboost_raster_prediction(text):
+        plan.update(
+            required_inputs=["trained model artifact", "feature rasters"],
+            recommended_tools=["predict_xgboost_raster_map"],
+            execution_steps=[
+                "Resolve the trained XGBoost model artifact.",
+                "Match DEM, LST, and NDVI feature rasters to model features.",
+                "Predict a map-ready raster within the optional basin boundary.",
+            ],
+            expected_outputs=["prediction raster", "map preview", "prediction summary"],
+        )
     elif task_type == "modeling":
         modeling_tools = ["profile_missing_values", "generic_xgboost_workflow", "train_xgboost_fusion_model", "train_rf_fusion_model"]
         if slots.get("model_type") == "xgboost":
@@ -2032,6 +2182,8 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
         _append_secondary_steps(plan, secondary_intents)
     slot_missing = [str(item) for item in slots.get("missing_inputs", []) if item]
     if task_type != "modeling":
+        slot_missing = [item for item in slot_missing if item not in {"target column", "feature columns"}]
+    if "predict_xgboost_raster_map" in plan.get("recommended_tools", []):
         slot_missing = [item for item in slot_missing if item not in {"target column", "feature columns"}]
     if plan.get("resolved_fields", {}).get("map_field"):
         slot_missing = [item for item in slot_missing if item not in {"map_field", "map field"}]
