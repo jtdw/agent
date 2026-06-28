@@ -372,6 +372,25 @@ def _apply_raster_scale_offset(value: Any, scale: float, offset: float) -> float
     return float(numeric * float(scale) + float(offset))
 
 
+def _required_temporal_sampling_window(obs_dates: pd.Series, specs: list[dict[str, Any]]) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    valid_dates = pd.Series(obs_dates).dropna()
+    if valid_dates.empty:
+        return None, None
+    max_days_before = max((int(spec.get("days_before") or 0) for spec in specs), default=0)
+    max_days_after = max((int(spec.get("days_after") or 0) for spec in specs), default=0)
+    return (
+        pd.Timestamp(valid_dates.min()) - pd.Timedelta(days=max_days_before),
+        pd.Timestamp(valid_dates.max()) + pd.Timedelta(days=max_days_after),
+    )
+
+
+def _date_range_summary(dates: list[pd.Timestamp]) -> dict[str, str]:
+    clean = [pd.Timestamp(item).normalize() for item in dates if not pd.isna(item)]
+    if not clean:
+        return {}
+    return {"start": min(clean).strftime("%Y-%m-%d"), "end": max(clean).strftime("%Y-%m-%d")}
+
+
 def _extract_temporal_station_covariates(
     manager: Any,
     *,
@@ -404,11 +423,16 @@ def _extract_temporal_station_covariates(
         raster_summaries: list[dict[str, Any]] = []
         for raster_name in temporal_rasters:
             specs = _temporal_specs_for_raster(raster_name)
+            required_start, required_end = _required_temporal_sampling_window(obs_dates, specs)
             for spec in specs:
                 training_df[spec["field"]] = np.nan
                 temporal_fields.append(str(spec["field"]))
 
             raster_path = manager.get_raster_path(raster_name)
+            band_samples: list[dict[str, Any]] = []
+            coords: list[tuple[float, float]] = []
+            available_band_count = 0
+            sampled_dates: list[pd.Timestamp] = []
             with rasterio.open(raster_path) as src:
                 xs = lon.to_numpy(dtype="float64", na_value=np.nan)
                 ys = lat.to_numpy(dtype="float64", na_value=np.nan)
@@ -433,11 +457,16 @@ def _extract_temporal_station_covariates(
                         coords.append(coord)
                     coord_index_by_row[row_index] = sample_index
 
-                band_samples: list[dict[str, Any]] = []
                 for band_index in range(1, src.count + 1):
                     band_date_text = _date_from_raster_band(src, raster_name, band_index)
                     band_date = pd.to_datetime(band_date_text, errors="coerce")
                     if pd.isna(band_date):
+                        continue
+                    band_date = band_date.normalize()
+                    available_band_count += 1
+                    if required_start is not None and band_date < required_start:
+                        continue
+                    if required_end is not None and band_date > required_end:
                         continue
                     scale, offset = _raster_band_scale_offset(src, band_index)
                     values: list[float] = []
@@ -446,7 +475,8 @@ def _extract_temporal_station_covariates(
                         if src.nodata is not None and np.isclose(value, float(src.nodata), equal_nan=False):
                             value = float("nan")
                         values.append(_apply_raster_scale_offset(value, scale, offset))
-                    band_samples.append({"date": band_date.normalize(), "band": band_index, "values": values})
+                    band_samples.append({"date": band_date, "band": band_index, "values": values})
+                    sampled_dates.append(band_date)
 
                 for row_index, obs_date in enumerate(obs_dates):
                     if pd.isna(obs_date):
@@ -467,8 +497,11 @@ def _extract_temporal_station_covariates(
                     "raster_name": raster_name,
                     "covariate_type": _covariate_type_for_raster(raster_name),
                     "fields": [str(spec["field"]) for spec in specs],
-                    "band_count": int(len(band_samples)) if "band_samples" in locals() else 0,
-                    "unique_sample_point_count": int(len(coords)) if "coords" in locals() else 0,
+                    "band_count": int(available_band_count),
+                    "sampled_band_count": int(len(band_samples)),
+                    "unique_sample_point_count": int(len(coords)),
+                    "required_time_range": _date_range_summary([required_start, required_end] if required_start is not None and required_end is not None else []),
+                    "sampled_time_range": _date_range_summary(sampled_dates),
                 }
             )
 

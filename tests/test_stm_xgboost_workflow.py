@@ -7,6 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import numpy as np
+import pandas as pd
 import geopandas as gpd
 import rasterio
 from rasterio.transform import from_origin
@@ -18,7 +19,7 @@ from core.service import GISWorkspaceService
 from core.tool_contracts import parse_tool_result
 from core.tools.registry import build_tools
 from core.workflows.registry import build_executable_workflow, list_workflow_templates
-from core.workflows.stm_soil_moisture import resolve_default_station_archive
+from core.workflows.stm_soil_moisture import _extract_temporal_station_covariates, resolve_default_station_archive
 
 
 def _write_many_day_station_archive(path: Path, days: int = 16) -> None:
@@ -557,6 +558,41 @@ def test_stm_xgboost_workflow_reads_netcdf_time_tags_for_precipitation_windows()
         features = service.manager.get_vector(result["outputs"]["feature_dataset"]).drop(columns=["geometry"], errors="ignore")
         jan4 = features.loc[features["date"] == "2019-01-04"].iloc[0]
         assert np.isclose(jan4["raster_china_1km_prep_2019_sum_3d"], 9.0)
+
+
+def test_temporal_station_covariates_sample_only_required_multiband_dates() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        training_dataset = service.manager.put_table(
+            "temporal_training",
+            pd.DataFrame(
+                {
+                    "station_id": ["A", "B"],
+                    "lon": [115.53885, 115.53885],
+                    "lat": [41.55076, 41.55076],
+                    "date": ["2019-01-15", "2019-01-16"],
+                    "soil_moisture_mean": [0.18, 0.19],
+                }
+            ),
+        )
+        raster_path = service.manager.upload_dir / "ndvi_90_daily.tif"
+        _write_daily_multiband_raster(raster_path, token="NDVI", base=0.10, step=0.01, days=90)
+        service.manager.put_raster_path("ndvi_90_daily", raster_path, meta={"crs": "EPSG:4326"})
+
+        result = _extract_temporal_station_covariates(
+            service.manager,
+            training_dataset=training_dataset,
+            temporal_rasters=["ndvi_90_daily"],
+            output_name="temporal_training_with_ndvi",
+        )
+
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        summary = result["outputs"]["temporal_rasters"][0]
+        assert summary["band_count"] == 90
+        assert summary["sampled_band_count"] == 8
+        features = service.manager.get_table("temporal_training_with_ndvi")
+        assert np.isclose(features.loc[0, "raster_ndvi_90_daily_window_max_7d"], 0.27)
+        assert np.isclose(features.loc[1, "raster_ndvi_90_daily_window_max_7d"], 0.28)
 
 
 def test_stm_xgboost_workflow_does_not_derive_terrain_for_non_dem_raster() -> None:
