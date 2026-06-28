@@ -65,12 +65,66 @@ def _smoke_report_status(path: str | Path | None) -> dict[str, Any]:
     }
 
 
+def _soil_moisture_gcp_smoke_status(
+    path: str | Path | None,
+    *,
+    min_cases: int = 3,
+    min_empirical_coverage: float = 0.85,
+) -> dict[str, Any]:
+    clean = Path(path) if path else None
+    if clean is None or not str(clean).strip():
+        return {
+            "required": True,
+            "status": "missing_report",
+            "report_filename": "",
+            "case_count": 0,
+            "failed_checks": ["soil moisture/GCP recurring summary path is empty"],
+        }
+    try:
+        payload = json.loads(clean.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {
+            "required": True,
+            "status": "missing_report",
+            "report_filename": clean.name,
+            "case_count": 0,
+            "failed_checks": ["soil moisture/GCP recurring summary file is missing"],
+        }
+    except (OSError, json.JSONDecodeError):
+        return {
+            "required": True,
+            "status": "invalid_report",
+            "report_filename": clean.name,
+            "case_count": 0,
+            "failed_checks": ["soil moisture/GCP recurring summary could not be read as JSON"],
+        }
+
+    from core.workflows.soil_moisture_gcp_smoke import validate_smoke_summary
+
+    validation = validate_smoke_summary(
+        payload,
+        min_cases=min_cases,
+        min_empirical_coverage=min_empirical_coverage,
+        require_study_area_filter=True,
+    )
+    return {
+        "required": True,
+        "status": "passed" if validation["ok"] else "failed",
+        "report_filename": clean.name,
+        "case_count": int(validation.get("case_count") or 0),
+        "min_cases": int(min_cases),
+        "min_empirical_coverage": float(min_empirical_coverage),
+        "failed_checks": list(validation.get("failed_checks") or []),
+    }
+
+
 def _human_reason(reason: str) -> str:
     labels = {
         "active_guard_not_effective": "Active guard is not effective. Check GIS_AGENT_RUNTIME_V2, GIS_AGENT_RUNTIME_MODE, and GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER.",
         "rollback_requested": "Rollback is requested. Keep user exposure blocked until GIS_AGENT_RUNTIME_ROLLBACK is cleared.",
         "observe_only_no_user_exposure": "Exposure percent is 0, so the runtime is observe-only.",
         "deterministic_smoke_not_passed": "Deterministic active smoke report is missing or failed.",
+        "soil_moisture_gcp_smoke_not_passed": "Soil moisture XGBoost/GCP recurring smoke summary is missing or failed.",
         "llm_smoke_not_passed": "LLM coordinator smoke is required but missing or failed.",
         "production_exposure_requires_override": "Production exposure requires GIS_AGENT_RUNTIME_ALLOW_PRODUCTION_EXPOSURE=1.",
         "staging_initial_exposure_limited_to_10_percent": "Initial staging exposure is limited to 10%.",
@@ -89,6 +143,8 @@ def _next_actions(reasons: list[str], eligible: bool, environment: str) -> list[
     actions: list[str] = []
     if "deterministic_smoke_not_passed" in reasons:
         actions.append("Run scripts/test_agent_runtime_active_smoke.ps1 and point GIS_AGENT_RUNTIME_SMOKE_REPORT to the passing report.")
+    if "soil_moisture_gcp_smoke_not_passed" in reasons:
+        actions.append("Run scripts/run_soil_moisture_gcp_smoke.ps1 -ValidateOnly before increasing staging exposure.")
     if "active_guard_not_effective" in reasons:
         actions.append("Enable guarded active mode before staging exposure.")
     if "rollback_requested" in reasons:
@@ -108,6 +164,10 @@ class AgentRuntimeExposurePolicy:
     requested_percent: int = 0
     rollback_requested: bool = False
     deterministic_smoke_report: str | Path | None = None
+    require_soil_moisture_gcp_smoke: bool = False
+    soil_moisture_gcp_summary: str | Path | None = None
+    soil_moisture_min_cases: int = 3
+    soil_moisture_min_gcp_coverage: float = 0.85
     require_llm_smoke: bool = False
     llm_smoke_reports: tuple[str | Path, ...] = ()
     allow_production_exposure: bool = False
@@ -124,6 +184,11 @@ class AgentRuntimeExposurePolicy:
             requested_percent=_as_percent(os.getenv("GIS_AGENT_RUNTIME_EXPOSURE_PERCENT")),
             rollback_requested=_env_flag("GIS_AGENT_RUNTIME_ROLLBACK", default=False),
             deterministic_smoke_report=os.getenv("GIS_AGENT_RUNTIME_SMOKE_REPORT", "").strip() or None,
+            require_soil_moisture_gcp_smoke=_env_flag(
+                "GIS_AGENT_RUNTIME_REQUIRE_SOIL_MOISTURE_GCP_SMOKE",
+                default=False,
+            ),
+            soil_moisture_gcp_summary=os.getenv("GIS_AGENT_RUNTIME_SOIL_MOISTURE_GCP_SMOKE_SUMMARY", "").strip() or None,
             require_llm_smoke=_env_flag("GIS_AGENT_RUNTIME_REQUIRE_LLM_SMOKE", default=False),
             llm_smoke_reports=llm_reports,
             allow_production_exposure=_env_flag("GIS_AGENT_RUNTIME_ALLOW_PRODUCTION_EXPOSURE", default=False),
@@ -132,6 +197,15 @@ class AgentRuntimeExposurePolicy:
     def evaluate(self, cutover_guard: dict[str, Any]) -> dict[str, Any]:
         reasons: list[str] = []
         deterministic = _smoke_report_status(self.deterministic_smoke_report)
+        soil_moisture = (
+            _soil_moisture_gcp_smoke_status(
+                self.soil_moisture_gcp_summary,
+                min_cases=self.soil_moisture_min_cases,
+                min_empirical_coverage=self.soil_moisture_min_gcp_coverage,
+            )
+            if self.require_soil_moisture_gcp_smoke
+            else {"required": False, "status": "not_required", "report_filename": "", "case_count": 0, "failed_checks": []}
+        )
         llm_reports = [_smoke_report_status(path) for path in self.llm_smoke_reports]
         llm_passed = bool(llm_reports) and all(item["status"] == "passed" for item in llm_reports)
 
@@ -143,6 +217,8 @@ class AgentRuntimeExposurePolicy:
             reasons.append("observe_only_no_user_exposure")
         if deterministic["status"] != "passed":
             reasons.append("deterministic_smoke_not_passed")
+        if self.require_soil_moisture_gcp_smoke and soil_moisture["status"] != "passed":
+            reasons.append("soil_moisture_gcp_smoke_not_passed")
         if self.require_llm_smoke and not llm_passed:
             reasons.append("llm_smoke_not_passed")
         if self.environment == "production" and not self.allow_production_exposure:
@@ -172,9 +248,11 @@ class AgentRuntimeExposurePolicy:
             "blocking_reasons_human": [_human_reason(reason) for reason in reasons],
             "required_reports": {
                 "deterministic_smoke": True,
+                "soil_moisture_gcp_smoke": bool(self.require_soil_moisture_gcp_smoke),
                 "llm_smoke": bool(self.require_llm_smoke),
             },
             "deterministic_smoke": deterministic,
+            "soil_moisture_gcp_smoke": soil_moisture,
             "llm_smoke": {
                 "required": bool(self.require_llm_smoke),
                 "status": llm_status,
@@ -198,6 +276,8 @@ def run_staging_exposure_dry_run(
     percent: int = 1,
     smoke_report: str | Path = "outputs/agent_runtime_service_active_smoke_guard.json",
     cutover_guard: dict[str, Any] | None = None,
+    require_soil_moisture_gcp_smoke: bool = False,
+    soil_moisture_gcp_summary: str | Path | None = None,
     require_llm_smoke: bool = False,
     llm_smoke_reports: tuple[str | Path, ...] = (),
 ) -> dict[str, Any]:
@@ -210,6 +290,8 @@ def run_staging_exposure_dry_run(
         requested_percent=percent,
         rollback_requested=False,
         deterministic_smoke_report=smoke_report,
+        require_soil_moisture_gcp_smoke=require_soil_moisture_gcp_smoke,
+        soil_moisture_gcp_summary=soil_moisture_gcp_summary,
         require_llm_smoke=require_llm_smoke,
         llm_smoke_reports=llm_smoke_reports,
         allow_production_exposure=False,
@@ -239,6 +321,8 @@ def run_exposure_cli(argv: list[str] | None = None) -> tuple[int, dict[str, Any]
     dry_run.add_argument("--percent", type=int, default=1)
     dry_run.add_argument("--smoke-report", default="outputs/agent_runtime_service_active_smoke_guard.json")
     dry_run.add_argument("--active-effective", action="store_true")
+    dry_run.add_argument("--require-soil-moisture-gcp-smoke", action="store_true")
+    dry_run.add_argument("--soil-moisture-gcp-summary")
     dry_run.add_argument("--require-llm-smoke", action="store_true")
     dry_run.add_argument("--llm-smoke-report", action="append", dest="llm_smoke_reports", default=[])
     args = parser.parse_args(argv)
@@ -251,6 +335,8 @@ def run_exposure_cli(argv: list[str] | None = None) -> tuple[int, dict[str, Any]
             percent=args.percent,
             smoke_report=args.smoke_report,
             cutover_guard=guard,
+            require_soil_moisture_gcp_smoke=bool(args.require_soil_moisture_gcp_smoke),
+            soil_moisture_gcp_summary=args.soil_moisture_gcp_summary,
             require_llm_smoke=bool(args.require_llm_smoke),
             llm_smoke_reports=tuple(args.llm_smoke_reports or ()),
         )

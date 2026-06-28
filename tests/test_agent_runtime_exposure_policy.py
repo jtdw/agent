@@ -132,6 +132,36 @@ def test_staging_exposure_dry_run_writes_sanitized_evidence(tmp_path: Path) -> N
     assert str(tmp_path) not in rendered
 
 
+def test_staging_exposure_dry_run_requires_soil_moisture_gcp_gate_when_requested(tmp_path: Path) -> None:
+    from core.agent_runtime.exposure import run_staging_exposure_dry_run
+
+    report_path = tmp_path / "active_smoke.json"
+    output_path = tmp_path / "evidence.json"
+    missing_soil_summary = tmp_path / "missing_soil_summary.json"
+    report_path.write_text(
+        json.dumps({"summary": {"case_count": 3, "passed": 3, "failed": 0, "ready_for_next_phase": True}}),
+        encoding="utf-8",
+    )
+
+    evidence = run_staging_exposure_dry_run(
+        output_path=output_path,
+        environment="staging",
+        percent=10,
+        smoke_report=report_path,
+        cutover_guard={"active_effective": True},
+        require_soil_moisture_gcp_smoke=True,
+        soil_moisture_gcp_summary=missing_soil_summary,
+    )
+
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    rendered = json.dumps(saved, ensure_ascii=False)
+    assert evidence["exposure"]["eligible_for_user_exposure"] is False
+    assert "soil_moisture_gcp_smoke_not_passed" in evidence["exposure"]["reasons"]
+    assert saved["exposure"]["soil_moisture_gcp_smoke"]["status"] == "missing_report"
+    assert saved["exposure"]["soil_moisture_gcp_smoke"]["report_filename"] == "missing_soil_summary.json"
+    assert str(missing_soil_summary) not in rendered
+
+
 def test_staging_exposure_dry_run_cli_writes_output(tmp_path: Path) -> None:
     from core.agent_runtime.exposure import run_exposure_cli
 
@@ -162,6 +192,78 @@ def test_staging_exposure_dry_run_cli_writes_output(tmp_path: Path) -> None:
     assert output_path.exists()
 
 
+def test_staging_exposure_dry_run_cli_accepts_passing_soil_moisture_gcp_summary(tmp_path: Path) -> None:
+    from core.agent_runtime.exposure import run_exposure_cli
+
+    report_path = tmp_path / "active_smoke.json"
+    soil_summary_path = tmp_path / "soil_summary.json"
+    output_path = tmp_path / "evidence.json"
+    report_path.write_text(
+        json.dumps({"summary": {"passed": 3, "failed": 0, "ready_for_next_phase": True}}),
+        encoding="utf-8",
+    )
+    soil_summary_path.write_text(
+        json.dumps(
+            {
+                "overall_ok": True,
+                "cases": [
+                    {
+                        "case_id": "summer_20190715",
+                        "ok": True,
+                        "workflow_status": "modeled",
+                        "study_area_filter": {"filter_method": "study_area_boundary"},
+                        "prediction": {"status": "mapped", "valid_pixels": 742, "tif_exists": True, "png_exists": True},
+                        "gcp": {"empirical_coverage": 0.8919, "report_exists": True},
+                    },
+                    {
+                        "case_id": "spring_20190515",
+                        "ok": True,
+                        "workflow_status": "modeled",
+                        "study_area_filter": {"filter_method": "study_area_boundary"},
+                        "prediction": {"status": "mapped", "valid_pixels": 742, "tif_exists": True, "png_exists": True},
+                        "gcp": {"empirical_coverage": 0.8919, "report_exists": True},
+                    },
+                    {
+                        "case_id": "early_window_20190115",
+                        "ok": True,
+                        "workflow_status": "modeled",
+                        "study_area_filter": {"filter_method": "study_area_boundary"},
+                        "prediction": {"status": "mapped", "valid_pixels": 725, "tif_exists": True, "png_exists": True},
+                        "gcp": {"empirical_coverage": 0.8919, "report_exists": True},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    code, payload = run_exposure_cli(
+        [
+            "staging-dry-run",
+            "--output",
+            str(output_path),
+            "--environment",
+            "staging",
+            "--percent",
+            "10",
+            "--smoke-report",
+            str(report_path),
+            "--active-effective",
+            "--require-soil-moisture-gcp-smoke",
+            "--soil-moisture-gcp-summary",
+            str(soil_summary_path),
+        ]
+    )
+
+    saved = json.loads(output_path.read_text(encoding="utf-8"))
+    rendered = json.dumps(saved, ensure_ascii=False)
+    assert code == 0
+    assert payload["eligible_for_user_exposure"] is True
+    assert saved["exposure"]["soil_moisture_gcp_smoke"]["status"] == "passed"
+    assert saved["exposure"]["soil_moisture_gcp_smoke"]["case_count"] == 3
+    assert str(soil_summary_path) not in rendered
+
+
 def test_staging_exposure_dry_run_script_runs_smoke_and_evidence_cli() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     script = repo_root / "scripts" / "run_agent_runtime_staging_exposure_dry_run.ps1"
@@ -172,6 +274,10 @@ def test_staging_exposure_dry_run_script_runs_smoke_and_evidence_cli() -> None:
     assert "core.agent_runtime.exposure" in content
     assert "staging-dry-run" in content
     assert "GIS_AGENT_RUNTIME_EXPOSURE_PERCENT" in content
+    assert "run_soil_moisture_gcp_smoke.ps1" in content
+    assert "-ValidateOnly" in content
+    assert "--require-soil-moisture-gcp-smoke" in content
+    assert "--soil-moisture-gcp-summary" in content
     assert "Invoke-Checked" in content
 
 
