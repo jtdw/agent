@@ -1,0 +1,148 @@
+{
+  "describe_uploaded_vector": {
+    "planner": {
+      "task_type": "data_inspection",
+      "planned_steps": [
+        {
+          "tool_name": "describe_dataset"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "describe_dataset"
+    }
+  },
+  "table_to_points": {
+    "planner": {
+      "task_type": "data_processing",
+      "planned_steps": [
+        {
+          "tool_name": "table_to_points"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "table_to_points"
+    }
+  },
+  "soil_xgboost_modeling": {
+    "planner": {
+      "task_type": "modeling",
+      "planned_steps": [
+        {
+          "tool_name": "generic_xgboost_workflow"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "generic_xgboost_workflow"
+    }
+  },
+  "artifact_download_safety": {
+    "planner": {
+      "task_type": "artifact_download",
+      "planned_steps": [],
+      "requires_confirmation": true
+    },
+    "coordinator": {
+      "decision": "ask_user",
+      "required_tool": ""
+    }
+  },
+  "vector_clip_by_boundary": {
+    "planner": {
+      "task_type": "data_processing",
+      "planned_steps": [
+        {
+          "tool_name": "vector_clip_by_vector"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "vector_clip_by_vector"
+    }
+  },
+  "raster_clip_by_boundary": {
+    "planner": {
+      "task_type": "data_processing",
+      "planned_steps": [
+        {
+          "tool_name": "clip_raster_by_vector"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "clip_raster_by_vector"
+    }
+  },
+  "reproject_vector_to_wgs84": {
+    "planner": {
+      "task_type": "data_processing",
+      "planned_steps": [
+        {
+          "tool_name": "reproject_vector"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "reproject_vector"
+    }
+  },
+  "raster_zonal_statistics": {
+    "planner": {
+      "task_type": "analysis",
+      "planned_steps": [
+        {
+          "tool_name": "raster_zonal_stats"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "raster_zonal_stats"
+    }
+  },
+  "map_cartography": {
+    "planner": {
+      "task_type": "cartography",
+      "planned_steps": [
+        {
+          "tool_name": "plot_dataset"
+        }
+      ],
+      "requires_confirmation": false
+    },
+    "coordinator": {
+      "decision": "continue",
+      "required_tool": "plot_dataset"
+    }
+  },
+  "gscloud_download_confirmation": {
+    "planner": {
+      "task_type": "data_download",
+      "planned_steps": [
+        {
+          "tool_name": "submit_commercial_download_job"
+        }
+      ],
+      "requires_confirmation": true
+    },
+    "coordinator": {
+      "decision": "ask_user",
+      "required_tool": ""
+    }
+  }
+}

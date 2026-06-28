@@ -53,6 +53,7 @@ class CoreGisWorkflowCompletionTests(unittest.TestCase):
             "dem_terrain_derivatives",
             "raster_algebra",
             "raster_reproject",
+            "raster_zonal_stats",
             "clip_raster_by_vector",
             "vector_buffer",
             "vector_spatial_join",

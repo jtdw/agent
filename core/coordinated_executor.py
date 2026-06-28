@@ -10,6 +10,7 @@ from .execution_trace import build_execution_trace
 from .plan_validator import DOWNLOAD_TOOLS, validate_task_plan_before_execution
 from .tool_context import ToolRuntimeContext
 from .tool_contracts import is_tool_result_success, normalize_tool_result
+from .tool_cards import list_tool_cards
 from .workflow_coordinator import build_coordinator_decision
 from .workflow_executor import execute_single_workflow_step
 
@@ -35,6 +36,8 @@ def _plan_steps(plan: dict[str, Any]) -> list[dict[str, Any]]:
     tool_plan = _as_list(plan.get("tool_plan"))
     if tool_plan:
         out: list[dict[str, Any]] = []
+        execution_step_names = [str(item).strip() for item in _as_list(plan.get("execution_steps"))]
+        used_step_ids: set[str] = set()
         for index, step in enumerate(tool_plan):
             if not isinstance(step, dict):
                 continue
@@ -42,9 +45,17 @@ def _plan_steps(plan: dict[str, Any]) -> list[dict[str, Any]]:
             args = step.get("args")
             if not isinstance(args, dict):
                 args = _as_dict(_as_dict(plan.get("validated_tool_args")).get(tool_name))
+            step_id = str(step.get("step_id") or "").strip()
+            if not step_id and index < len(execution_step_names):
+                candidate_step_id = execution_step_names[index]
+                if candidate_step_id not in used_step_ids and all(ch.isalnum() or ch in {"_", "-"} for ch in candidate_step_id):
+                    step_id = candidate_step_id
+            if not step_id:
+                step_id = tool_name or f"step_{index + 1}"
+            used_step_ids.add(step_id)
             out.append(
                 {
-                    "step_id": str(step.get("step_id") or tool_name or f"step_{index + 1}"),
+                    "step_id": step_id,
                     "tool_name": tool_name,
                     "validated_tool_args": args if isinstance(args, dict) else {},
                     "depends_on": _as_list(step.get("depends_on")),
@@ -83,6 +94,26 @@ def _requested_downloads(plan: dict[str, Any]) -> list[Any]:
 
 def _context_cards(context: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in _as_list(context.get("candidate_tool_cards")) if isinstance(item, dict)]
+
+
+def _card_tool_name(card: dict[str, Any]) -> str:
+    return str(card.get("tool_name") or card.get("name") or "").strip()
+
+
+def _coordinator_tool_cards(context: dict[str, Any], steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cards = [dict(card) for card in _context_cards(context)]
+    present = {_card_tool_name(card) for card in cards if _card_tool_name(card)}
+    planned_names = [str(step.get("tool_name") or "").strip() for step in steps if str(step.get("tool_name") or "").strip()]
+    missing = [name for name in dict.fromkeys(planned_names) if name not in present]
+    if not missing:
+        return cards
+    builtin_cards = {_card_tool_name(card): card for card in list_tool_cards() if _card_tool_name(card)}
+    for name in missing:
+        card = dict(builtin_cards.get(name) or {"tool_name": name, "name": name, "capability": "Validated planned GIS tool."})
+        card.setdefault("name", name)
+        card.setdefault("tool_name", name)
+        cards.append(card)
+    return cards
 
 
 def _knowledge(context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -173,6 +204,7 @@ def run_coordinated_execution(
             "blocked_reason": "NO_EXECUTABLE_STEPS",
             "executed_tools": [],
         }
+    plan = {**plan, "workflow_plan": steps, "tool_plan": []}
 
     plan_id = str(plan.get("plan_id") or f"plan_{uuid4().hex[:10]}")
     plan["plan_id"] = plan_id
@@ -223,7 +255,7 @@ def run_coordinated_execution(
             remaining_steps,
             trace,
             user_request,
-            tool_cards=_context_cards(context),
+            tool_cards=_coordinator_tool_cards(context, steps),
             knowledge_snippets=_knowledge(context),
             client=coordinator_client,
         )
@@ -233,6 +265,24 @@ def run_coordinated_execution(
         repeated_signatures = repeated_signatures + 1 if signature and signature == last_signature else 0
         last_signature = signature
 
+        if decision_result.get("status") != "ready" and not remaining_steps and results and all(is_tool_result_success(item) for item in results):
+            final_decision = {
+                **decision,
+                "decision": "stop_success",
+                "reason": str(decision.get("reason") or "All planned steps completed successfully."),
+            }
+            return _make_return(
+                plan=plan,
+                plan_id=plan_id,
+                start_monotonic=start_monotonic,
+                started_at=started_at,
+                results=results,
+                retry_counts=retry_counts,
+                decisions=decisions,
+                final_decision=final_decision,
+                status="succeeded",
+                budget=budget,
+            )
         if decision_result.get("status") != "ready":
             return _make_return(
                 plan=plan,
@@ -334,6 +384,34 @@ def run_coordinated_execution(
             )
 
         next_step_id = str(decision.get("next_step_id") or "")
+        if not remaining_steps and results and all(is_tool_result_success(item) for item in results):
+            final_decision = {
+                **decision,
+                "decision": "stop_success",
+                "reason": str(decision.get("reason") or "All planned steps completed successfully."),
+            }
+            return _make_return(
+                plan=plan,
+                plan_id=plan_id,
+                start_monotonic=start_monotonic,
+                started_at=started_at,
+                results=results,
+                retry_counts=retry_counts,
+                decisions=decisions,
+                final_decision=final_decision,
+                status="succeeded",
+                budget=budget,
+            )
+        if not next_step_id:
+            required_tool_for_step = str(decision.get("required_tool") or "")
+            matching_steps = [
+                step
+                for step in remaining_steps
+                if required_tool_for_step and str(step.get("tool_name") or "") == required_tool_for_step
+            ]
+            if len(matching_steps) == 1:
+                next_step_id = str(matching_steps[0].get("step_id") or "")
+                decision["next_step_id"] = next_step_id
         step = step_by_id.get(next_step_id)
         if step and retry_counts.get(next_step_id, 0) >= max_tool_retries:
             return _make_return(
@@ -364,7 +442,11 @@ def run_coordinated_execution(
                 budget=budget,
             )
         tool_name = str(step.get("tool_name") or "")
-        if str(decision.get("required_tool") or "") != tool_name:
+        required_tool = str(decision.get("required_tool") or "")
+        if not required_tool:
+            decision["required_tool"] = tool_name
+            required_tool = tool_name
+        if required_tool != tool_name:
             return _make_return(
                 plan=plan,
                 plan_id=plan_id,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from core.agent_policy import policy_summary
@@ -10,9 +11,11 @@ from core.download_candidates import candidate_download_products
 from core.field_semantics import match_user_field_concept
 from core.knowledge_base import retrieve_knowledge_snippets
 from core.response_language import detect_response_language
+from core.data_semantics import semantic_cards_for_context
 from core.tool_cards import candidate_tool_cards
 
 MAX_CONTEXT_OBJECTS = 12
+TRUE_VALUES = {"1", "true", "yes", "on"}
 HISTORY_REFERENCE_TERMS = (
     "上次",
     "刚才",
@@ -39,6 +42,10 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _env_enabled(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in TRUE_VALUES
 
 
 def _asset_profile(manager: Any, name: str) -> dict[str, Any] | None:
@@ -225,6 +232,45 @@ def _recent_model_result(dashboard: dict[str, Any], state: dict[str, Any]) -> di
     return None
 
 
+def _vector_knowledge_context(retrieval_text: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    try:
+        from core.agent_runtime.vector_rag import (
+            LocalVectorRAGIndex,
+            PersistentVectorRAGIndex,
+            api_embedding_client_from_env,
+        )
+    except Exception:
+        return [], {"vector_rag_status": "unavailable", "full_vector_rag": False, "vector_hit_count": 0}
+    candidates = retrieve_knowledge_snippets(retrieval_text, limit=12)
+    if str(os.getenv("GIS_AGENT_VECTOR_RAG_BACKEND") or "").strip().lower() == "api":
+        client = api_embedding_client_from_env()
+        store_path = str(os.getenv("GIS_AGENT_VECTOR_RAG_STORE") or "").strip()
+        if client is not None and store_path:
+            try:
+                index = PersistentVectorRAGIndex.build(store_path, candidates, client)
+                hits = index.search(retrieval_text, limit=5)
+                diagnostics = index.diagnostics()
+                return hits, {
+                    "vector_rag_status": diagnostics.get("status"),
+                    "embedding_provider": diagnostics.get("embedding_provider"),
+                    "vector_store": diagnostics.get("vector_store"),
+                    "full_vector_rag": bool(diagnostics.get("full_vector_rag")),
+                    "vector_hit_count": len(hits),
+                }
+            except Exception:
+                pass
+    index = LocalVectorRAGIndex.from_documents(candidates)
+    hits = index.search(retrieval_text, limit=5)
+    diagnostics = index.diagnostics()
+    return hits, {
+        "vector_rag_status": diagnostics.get("status"),
+        "embedding_provider": diagnostics.get("embedding_provider"),
+        "vector_store": diagnostics.get("vector_store"),
+        "full_vector_rag": bool(diagnostics.get("full_vector_rag")),
+        "vector_hit_count": len(hits),
+    }
+
+
 def build_conversation_context(
     prompt: str,
     intent: dict[str, Any],
@@ -267,6 +313,11 @@ def build_conversation_context(
             json.dumps(active_dataset, ensure_ascii=False, default=str)[:2000],
         ]
     )
+    knowledge_snippets = retrieve_knowledge_snippets(retrieval_text, limit=5)
+    vector_knowledge_snippets: list[dict[str, Any]] = []
+    rag_trace: dict[str, Any] = {}
+    if _env_enabled("GIS_AGENT_ENABLE_VECTOR_RAG_CONTEXT"):
+        vector_knowledge_snippets, rag_trace = _vector_knowledge_context(retrieval_text)
     context = {
         "prompt": str(prompt or ""),
         "response_language": detect_response_language(prompt),
@@ -294,12 +345,16 @@ def build_conversation_context(
             "explicit_current_upload_reference": explicit_current_upload_reference,
             "active_dataset_source": "conversation_state" if state_dict.get("active_dataset") else ("current_upload_reference" if active_dataset else ""),
         },
-        "knowledge_snippets": retrieve_knowledge_snippets(retrieval_text, limit=5),
+        "knowledge_snippets": knowledge_snippets,
         "candidate_tool_cards": candidate_tool_cards(retrieval_text, task_type=task_type, limit=8),
         "download_candidates": candidate_download_products(retrieval_text, limit=6),
         "area_candidates": resolve_area_candidates(str(prompt or ""), limit=8, manager=manager),
+        "data_semantic_cards": semantic_cards_for_context(manager, active_dataset_name=active_name, limit=8),
         **field_profile,
     }
+    if vector_knowledge_snippets or rag_trace:
+        context["vector_knowledge_snippets"] = vector_knowledge_snippets
+        context["rag_trace"] = rag_trace
     context["capability_trace"] = {
         "knowledge_chunk_ids": [
             str(item.get("knowledge_chunk_id") or item.get("id") or "")
@@ -327,6 +382,12 @@ def build_conversation_context(
             if isinstance(item, dict)
         },
     }
+    if vector_knowledge_snippets:
+        context["capability_trace"]["vector_knowledge_chunk_ids"] = [
+            str(item.get("knowledge_chunk_id") or item.get("id") or "")
+            for item in vector_knowledge_snippets
+            if isinstance(item, dict)
+        ]
     if explicit_history_reference and followup and isinstance(followup.get("referenced_object"), dict):
         context["referenced_object"] = followup["referenced_object"]
         ref = followup["referenced_object"]
@@ -339,6 +400,14 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
     def _limit_text(value: Any, limit: int = 360) -> str:
         text = str(value or "")
         return text if len(text) <= limit else text[:limit].rstrip() + "..."
+
+    def _compact_text_list(value: Any, *, limit: int = 5, text_limit: int = 160) -> list[str]:
+        items: list[str] = []
+        for item in _as_list(value)[:limit]:
+            text = _limit_text(item, text_limit)
+            if text:
+                items.append(text)
+        return items
 
     def _compact_knowledge_snippets(value: Any) -> list[dict[str, Any]]:
         snippets: list[dict[str, Any]] = []
@@ -361,23 +430,23 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
 
     def _compact_tool_cards(value: Any) -> list[dict[str, Any]]:
         cards: list[dict[str, Any]] = []
-        for item in _as_list(value):
+        for item in _as_list(value)[:5]:
             if not isinstance(item, dict):
                 continue
             cards.append(
                 {
                     "tool_name": item.get("tool_name") or "",
                     "capability": _limit_text(item.get("capability"), 260),
-                    "applicable_tasks": item.get("applicable_tasks") or [],
-                    "required_inputs": item.get("required_inputs") or [],
-                    "optional_inputs": item.get("optional_inputs") or [],
-                    "input_asset_roles": item.get("input_asset_roles") or [],
-                    "preconditions": item.get("preconditions") or [],
-                    "output_types": item.get("output_types") or [],
+                    "applicable_tasks": _compact_text_list(item.get("applicable_tasks"), limit=6, text_limit=80),
+                    "required_inputs": _compact_text_list(item.get("required_inputs"), limit=8, text_limit=80),
+                    "optional_inputs": _compact_text_list(item.get("optional_inputs"), limit=8, text_limit=80),
+                    "input_asset_roles": _compact_text_list(item.get("input_asset_roles"), limit=6, text_limit=80),
+                    "preconditions": _compact_text_list(item.get("preconditions"), limit=3),
+                    "output_types": _compact_text_list(item.get("output_types"), limit=6, text_limit=80),
                     "confirmation_required": bool(item.get("confirmation_required", False)),
-                    "common_failure_cases": item.get("common_failure_cases") or [],
-                    "forbidden_uses": item.get("forbidden_uses") or [],
-                    "result_schema": item.get("result_schema") or "",
+                    "common_failure_cases": _compact_text_list(item.get("common_failure_cases"), limit=3),
+                    "forbidden_uses": _compact_text_list(item.get("forbidden_uses"), limit=3),
+                    "result_schema": _limit_text(item.get("result_schema"), 240),
                 }
             )
         return cards
@@ -429,6 +498,13 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         "candidate_tool_cards": _compact_tool_cards(context.get("candidate_tool_cards")),
         "download_candidates": _compact_download_candidates(context.get("download_candidates")),
         "area_candidates": context.get("area_candidates"),
+        "data_semantic_cards": context.get("data_semantic_cards"),
         "capability_trace": context.get("capability_trace"),
+        "runtime": context.get("runtime"),
+        "runtime_tool_metadata": context.get("runtime_tool_metadata"),
     }
+    if "vector_knowledge_snippets" in context:
+        payload["vector_knowledge_snippets"] = _compact_knowledge_snippets(context.get("vector_knowledge_snippets"))
+    if "rag_trace" in context:
+        payload["rag_trace"] = context.get("rag_trace")
     return json.dumps(payload, ensure_ascii=False, indent=2, default=str)

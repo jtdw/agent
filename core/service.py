@@ -299,7 +299,101 @@ class GISWorkspaceService:
                     "Install LangChain dependencies with `pip install -r requirements.txt`."
                 ) from exc
             self._agents[model_name] = GISAgent(agent_settings, self.manager)
-        return self._agents[model_name]
+        agent = self._agents[model_name]
+        runtime = getattr(agent, "agent_runtime", None)
+        refresh_context = getattr(runtime, "refresh_context", None)
+        if callable(refresh_context):
+            refresh_context(self.manager)
+        return agent
+
+    def agent_runtime_diagnostics(self, model_name: str = "") -> dict[str, Any]:
+        agent = self._get_agent(str(model_name or self.selected_model))
+        runtime = getattr(agent, "agent_runtime", None)
+        diagnostics = getattr(runtime, "diagnostics", None)
+        if not callable(diagnostics):
+            return {"available": False}
+        payload = diagnostics()
+        if isinstance(payload, dict):
+            payload.setdefault("available", True)
+            return payload
+        return {"available": False}
+
+    def _build_shadow_task_plan(self, user_message: str, context: dict[str, Any], candidate_plan: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from .agent_runtime.config import AgentRuntimeConfig
+
+            runtime_config = AgentRuntimeConfig.from_env()
+        except Exception:
+            runtime_config = None
+        if runtime_config is None or not runtime_config.enabled:
+            return build_shadow_llm_task_plan(user_message, context, candidate_plan)
+
+        try:
+            from .agent_runtime.planner import RuntimePlannerAdapter
+
+            agent = self._get_agent(str(getattr(self, "selected_model", "") or ""))
+            runtime = getattr(agent, "agent_runtime", None)
+            if bool(getattr(runtime, "enabled", False)):
+                return RuntimePlannerAdapter(runtime).build_shadow_task_plan(user_message, context, candidate_plan)
+        except Exception:
+            pass
+        return build_shadow_llm_task_plan(user_message, context, candidate_plan)
+
+    def _build_active_task_plan(self, user_message: str, context: dict[str, Any], candidate_plan: dict[str, Any]) -> dict[str, Any]:
+        try:
+            from .agent_runtime.config import AgentRuntimeConfig
+
+            runtime_config = AgentRuntimeConfig.from_env()
+        except Exception:
+            runtime_config = None
+        guard = runtime_config.cutover_guard() if runtime_config is not None else {}
+        if not bool(guard.get("active_effective")):
+            return build_llm_task_plan(user_message, context)
+
+        exposure_routing: dict[str, Any] | None = None
+        try:
+            from .agent_runtime.exposure import AgentRuntimeExposurePolicy
+            from .agent_runtime.traffic import AgentRuntimeTrafficRouter
+
+            router = AgentRuntimeTrafficRouter.from_env()
+            if bool(router.routing_enforced):
+                exposure_report = AgentRuntimeExposurePolicy.from_env().evaluate(guard)
+                exposure_routing = router.decide(
+                    exposure_report,
+                    user_id=str(getattr(self, "current_user_id", "") or ""),
+                    session_id=str(getattr(self, "current_session_id", "") or ""),
+                    request_text=user_message,
+                )
+                if not bool(exposure_routing.get("use_active_runtime")):
+                    legacy_result = build_llm_task_plan(user_message, context)
+                    if isinstance(legacy_result, dict):
+                        return {**legacy_result, "runtime_exposure_routing": exposure_routing}
+                    return legacy_result
+        except Exception:
+            exposure_routing = {
+                "schema_version": "agent-runtime-traffic-routing/v1",
+                "routing_enforced": True,
+                "use_active_runtime": False,
+                "reason": "routing_error_legacy_fallback",
+            }
+            legacy_result = build_llm_task_plan(user_message, context)
+            if isinstance(legacy_result, dict):
+                return {**legacy_result, "runtime_exposure_routing": exposure_routing}
+            return legacy_result
+
+        try:
+            from .agent_runtime.planner import RuntimePlannerAdapter
+
+            agent = self._get_agent(str(getattr(self, "selected_model", "") or ""))
+            runtime = getattr(agent, "agent_runtime", None)
+            result = RuntimePlannerAdapter(runtime).build_active_task_plan(user_message, context, candidate_plan)
+            if isinstance(result, dict) and result.get("status") == "ready" and isinstance(result.get("plan"), dict):
+                if exposure_routing is not None:
+                    result = {**result, "runtime_exposure_routing": exposure_routing}
+                return result
+        except Exception:
+            pass
+        return build_llm_task_plan(user_message, context)
 
     def _tool_runtime_context(self, *, job_id: str = "") -> ToolRuntimeContext:
         return ToolRuntimeContext(
@@ -1857,13 +1951,13 @@ class GISWorkspaceService:
                     },
                 }
             else:
-                llm_active_plan = build_llm_task_plan(user_message, context)
+                llm_active_plan = self._build_active_task_plan(user_message, context, candidate_plan)
             plan = llm_active_plan.get("plan") if isinstance(llm_active_plan.get("plan"), dict) else candidate_plan
             plan_validation: dict[str, Any] | None = None
             if llm_active_plan.get("status") == "ready":
                 plan_validation = validate_task_plan_before_execution(plan, context)
                 plan = plan_validation.get("execution_plan") if isinstance(plan_validation.get("execution_plan"), dict) else plan
-            llm_shadow_plan = build_shadow_llm_task_plan(user_message, context, candidate_plan)
+            llm_shadow_plan = self._build_shadow_task_plan(user_message, context, candidate_plan)
 
             def _assistant_meta(payload: dict[str, Any]) -> dict[str, Any]:
                 payload["interaction_mode"] = interaction_mode

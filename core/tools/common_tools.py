@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from langchain.tools import tool
 
-from core.station_data import stm_archive_to_training_dataframe
+from core.ismn_adapter import ismn_archive_to_observation_dataframe
 from core.tool_contracts import tool_result_error, tool_result_ok
 from core.tool_preconditions import validate_dataset_exists
 from core.workflows.data_package import (
@@ -80,7 +81,7 @@ def build_common_tools(manager: Any) -> list[Any]:
         output_name: str = "stm_soil_moisture_training",
         aggregate: str = "daily",
     ) -> str:
-        """Convert an ISMN/SMN-SDR .stm station zip archive into a modeling-ready table dataset."""
+        """Convert a local official ISMN station archive into a modeling-ready table dataset."""
         inputs = {
             "archive_path": archive_path,
             "preferred_depth": preferred_depth,
@@ -89,7 +90,7 @@ def build_common_tools(manager: Any) -> list[Any]:
             "aggregate": aggregate,
         }
         try:
-            df = stm_archive_to_training_dataframe(
+            df = ismn_archive_to_observation_dataframe(
                 archive_path,
                 preferred_depth=preferred_depth,
                 year=year,
@@ -99,9 +100,9 @@ def build_common_tools(manager: Any) -> list[Any]:
                 return tool_result_error(
                     "convert_stm_station_archive_to_training_table",
                     inputs=inputs,
-                    error_code="STM_NO_VALID_ROWS",
-                    error_title="No valid STM observations",
-                    user_message="The station archive did not contain valid observations for the requested depth and year.",
+                    error_code="ISMN_NO_VALID_ROWS",
+                    error_title="No valid ISMN observations",
+                    user_message="The ISMN archive did not contain valid observations for the requested depth and year.",
                     diagnostics={"preferred_depth": preferred_depth, "year": year, "aggregate": aggregate},
                     next_actions=["Check the archive depth labels and year range, then retry with matching parameters."],
                 ).to_json()
@@ -135,7 +136,7 @@ def build_common_tools(manager: Any) -> list[Any]:
                     "preferred_depth": preferred_depth,
                     "year": year,
                     "aggregate": aggregate,
-                    "source_archive": archive_path,
+                    "source_archive": Path(archive_path).name,
                 },
                 next_actions=[
                     "Use table_to_points to create station points.",
@@ -151,7 +152,7 @@ def build_common_tools(manager: Any) -> list[Any]:
                 error_title="STM conversion failed",
                 user_message="Failed to convert the station archive into a training table.",
                 technical_detail=f"{type(exc).__name__}: {exc}",
-                next_actions=["Confirm the file is a zip archive containing ISMN/SMN-SDR .stm files."],
+                next_actions=["Confirm the file is a local official ISMN zip archive containing soil-moisture observations."],
             ).to_json()
 
     @tool

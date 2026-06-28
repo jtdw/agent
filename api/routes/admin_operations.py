@@ -9,6 +9,23 @@ from api.schemas.admin_capabilities import CapabilityStatusIn
 from api.schemas.admin_operations import AdminStorageCleanupIn, AdminSystemResetIn, DatasetAvailabilityScanIn
 
 
+SENSITIVE_DIAGNOSTIC_KEYS = {
+    "absolute_path",
+    "api_key",
+    "cookie",
+    "env",
+    "password",
+    "path",
+    "prompt",
+    "secret",
+    "storage_state",
+    "storage_state_path",
+    "technical_detail",
+    "token",
+    "workspace_dir",
+}
+
+
 def _require_admin(require_capability_admin: Callable[[Request], None], request: Request) -> None:
     try:
         require_capability_admin(request)
@@ -16,6 +33,27 @@ def _require_admin(require_capability_admin: Callable[[Request], None], request:
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def _sanitize_agent_runtime_diagnostics(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            clean_key = str(key or "")
+            lowered = clean_key.lower()
+            if lowered != "environment" and any(token in lowered for token in SENSITIVE_DIAGNOSTIC_KEYS):
+                continue
+            sanitized[clean_key] = _sanitize_agent_runtime_diagnostics(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_agent_runtime_diagnostics(item) for item in value]
+    if isinstance(value, str):
+        lowered = value.lower()
+        if any(token in lowered for token in ("token", "cookie", ".env", "storage_state")):
+            return "[redacted]"
+        if ":/" in value or ":\\" in value:
+            return "[redacted-path]"
+    return value
 
 
 def create_admin_operations_router(
@@ -32,6 +70,9 @@ def create_admin_operations_router(
     ensure_base_dirs: Callable[[], None],
     scan_storage_cleanup_candidates: Callable[[Path], dict[str, Any]],
     cleanup_storage_candidates: Callable[..., dict[str, Any]],
+    agent_runtime_diagnostics: Callable[[], dict[str, Any]],
+    agent_runtime_rag_readiness: Callable[[], dict[str, Any]] | None = None,
+    agent_runtime_exposure: Callable[[], dict[str, Any]] | None = None,
     workdir: str | Path | Callable[[], str | Path],
     guard: Callable[[Callable[[], Any]], Any],
 ) -> APIRouter:
@@ -102,6 +143,44 @@ def create_admin_operations_router(
         def run():
             _require_admin(require_capability_admin, request)
             return trial_monitoring_store().report(exclude_actor_types={"automated_test"})
+
+        return guard(run)
+
+    @router.get("/agent-runtime/diagnostics")
+    def admin_agent_runtime_diagnostics(request: Request):
+        def run():
+            _require_admin(require_capability_admin, request)
+            return _sanitize_agent_runtime_diagnostics(agent_runtime_diagnostics())
+
+        return guard(run)
+
+    @router.get("/agent-runtime/exposure")
+    def admin_agent_runtime_exposure(request: Request):
+        def run():
+            _require_admin(require_capability_admin, request)
+            if agent_runtime_exposure is None:
+                return {
+                    "schema_version": "agent-runtime-exposure-policy/v1",
+                    "eligible_for_user_exposure": False,
+                    "recommendation": "do_not_expose_users",
+                    "reasons": ["exposure_policy_unavailable"],
+                }
+            return _sanitize_agent_runtime_diagnostics(agent_runtime_exposure())
+
+        return guard(run)
+
+    @router.get("/agent-runtime/rag-readiness")
+    def admin_agent_runtime_rag_readiness(request: Request):
+        def run():
+            _require_admin(require_capability_admin, request)
+            if agent_runtime_rag_readiness is None:
+                return {
+                    "schema_version": "agent-runtime-rag-readiness/v1",
+                    "mode": "read_only_no_embedding",
+                    "status": "unavailable",
+                    "operations": {"embedding_calls_performed": 0, "rebuild_available": False},
+                }
+            return _sanitize_agent_runtime_diagnostics(agent_runtime_rag_readiness())
 
         return guard(run)
 

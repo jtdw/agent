@@ -21,7 +21,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Compile Python modules
-        run: python -m py_compile api_server.py core\api_security.py core\resource_tools.py core\commercial\security.py core\ops_config.py
+        run: python -m py_compile api_server.py core\api_security.py core\resource_tools.py core\commercial\security.py core\ops_config.py core\agent_runtime\decision_eval.py
+      - name: Run agent runtime decision eval guard
+        shell: pwsh
+        run: .\scripts\test_agent_runtime_decision_eval.ps1
+      - name: Run agent runtime active smoke guard
+        shell: pwsh
+        run: .\scripts\test_agent_runtime_active_smoke.ps1
       - name: Run Python tests
         run: python -m unittest discover tests
       - name: Run doctor

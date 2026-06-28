@@ -262,6 +262,206 @@ def _modeling_profile_from_context(context: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _semantic_cards(context: dict[str, Any]) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for item in context.get("data_semantic_cards") or []:
+        if isinstance(item, dict):
+            cards.append(item)
+    active = context.get("active_dataset")
+    if isinstance(active, dict):
+        meta = active.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("data_semantic_card"), dict):
+            cards.append(meta["data_semantic_card"])
+
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for card in cards:
+        key = (str(card.get("dataset_name") or ""), str(card.get("source_kind") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(card)
+    return unique
+
+
+def _card_roles(card: dict[str, Any]) -> set[str]:
+    return {str(item) for item in card.get("scientific_roles") or [] if str(item or "").strip()}
+
+
+def _card_variables(card: dict[str, Any]) -> list[dict[str, Any]]:
+    return [item for item in card.get("variables") or [] if isinstance(item, dict)]
+
+
+def _find_semantic_card_by_role(context: dict[str, Any], roles: tuple[str, ...]) -> dict[str, Any]:
+    requested = {str(role) for role in roles}
+    active_name = _dataset_name(context)
+    cards = _semantic_cards(context)
+    cards.sort(key=lambda card: 0 if active_name and str(card.get("dataset_name") or "") == active_name else 1)
+    for card in cards:
+        if _card_roles(card) & requested:
+            return card
+    return {}
+
+
+def _available_field_set(context: dict[str, Any]) -> set[str]:
+    return {str(field) for field in context.get("available_fields", []) if str(field or "").strip()}
+
+
+def _field_if_available(field: Any, available: set[str]) -> str:
+    value = str(field or "").strip()
+    if not value:
+        return ""
+    return value if not available or value in available else ""
+
+
+def _semantic_target_field(card: dict[str, Any], available: set[str]) -> str:
+    modeling = _as_dict(card.get("modeling"))
+    for key in ("recommended_target", "target_column", "target_col", "observed_col"):
+        value = _field_if_available(modeling.get(key), available)
+        if value:
+            return value
+    for variable in _card_variables(card):
+        role = str(variable.get("role") or "").lower()
+        standard_name = str(variable.get("standard_name") or "").lower()
+        if role in {"target", "observed"} or standard_name == "soil_moisture":
+            value = _field_if_available(variable.get("name"), available)
+            if value:
+                return value
+    return ""
+
+
+def _semantic_feature_fields(card: dict[str, Any], target: str, available: set[str]) -> list[str]:
+    modeling = _as_dict(card.get("modeling"))
+    raw_features = modeling.get("feature_columns") or modeling.get("recommended_features") or []
+    features: list[str] = []
+    if isinstance(raw_features, str):
+        raw_features = [item.strip() for item in raw_features.split(",")]
+    if isinstance(raw_features, list):
+        for field in raw_features:
+            value = _field_if_available(field, available)
+            if value and value != target:
+                features.append(value)
+    for variable in _card_variables(card):
+        role = str(variable.get("role") or "").lower()
+        if role not in {"feature", "predictor", "covariate"}:
+            continue
+        value = _field_if_available(variable.get("name"), available)
+        if value and value != target:
+            features.append(value)
+    return list(dict.fromkeys(features))
+
+
+def _seed_modeling_fields_from_semantic_cards(plan: dict[str, Any], slots: dict[str, Any], context: dict[str, Any]) -> None:
+    if str(slots.get("task_type") or plan.get("task_type") or "") != "modeling":
+        return
+    if plan.get("resolved_fields", {}).get("target_col") and plan.get("resolved_fields", {}).get("feature_fields"):
+        return
+    card = _find_semantic_card_by_role(context, ("soil_moisture_observation", "model_target_candidate"))
+    if not card:
+        return
+    modeling = _as_dict(card.get("modeling"))
+    if modeling.get("can_train_xgboost") is False:
+        return
+    available = _available_field_set(context)
+    target = str(slots.get("target_variable") or plan.get("resolved_fields", {}).get("target_col") or "")
+    if not target:
+        target = _semantic_target_field(card, available)
+    features = [str(field) for field in slots.get("feature_fields", []) if str(field or "").strip()]
+    if not features:
+        features = _semantic_feature_fields(card, target, available)
+    if target:
+        slots["target_variable"] = target
+        plan.setdefault("resolved_fields", {})["target_col"] = target
+        slots["missing_inputs"] = [item for item in slots.get("missing_inputs", []) if item != "target column"]
+    if features:
+        slots["feature_fields"] = features
+        plan.setdefault("resolved_fields", {})["feature_fields"] = features
+        slots["missing_inputs"] = [item for item in slots.get("missing_inputs", []) if item != "feature columns"]
+    spatial = _as_dict(card.get("spatial"))
+    lon_col = _field_if_available(spatial.get("lon_col"), available)
+    lat_col = _field_if_available(spatial.get("lat_col"), available)
+    if lon_col and lat_col:
+        slots["spatial_columns"] = [lon_col, lat_col]
+    temporal = _as_dict(card.get("temporal"))
+    time_col = _field_if_available(temporal.get("time_col"), available)
+    if time_col and not slots.get("time_column"):
+        slots["time_column"] = time_col
+    if _card_roles(card) & {"soil_moisture_observation", "model_target_candidate"}:
+        slots["model_type"] = "generic_xgboost"
+
+
+def _semantic_prediction_field(card: dict[str, Any], available: set[str]) -> str:
+    modeling = _as_dict(card.get("modeling"))
+    for key in ("cv_prediction_column", "prediction_column", "predicted_col", "predicted_cols"):
+        value = _field_if_available(modeling.get(key), available)
+        if value:
+            return value
+    for variable in _card_variables(card):
+        if str(variable.get("role") or "").lower() == "prediction":
+            value = _field_if_available(variable.get("name"), available)
+            if value:
+                return value
+    return ""
+
+
+def _build_gcp_args_from_semantic_card(card: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    if not card:
+        return {}
+    available = _available_field_set(context)
+    modeling = _as_dict(card.get("modeling"))
+    spatial = _as_dict(card.get("spatial"))
+    temporal = _as_dict(card.get("temporal"))
+    dataset_name = str(card.get("dataset_name") or _dataset_name(context) or "")
+    observed_col = _semantic_target_field(card, available)
+    predicted_col = _semantic_prediction_field(card, available)
+    args = {
+        "calibration_dataset": dataset_name,
+        "observed_col": observed_col,
+        "predicted_cols": predicted_col,
+        "output_name": _safe_output_prefix(dataset_name or "model", "gcp"),
+        "calibration_ratio": 0.3,
+        "alpha": 0.1,
+    }
+    for arg_key, card_key in (("lon_col", "lon_col"), ("lat_col", "lat_col")):
+        value = _field_if_available(spatial.get(card_key), available)
+        if value:
+            args[arg_key] = value
+    date_col = _field_if_available(temporal.get("time_col") or modeling.get("date_col"), available)
+    if date_col:
+        args["date_col"] = date_col
+    fold_col = _field_if_available(modeling.get("cv_fold_column") or modeling.get("fold_column"), available)
+    if fold_col:
+        args["fold_col"] = fold_col
+    cv_available_col = _field_if_available(modeling.get("cv_available_column"), available)
+    if cv_available_col:
+        args["cv_available_col"] = cv_available_col
+    return args
+
+
+def _semantic_gcp_result_card(context: dict[str, Any]) -> dict[str, Any]:
+    return _find_semantic_card_by_role(context, ("gcp_result", "prediction_with_uncertainty"))
+
+
+def _seed_map_field_from_semantic_cards(plan: dict[str, Any], prompt: str, context: dict[str, Any]) -> None:
+    if str(plan.get("task_type") or "") != "map_generation":
+        return
+    if plan.get("resolved_fields", {}).get("map_field"):
+        return
+    text = str(prompt or "").lower()
+    if not any(token in text for token in ("gcp", "uncertainty", "interval", "coverage", "width")):
+        return
+    card = _semantic_gcp_result_card(context)
+    if not card:
+        return
+    available = _available_field_set(context)
+    for variable in _card_variables(card):
+        for key in ("interval_width", "local_quantile", "interval_upper", "interval_lower"):
+            value = _field_if_available(variable.get(key), available)
+            if value:
+                plan.setdefault("resolved_fields", {})["map_field"] = value
+                return
+
+
 def _seed_modeling_fields_from_profile(plan: dict[str, Any], slots: dict[str, Any], context: dict[str, Any]) -> None:
     if str(slots.get("task_type") or plan.get("task_type") or "") != "modeling":
         return
@@ -915,6 +1115,17 @@ def _prompt_requests_table_to_points_and_raster_extract(prompt: str) -> bool:
     return point_request and raster_request
 
 
+def _prompt_requests_clip(prompt: str) -> bool:
+    text = str(prompt or "").lower()
+    return any(token in text for token in ("clip", "clip by", "clip to", "\u88c1\u526a"))
+
+
+def _prompt_requests_raster_clip(prompt: str, context: dict[str, Any]) -> bool:
+    text = str(prompt or "").lower()
+    raster_hint = any(token in text for token in ("raster", "dem", "geotiff", "tif", "\u6805\u683c"))
+    return _prompt_requests_clip(prompt) and (raster_hint or _dataset_type(context) == "raster")
+
+
 def _build_table_points_map_workflow(
     plan: dict[str, Any],
     prompt: str,
@@ -1085,7 +1296,25 @@ def _build_raster_processing_workflow(plan: dict[str, Any], prompt: str, context
     step_id = ""
     expected_outputs: list[str] = []
 
-    if _prompt_requests_raster_mosaic(prompt):
+    if _prompt_requests_raster_clip(prompt, context):
+        vector_name = _first_dataset_by_type(context, "vector")
+        missing = []
+        if not raster_name:
+            missing.append("raster dataset")
+        if not vector_name:
+            missing.append("clip boundary vector")
+        if missing:
+            _add_missing_inputs(plan, missing)
+            return True
+        workflow_tool = "clip_raster_by_vector"
+        step_id = "clip_raster"
+        args = {
+            "raster_name": raster_name,
+            "vector_name": vector_name,
+            "output_name": _safe_output_prefix(raster_name, "clipped"),
+        }
+        expected_outputs = ["clipped raster", "map layer"]
+    elif _prompt_requests_raster_mosaic(prompt):
         raster_names = _available_dataset_names_by_type(context, "raster")
         if len(raster_names) < 2:
             _add_missing_inputs(plan, ["two or more raster datasets"])
@@ -1510,7 +1739,7 @@ def _registered_workflow_params(workflow_id: str, prompt: str, context: dict[str
         args = dict(_as_dict(validated.get("clip_raster_by_vector")))
         referenced = _as_dict(context.get("referenced_object"))
         raster_name = args.get("raster_name") or (dataset if _dataset_type(context) == "raster" else _active_or_first_raster(context))
-        vector_name = args.get("vector_name") or referenced.get("dataset_id") or referenced.get("name") or referenced.get("id") or ""
+        vector_name = args.get("vector_name") or referenced.get("dataset_id") or referenced.get("name") or referenced.get("id") or context.get("selected_layer_id") or ""
         return {
             "raster_name": raster_name,
             "vector_name": vector_name,
@@ -1547,6 +1776,15 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     task_type = str(intent.get("intent") or semantic.get("intent") or "unclear_request")
     if task_type == "unclear_request" and semantic.get("intent") != "unclear_request":
         task_type = str(semantic.get("intent") or task_type)
+    if task_type == "data_download" and _has_dataset(context):
+        if _prompt_requests_map(text):
+            task_type = "map_generation"
+        elif _prompt_requests_raster_clip(text, context) or _prompt_requests_clip(text):
+            task_type = "data_processing"
+    if task_type == "modeling" and _prompt_requests_map(text):
+        gcp_result_card = _semantic_gcp_result_card(context)
+        if gcp_result_card and str(gcp_result_card.get("source_kind") or "") == "gcp_uncertainty_result":
+            task_type = "map_generation"
     dataset = _dataset_name(context)
     plan = _default_plan(task_type)
     plan["semantic_parse"] = semantic
@@ -1565,15 +1803,26 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             _apply_resolved_field(plan, resolved_objects, field_key="target_col", kind="target")
     slot_state, slot_workspace = _slot_context(context, dataset, referenced_object)
     slots = extract_task_slots(text, intent, slot_state, slot_workspace)
+    if task_type and str(slots.get("task_type") or "") != task_type:
+        slots["task_type"] = task_type
     if _as_dict(resolved_objects.get("clip_boundary")).get("ok") and "clip layer" in slots.get("missing_inputs", []):
         slots["missing_inputs"] = [item for item in slots.get("missing_inputs", []) if item != "clip layer"]
     plan["slots"] = slots
     _seed_resolved_fields_from_slots(plan, slots)
     _seed_modeling_fields_from_profile(plan, slots, context)
+    _seed_modeling_fields_from_semantic_cards(plan, slots, context)
+    _seed_map_field_from_semantic_cards(plan, text, context)
+    semantic_result_card = _semantic_gcp_result_card(context)
 
     if referenced_object:
         plan["required_inputs"].append("referenced object")
         plan["referenced_object"] = referenced_object
+    elif semantic_result_card and task_type == "result_analysis":
+        plan["semantic_result_card"] = {
+            "dataset_name": str(semantic_result_card.get("dataset_name") or ""),
+            "source_kind": str(semantic_result_card.get("source_kind") or ""),
+            "scientific_roles": sorted(_card_roles(semantic_result_card)),
+        }
 
     _apply_registered_workflow_priority(plan, text, context)
     _attach_executable_registered_workflow(plan, text, context)
@@ -1600,6 +1849,10 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     if task_type == "modeling" and _prompt_requests_gcp(text) and not any(token in text.lower() for token in ("xgboost", "xgb", "train", "训练")):
         model = _recent_model_for_gcp(context, resolved_objects)
         gcp_args = _build_gcp_args_from_recent_model(model)
+        if not all(str(gcp_args.get(key) or "").strip() for key in ("calibration_dataset", "observed_col", "predicted_cols")):
+            semantic_gcp_card = _find_semantic_card_by_role(context, ("gcp_calibration_candidate", "model_prediction_result"))
+            semantic_args = _build_gcp_args_from_semantic_card(semantic_gcp_card, context)
+            gcp_args = {**gcp_args, **{key: value for key, value in semantic_args.items() if value not in ("", None)}}
         if not gcp_args.get("date_col"):
             inferred_date = _infer_date_field(context)
             if inferred_date:
@@ -1712,7 +1965,7 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
             ],
             expected_outputs=["结果解释", "下一步建议"],
         )
-        if not context.get("recent_model_result") and not context.get("recent_artifacts") and not referenced_object:
+        if not context.get("recent_model_result") and not context.get("recent_artifacts") and not referenced_object and not semantic_result_card:
             _add_missing_inputs(
                 plan,
                 ["result object"],
@@ -1778,6 +2031,12 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     if secondary_intents:
         _append_secondary_steps(plan, secondary_intents)
     slot_missing = [str(item) for item in slots.get("missing_inputs", []) if item]
+    if task_type != "modeling":
+        slot_missing = [item for item in slot_missing if item not in {"target column", "feature columns"}]
+    if plan.get("resolved_fields", {}).get("map_field"):
+        slot_missing = [item for item in slot_missing if item not in {"map_field", "map field"}]
+    if semantic_result_card and task_type == "result_analysis":
+        slot_missing = [item for item in slot_missing if item != "referenced object"]
     if slot_missing:
         _add_missing_inputs(plan, slot_missing)
 

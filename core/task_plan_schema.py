@@ -112,6 +112,13 @@ def _source_for_name(name: str, raw_source_attribution: Any, available_dataset_n
 def _normalize_phase2_payload(data: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """Repair JSON-mode type drift without inventing tools, fields, or products."""
     normalized = dict(data)
+    context_intent = str(_as_dict(context.get("intent")).get("intent") or "").strip()
+    if not str(normalized.get("primary_goal") or "").strip():
+        normalized["primary_goal"] = str(normalized.get("goal") or normalized.get("task_type") or normalized.get("operation") or context_intent or "GIS task")
+    if not str(normalized.get("intent") or "").strip():
+        normalized["intent"] = str(normalized.get("task_type") or context_intent or normalized.get("operation") or "data_processing")
+    if not str(normalized.get("operation") or "").strip():
+        normalized["operation"] = str(normalized.get("task_type") or normalized.get("intent") or context_intent or "data_processing")
     available_dataset_names = _available_dataset_names_for_normalization(context)
     asset_roles = _as_dict(normalized.get("asset_roles"))
     raw_source_attribution = normalized.get("source_attribution")
@@ -602,6 +609,19 @@ def validate_llm_task_plan(payload: Any, context: dict[str, Any]) -> dict[str, A
 
     errors: list[dict[str, Any]] = []
     task_type = str(data.get("task_type") or _as_dict(context.get("intent")).get("intent") or "unclear_request")
+    candidate_tools_for_repair = _candidate_tools(context)
+    planned_tools_for_repair = [
+        str(step.get("tool_name") or "").strip()
+        for step in _as_list(data.get("planned_steps"))
+        if isinstance(step, dict) and str(step.get("tool_name") or "").strip()
+    ]
+    if (
+        "tools_read" not in data
+        and candidate_tools_for_repair
+        and planned_tools_for_repair
+        and all(tool_name in candidate_tools_for_repair for tool_name in planned_tools_for_repair)
+    ):
+        data = {**data, "tools_read": list(dict.fromkeys(planned_tools_for_repair))}
 
     for key in ("goal", "selected_assets", "tools_read", "planned_steps", "requires_confirmation", "expected_outputs"):
         if key not in data:

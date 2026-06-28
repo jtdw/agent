@@ -355,6 +355,42 @@ class RouteModulesBehaviorTests(unittest.TestCase):
                 ensure_base_dirs=lambda: calls.append(("ensure_dirs", True)),
                 scan_storage_cleanup_candidates=lambda workdir: {"workdir": str(workdir), "candidates": [{"id": "tmp"}]},
                 cleanup_storage_candidates=lambda workdir, candidate_ids, confirm_text: {"deleted": candidate_ids, "confirm_text": confirm_text},
+                agent_runtime_diagnostics=lambda: {
+                    "available": True,
+                    "enabled": True,
+                    "mode": "shadow",
+                    "context": {
+                        "current_user_id": "u_admin",
+                        "current_session_id": "s_admin",
+                        "workspace_dir": "E:/secret/workspace",
+                    },
+                    "trace_events": [
+                        {
+                            "event": "context_merge",
+                            "payload": {
+                                "prompt": "full user prompt should not leak",
+                                "token": "secret-token",
+                                "cookie": "secret-cookie",
+                                "path": "E:/secret/file.env",
+                                "ok": True,
+                            },
+                        }
+                    ],
+                },
+                agent_runtime_rag_readiness=lambda: {
+                    "schema_version": "agent-runtime-rag-readiness/v1",
+                    "mode": "read_only_no_embedding",
+                    "provider": {"credential_configured": True, "api_key": "secret-key"},
+                    "vector_store": {"configured": True, "store_filename": "vectors.json", "path": "E:/secret/vectors.json"},
+                    "operations": {"embedding_calls_performed": 0, "rebuild_available": False},
+                },
+                agent_runtime_exposure=lambda: {
+                    "schema_version": "agent-runtime-exposure-policy/v1",
+                    "environment": "staging",
+                    "requested_percent": 5,
+                    "eligible_for_user_exposure": True,
+                    "deterministic_smoke": {"report_filename": "active_smoke.json", "path": "E:/secret/smoke.json"},
+                },
                 workdir="E:/work",
                 guard=lambda fn: fn(),
             )
@@ -362,8 +398,26 @@ class RouteModulesBehaviorTests(unittest.TestCase):
         client = TestClient(app)
 
         self.assertEqual(client.get("/api/admin/dataset-availability").status_code, 403)
+        self.assertEqual(client.get("/api/admin/agent-runtime/diagnostics").status_code, 403)
         listed = client.get("/api/admin/dataset-availability?include_inactive=true", headers={"x-admin-token": "secret"}).json()
         self.assertEqual(listed["items"][0]["product_id"], "p1")
+        diagnostics = client.get("/api/admin/agent-runtime/diagnostics", headers={"x-admin-token": "secret"}).json()
+        self.assertTrue(diagnostics["available"])
+        self.assertEqual(diagnostics["mode"], "shadow")
+        self.assertNotIn("workspace_dir", diagnostics["context"])
+        self.assertNotIn("prompt", str(diagnostics))
+        self.assertNotIn("secret-token", str(diagnostics))
+        self.assertNotIn("secret-cookie", str(diagnostics))
+        self.assertNotIn("E:/secret", str(diagnostics))
+        rag_readiness = client.get("/api/admin/agent-runtime/rag-readiness", headers={"x-admin-token": "secret"}).json()
+        self.assertEqual(rag_readiness["mode"], "read_only_no_embedding")
+        self.assertEqual(rag_readiness["operations"]["embedding_calls_performed"], 0)
+        self.assertNotIn("api_key", str(rag_readiness))
+        self.assertNotIn("E:/secret", str(rag_readiness))
+        exposure = client.get("/api/admin/agent-runtime/exposure", headers={"x-admin-token": "secret"}).json()
+        self.assertEqual(exposure["environment"], "staging")
+        self.assertEqual(exposure["requested_percent"], 5)
+        self.assertNotIn("E:/secret", str(exposure))
         upserted = client.post("/api/admin/dataset-availability", headers={"x-admin-token": "secret"}, json={"product_id": "p2"}).json()
         self.assertEqual(upserted["item"]["product_id"], "p2")
         status = client.post(

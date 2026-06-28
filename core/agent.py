@@ -21,6 +21,7 @@ else:
 
 from .config import Settings
 from .agent_policy import load_global_agent_policy
+from .agent_runtime import AgentRuntimeConfig, AgentRuntimeContext, GISAgentRuntime
 from .llm_config import validate_llm_config
 if TYPE_CHECKING:
     from .data_manager import DataManager
@@ -116,6 +117,14 @@ class GISAgent:
             model=self.model,
             tools=self.tools,
             system_prompt=SYSTEM_PROMPT,
+        )
+        self.agent_runtime = GISAgentRuntime.from_legacy_agent(
+            model=self.model,
+            tools=self.tools,
+            system_prompt=SYSTEM_PROMPT,
+            legacy_agent=self.agent,
+            context=AgentRuntimeContext.from_manager(manager),
+            config=AgentRuntimeConfig.from_env(),
         )
 
     def _normalize_text(self, content: Any) -> str:

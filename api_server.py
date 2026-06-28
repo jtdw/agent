@@ -30,6 +30,8 @@ from api.routes.workspace import create_workspace_router
 from api.schemas.chat import AskIn
 from core.config import Settings, load_settings
 from core.service import GISWorkspaceService
+from core.agent_runtime import agent_runtime_rag_readiness_report
+from core.agent_runtime.exposure import agent_runtime_exposure_report
 from core.commercial.service import CommercialService, PLAN_PRESETS
 from core.api_security import optional_authenticated_session, require_admin_token, require_authenticated_user, require_resource_owner
 from core.api_helpers import (
@@ -64,7 +66,7 @@ from core.storage_cleanup import cleanup_storage_candidates, scan_storage_cleanu
 from core.compat_usage import CompatibilityUsageStore
 from core.trial_monitoring import TrialMonitoringStore
 from core.semantic_parser import parse_user_semantics
-from core.station_data import find_station_archives, parse_ismn_station_zip
+from core.ismn_adapter import find_local_ismn_archives, ismn_archive_to_station_collection
 from core.domestic_sources.gscloud_download_verifier import verify_gscloud_scene_download
 from core.domestic_sources.gscloud_products import GSCLOUD_PRODUCTS, LANDSAT8_OLI_TIRS, MOD021KM_1KM_SURFACE_REFLECTANCE, MODEV1F_CHINA_250M_EVI_5DAY, MODL1D_CHINA_1KM_LST_DAILY, MODND1D_CHINA_500M_NDVI_DAILY, SENTINEL2_MSI
 from core.domestic_sources.gscloud_reliability import inspect_storage_state, resolve_download_region
@@ -473,6 +475,9 @@ app.include_router(
         ensure_base_dirs=lambda: base_settings.ensure_dirs(),
         scan_storage_cleanup_candidates=scan_storage_cleanup_candidates,
         cleanup_storage_candidates=cleanup_storage_candidates,
+        agent_runtime_diagnostics=lambda: workspace_for(None).agent_runtime_diagnostics(),
+        agent_runtime_rag_readiness=agent_runtime_rag_readiness_report,
+        agent_runtime_exposure=agent_runtime_exposure_report,
         workdir=lambda: base_settings.workdir,
         guard=guard,
     )
@@ -603,7 +608,7 @@ def _station_search_roots(user_id: str | None = None) -> list[Path]:
 
 
 def _load_station_collection(user_id: str = "") -> dict:
-    archives = find_station_archives(*_station_search_roots(user_id))
+    archives = find_local_ismn_archives(*_station_search_roots(user_id))
     if not archives:
         return {
             "count": 0,
@@ -612,10 +617,9 @@ def _load_station_collection(user_id: str = "") -> dict:
             "bounds": [115.5, 41.5, 116.5, 42.5],
             "source": "",
             "source_name": "",
-            "message": "未找到闪电河 2019 土壤水分站点压缩包。请将 shandianhe2019_station_0_5cm.zip 放入 local_library/data/stations，或上传到当前工作区。",
+            "message": "未找到本地 ISMN 土壤水分站点压缩包。请将官方 ISMN zip 放入 local_library/data/ismn，或上传到当前工作区。",
         }
-    # Use the first matching archive. The finder prioritizes Shandian/station archives.
-    return parse_ismn_station_zip(archives[0], preferred_depth="0.050000", year="2019")
+    return ismn_archive_to_station_collection(archives[0], preferred_depth="0.050000", year="2019")
 
 
 def _read_vector_for_map(path: Path):

@@ -100,6 +100,76 @@ class LLMTaskPlannerTests(unittest.TestCase):
         self.assertIn("FIELD_NOT_IN_CONTEXT", {error["code"] for error in result["errors"]})
         self.assertTrue(result["fallback_plan"]["should_ask_clarification"])
 
+    def test_accepts_classic_plan_missing_tools_read_when_tools_are_candidate_cards(self) -> None:
+        context = {
+            "active_dataset": {"name": "stations", "type": "table"},
+            "available_fields": ["lon", "lat"],
+            "candidate_tool_cards": [{"tool_name": "table_to_points"}],
+        }
+        payload = {
+            "task_type": "data_processing",
+            "goal": "Convert station table to points.",
+            "selected_assets": [{"role": "coordinate_table", "name": "stations", "evidence": ["active dataset"]}],
+            "planned_steps": [
+                {
+                    "step_id": "points",
+                    "tool_name": "table_to_points",
+                    "args": {
+                        "dataset_name": "stations",
+                        "x_col": "lon",
+                        "y_col": "lat",
+                        "crs": "EPSG:4326",
+                        "output_name": "stations_points",
+                    },
+                }
+            ],
+            "requires_confirmation": False,
+            "clarification_question": "",
+            "assumptions": [],
+            "expected_outputs": ["point_layer"],
+            "forbidden_tools": [],
+            "explanation": "Tool card was supplied in context.",
+        }
+
+        result = validate_llm_task_plan(payload, context)
+
+        self.assertTrue(result["ok"], result.get("errors"))
+        self.assertEqual(result["plan"]["tool_plan"][0]["tool_name"], "table_to_points")
+
+    def test_accepts_phase2_plan_missing_title_fields_when_task_type_and_goal_are_present(self) -> None:
+        context = {
+            "active_dataset": {"name": "stations", "type": "table"},
+            "available_fields": ["lon", "lat"],
+            "candidate_tool_cards": [{"tool_name": "table_to_points"}],
+        }
+        payload = {
+            "task_type": "data_processing",
+            "goal": "Convert station table to points.",
+            "selected_tools": ["table_to_points"],
+            "workflow_steps": [
+                {
+                    "step_id": "points",
+                    "tool_name": "table_to_points",
+                    "args": {
+                        "dataset_name": "stations",
+                        "x_col": "lon",
+                        "y_col": "lat",
+                        "crs": "EPSG:4326",
+                        "output_name": "stations_points",
+                    },
+                }
+            ],
+            "requires_confirmation": False,
+            "expected_outputs": ["point_layer"],
+        }
+
+        result = validate_llm_task_plan(payload, context)
+
+        self.assertTrue(result["ok"], result.get("errors"))
+        self.assertEqual(result["plan"]["primary_goal"], "Convert station table to points.")
+        self.assertEqual(result["plan"]["task_type"], "data_processing")
+        self.assertEqual(result["plan"]["workflow_plan"][0]["tool_name"], "table_to_points")
+
     def test_rejects_download_product_key_not_in_context_candidates(self) -> None:
         context = {
             "candidate_tool_cards": [{"tool_name": "download_backend_status"}],
