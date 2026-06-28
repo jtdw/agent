@@ -272,6 +272,37 @@ class NextDataProcessingMigrationTests(unittest.TestCase):
             self.assertIn("county_dem_slope", step["tool_result"]["outputs"]["datasets"])
             self.assertIn("county_dem_aspect", step["tool_result"]["outputs"]["datasets"])
 
+    def test_dem_twi_tpi_prompt_routes_to_terrain_derivatives(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            dem_path = self.write_projected_tile(
+                Path(tmp) / "dem_3857.tif",
+                values=np.array(
+                    [
+                        [120, 118, 116, 114],
+                        [118, 116, 114, 112],
+                        [116, 114, 112, 110],
+                        [114, 112, 110, 108],
+                    ],
+                    dtype="float32",
+                ),
+            )
+            dem_name = service.manager.put_raster_path("county_dem", dem_path, meta={"crs": "EPSG:3857"})
+            context = self.raster_context((dem_name, str(dem_path)))
+            intent = {"intent": "data_processing", "confidence": 0.9, "secondary_intents": []}
+
+            plan = build_task_plan("\u8ba1\u7b97\u8fd9\u4e2a DEM \u7684 TWI \u548c TPI \u5730\u5f62\u56e0\u5b50", intent, context, manager=service.manager)
+            execution = execute_workflow_plan(service.manager, plan)
+            result = parse_workflow_result(execution["raw_reply"])
+
+            self.assertFalse(plan["should_ask_clarification"])
+            self.assertEqual(plan["validated_tool_args"]["dem_terrain_derivatives"]["derivatives"], "tpi,twi")
+            self.assertTrue(execution["ok"], result)
+            step = next(item for item in result["steps"] if item["tool_name"] == "dem_terrain_derivatives")
+            self.assertEqual(set(step["tool_result"]["outputs"]["derivatives"]), {"tpi", "twi"})
+            self.assertIn("county_dem_terrain", step["tool_result"]["outputs"]["datasets"])
+            self.assertIn("county_dem_twi", step["tool_result"]["outputs"]["datasets"])
+
     def test_raster_reproject_prompt_builds_and_executes_workflow(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))

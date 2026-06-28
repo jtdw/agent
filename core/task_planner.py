@@ -1196,9 +1196,15 @@ def _prompt_requests_dem_derivatives(prompt: str) -> bool:
             "slope",
             "aspect",
             "terrain",
+            "tpi",
+            "twi",
+            "topographic position index",
+            "topographic wetness index",
             "dem",
             "\u5761\u5ea6",
             "\u5761\u5411",
+            "\u5730\u5f62\u4f4d\u7f6e\u6307\u6570",
+            "\u5730\u5f62\u6e7f\u5ea6\u6307\u6570",
             "\u5730\u5f62\u56e0\u5b50",
             "\u5730\u5f62",
         )
@@ -1232,10 +1238,16 @@ def _dem_derivatives_from_prompt(prompt: str) -> str:
         derivatives.append("slope")
     if "aspect" in text or "\u5761\u5411" in text:
         derivatives.append("aspect")
+    if "tpi" in text or "topographic position index" in text or "\u5730\u5f62\u4f4d\u7f6e\u6307\u6570" in text:
+        derivatives.append("tpi")
+    if "twi" in text or "topographic wetness index" in text or "\u5730\u5f62\u6e7f\u5ea6\u6307\u6570" in text:
+        derivatives.append("twi")
     if "terrain" in text or "\u5730\u5f62" in text:
-        for item in ("slope", "aspect", "terrain"):
-            if item not in derivatives:
+        if not derivatives:
+            for item in ("slope", "tpi", "twi"):
                 derivatives.append(item)
+        elif not any(item in derivatives for item in ("tpi", "twi")) and "terrain" not in derivatives:
+            derivatives.append("terrain")
     return ",".join(derivatives or ["slope", "aspect"])
 
 
