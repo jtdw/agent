@@ -80,6 +80,89 @@ class PresentationResultTests(unittest.TestCase):
         self.assertNotIn("C:/secret", rendered)
         self.assertNotIn("download_url", rendered)
 
+    def test_xgboost_raster_prediction_result_is_map_ready_without_path_leaks(self) -> None:
+        bundle = build_presentation_bundle(
+            task_goal="use XGBoost to predict the full Shandian basin soil moisture raster map for 2019-07-15",
+            task_plan_summary={"primary_goal": "full_basin_xgboost_soil_moisture_prediction_map"},
+            coordinator_status="succeeded",
+            normalized_results=[
+                {
+                    "status": "succeeded",
+                    "step_id": "predict",
+                    "tool_name": "predict_xgboost_raster_map",
+                    "outputs": {
+                        "result_dataset": "shandian_basin_soil_moisture_xgb_20190715",
+                        "path": "E:/agent/workspace/derived/shandian.tif",
+                        "preview_path": "E:/agent/workspace/plots/shandian.png",
+                        "summary_path": "E:/agent/workspace/derived/shandian_summary.json",
+                        "target": "soil_moisture_mean",
+                        "representative_date": "2019-07-15",
+                        "valid_prediction_pixels": 14049927,
+                    },
+                    "artifacts": [
+                        {
+                            "artifact_id": "artifact_prediction_raster",
+                            "path": "E:/agent/workspace/derived/shandian.tif",
+                            "title": "shandian.tif",
+                            "type": "raster",
+                        },
+                        {
+                            "artifact_id": "artifact_prediction_preview",
+                            "path": "E:/agent/workspace/plots/shandian.png",
+                            "title": "shandian.png",
+                            "type": "png",
+                        },
+                        {
+                            "artifact_id": "artifact_prediction_summary",
+                            "path": "E:/agent/workspace/derived/shandian_summary.json",
+                            "title": "shandian_summary.json",
+                            "type": "summary",
+                        },
+                    ],
+                    "map_layers": [
+                        {
+                            "layer_id": "dataset_shandian_basin_soil_moisture_xgb_20190715",
+                            "name": "shandian_basin_soil_moisture_xgb_20190715",
+                            "type": "raster",
+                        }
+                    ],
+                    "images": [
+                        {
+                            "path": "E:/agent/workspace/plots/shandian.png",
+                            "title": "shandian.png",
+                        }
+                    ],
+                    "warnings": [
+                        "Representative date only enters time features; if LST/NDVI are not same-day products, treat this as a covariate snapshot prediction map."
+                    ],
+                    "errors": [],
+                    "next_actions": ["Inspect the prediction raster layer and NoData mask on the map."],
+                    "diagnostics": {"output_tif": "E:/agent/workspace/derived/shandian.tif"},
+                }
+            ],
+        )
+
+        presentation = bundle["presentation_result"]
+        reply = bundle["reply"]
+        rendered = json.dumps(bundle, ensure_ascii=False)
+
+        self.assertEqual(presentation["status"], "succeeded")
+        self.assertEqual(
+            [item["artifact_id"] for item in presentation["artifact_refs"]],
+            ["artifact_prediction_raster", "artifact_prediction_preview", "artifact_prediction_summary"],
+        )
+        self.assertEqual(
+            [item["layer_id"] for item in presentation["map_layer_refs"]],
+            ["dataset_shandian_basin_soil_moisture_xgb_20190715"],
+        )
+        self.assertEqual([item["artifact_id"] for item in presentation["image_refs"]], ["artifact_prediction_preview"])
+        self.assertIn("representative_date=2019-07-15", presentation["result_highlights"])
+        self.assertIn("valid_prediction_pixels=14049927", presentation["result_highlights"])
+        self.assertIn("target=soil_moisture_mean", presentation["result_highlights"])
+        self.assertIn("shandian.tif", reply)
+        self.assertNotIn("E:/agent", rendered)
+        self.assertNotIn("workspace/derived", rendered)
+
     def test_failure_waiting_and_blocked_have_status_specific_messages(self) -> None:
         failed = build_presentation_result(
             task_goal="clip raster",

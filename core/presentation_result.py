@@ -89,6 +89,11 @@ def _clean_text(value: Any, limit: int = 180) -> str:
     return text[:limit]
 
 
+def _path_lookup_key(value: Any) -> str:
+    text = str(value or "").strip()
+    return text.replace("\\", "/").lower()
+
+
 def _parse_llm_payload(raw: Any) -> dict[str, Any] | None:
     if isinstance(raw, LLMPresentationResult):
         return raw.model_dump(mode="json")
@@ -228,7 +233,7 @@ def build_presentation_result(
             if value:
                 data_sources.append(value)
         result_highlights.extend(_metric_highlights(outputs))
-        for key in ("result_dataset", "model_result_id", "feature_count", "row_count"):
+        for key in ("result_dataset", "model_result_id", "feature_count", "row_count", "target", "representative_date", "valid_prediction_pixels"):
             value = _clean_text(outputs.get(key), 100)
             if value:
                 result_highlights.append(f"{key}={value}")
@@ -465,6 +470,14 @@ def sanitize_normalized_results(normalized_results: list[Any]) -> list[dict[str,
     for item in normalized_results:
         if not isinstance(item, dict):
             continue
+        artifact_ids_by_path: dict[str, str] = {}
+        for artifact in _as_list(item.get("artifacts")):
+            if not isinstance(artifact, dict):
+                continue
+            artifact_id = _clean_text(artifact.get("artifact_id") or artifact.get("id"), 120)
+            path_key = _path_lookup_key(artifact.get("path") or artifact.get("absolute_path") or artifact.get("relative_path"))
+            if artifact_id and path_key:
+                artifact_ids_by_path[path_key] = artifact_id
         outputs = {
             str(key): value
             for key, value in _as_dict(item.get("outputs")).items()
@@ -491,6 +504,20 @@ def sanitize_normalized_results(normalized_results: list[Any]) -> list[dict[str,
                     "type": _clean_text(artifact.get("type") or artifact.get("kind"), 60),
                 }
             )
+        images = []
+        for image in _as_list(item.get("images")):
+            image_dict = image if isinstance(image, dict) else {"path": image}
+            artifact_id = _clean_text(image_dict.get("artifact_id") or image_dict.get("id"), 120)
+            if not artifact_id:
+                artifact_id = artifact_ids_by_path.get(_path_lookup_key(image_dict.get("path")))
+            if not artifact_id:
+                continue
+            images.append(
+                {
+                    "artifact_id": artifact_id,
+                    "title": _clean_text(image_dict.get("title") or image_dict.get("name"), 120),
+                }
+            )
         sanitized.append(
             {
                 "status": _clean_text(item.get("status"), 40),
@@ -499,7 +526,7 @@ def sanitize_normalized_results(normalized_results: list[Any]) -> list[dict[str,
                 "artifacts": artifacts,
                 "map_layers": _as_list(item.get("map_layers")),
                 "tables": _as_list(item.get("tables")),
-                "images": _as_list(item.get("images")),
+                "images": images,
                 "outputs": outputs,
                 "diagnostics": diagnostics,
                 "next_actions": [_clean_text(value, 180) for value in _as_list(item.get("next_actions")) if _clean_text(value, 180)],
