@@ -31,6 +31,23 @@ def _write_many_day_station_archive(path: Path, days: int = 16) -> None:
         archive.writestr("SMN-SDR/L1/L1_sm_0.050000_0.050000_20190101_20191231.stm", "\n".join(lines))
 
 
+def _write_two_station_archive(path: Path, days: int = 12) -> None:
+    start = date(2019, 1, 1)
+    stations = [
+        ("INSIDE", 41.55076, 115.53885, 1433.0, 0.10),
+        ("OUTSIDE", 41.55076, 115.54885, 1433.0, 0.20),
+    ]
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for station_id, lat, lon, elev, base_value in stations:
+            lines = [f"SMN-SDR SMN-SDR {station_id} {lat:.5f} {lon:.5f} {elev:.1f} 0.0500 0.0500 5TM"]
+            for idx in range(days):
+                current = start + timedelta(days=idx)
+                value = base_value + idx * 0.005
+                lines.append(f"{current:%Y/%m/%d} 00:00 {value:.4f} D01,D03 M")
+                lines.append(f"{current:%Y/%m/%d} 12:00 {value + 0.002:.4f} D01,D03 M")
+            archive.writestr(f"SMN-SDR/{station_id}/{station_id}_sm_0.050000_0.050000_20190101_20191231.stm", "\n".join(lines))
+
+
 def _write_covering_raster(path: Path) -> None:
     data = np.arange(100, dtype="float32").reshape(10, 10)
     x, y = transform_coords("EPSG:4326", "EPSG:3857", [115.53885], [41.55076])
@@ -67,6 +84,22 @@ def _write_temporal_covering_raster(path: Path) -> None:
         dst.write(data)
         for index, current in enumerate(band_dates, start=1):
             dst.set_band_description(index, f"{current:%Y_%m_%d}_{current:%Y_%m_%d}_NDVI")
+
+
+def _write_lulc_mask_raster(path: Path) -> None:
+    data = np.array([[10, 0]], dtype="uint8")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=1,
+        width=2,
+        count=1,
+        dtype="uint8",
+        crs="EPSG:4326",
+        transform=from_origin(115.53385, 41.55576, 0.01, 0.01),
+    ) as dst:
+        dst.write(data, 1)
 
 
 def _service(tmp: str) -> GISWorkspaceService:
@@ -122,10 +155,11 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
         assert result is not None
         assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
         assert result["outputs"]["status"] == "modeled"
-        assert result["outputs"]["training_dataset"] == "stm_full_training"
+        assert result["outputs"]["training_dataset"] == "stm_full_unified_training"
         assert result["outputs"]["point_dataset"] == "stm_full_points"
         assert result["outputs"]["feature_dataset"] == "stm_full_features"
         assert result["outputs"]["model_result"]["ok"] is True
+        assert result["outputs"]["unified_preprocessing"]["removed_row_count"] == 0
         assert result["outputs"]["raster_features"] == [
             "dem",
             "stm_full_dem_slope",
@@ -139,11 +173,53 @@ def test_stm_xgboost_workflow_runs_full_pipeline_when_raster_features_exist() ->
         assert "raster_stm_full_dem_twi" in result["outputs"]["model_feature_cols"]
         assert [step["tool_name"] for step in result["outputs"]["steps"]] == [
             "convert_stm_station_archive_to_training_table",
+            "table_to_points",
+            "batch_register_points_to_rasters",
+            "prepare_unified_training_samples",
             "dem_terrain_derivatives",
             "table_to_points",
             "batch_register_points_to_rasters",
             "generic_xgboost_workflow",
         ]
+
+
+def test_stm_xgboost_workflow_filters_lulc_zero_before_derivatives() -> None:
+    with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        service = _service(tmp)
+        archive_path = service.manager.upload_dir / "stations.zip"
+        _write_two_station_archive(archive_path)
+        dem_path = service.manager.upload_dir / "dem.tif"
+        lulc_path = service.manager.upload_dir / "lulc.tif"
+        _write_covering_raster(dem_path)
+        _write_lulc_mask_raster(lulc_path)
+        service.manager.put_raster_path("dem", dem_path, meta={"crs": "EPSG:3857"})
+        service.manager.put_raster_path("lulc", lulc_path, meta={"crs": "EPSG:4326", "dataset_type": "landcover"})
+        tool = {item.name: item for item in build_tools(service.manager)}["run_stm_soil_moisture_xgboost_workflow"]
+
+        result = parse_tool_result(
+            tool.invoke(
+                {
+                    "archive_path": str(archive_path),
+                    "raster_names": "dem,lulc",
+                    "output_prefix": "stm_filtered",
+                    "aggregate": "daily",
+                    "min_samples": 8,
+                }
+            )
+        )
+
+        assert result is not None
+        assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
+        assert result["outputs"]["status"] == "modeled"
+        assert result["outputs"]["training_dataset"] == "stm_filtered_unified_training"
+        assert result["outputs"]["unified_preprocessing"]["removed_row_count"] == 12
+        assert result["outputs"]["unified_preprocessing"]["removed_station_count"] == 1
+        assert result["outputs"]["unified_preprocessing"]["removed_stations"] == ["OUTSIDE"]
+        unified = service.manager.get_table("stm_filtered_unified_training")
+        assert set(unified["station_id"]) == {"INSIDE"}
+        derivative_index = [step["tool_name"] for step in result["outputs"]["steps"]].index("dem_terrain_derivatives")
+        unified_index = [step["tool_name"] for step in result["outputs"]["steps"]].index("prepare_unified_training_samples")
+        assert unified_index < derivative_index
 
 
 def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
@@ -171,10 +247,11 @@ def test_stm_xgboost_workflow_aligns_temporal_rasters_before_sampling() -> None:
         assert result is not None
         assert result["ok"] is True, json.dumps(result, ensure_ascii=False, indent=2)
         assert result["outputs"]["status"] == "modeled"
-        assert result["outputs"]["training_dataset"] == "stm_temporal_aligned_training"
+        assert result["outputs"]["training_dataset"] == "stm_temporal_unified_training"
         assert result["outputs"]["temporal_alignment"]["selected_time_range"] == {"start": "2019-01-04", "end": "2019-01-13"}
         assert result["outputs"]["temporal_composites"]["ndvi_daily"] == "stm_temporal_ndvi_daily_composite"
         assert result["outputs"]["raster_features"] == ["stm_temporal_ndvi_daily_composite"]
+        assert result["outputs"]["unified_preprocessing"]["removed_row_count"] == 0
         aligned = service.manager.get_table("stm_temporal_aligned_training")
         assert aligned["date"].tolist() == [
             "2019-01-04",

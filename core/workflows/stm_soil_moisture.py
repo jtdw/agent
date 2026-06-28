@@ -199,6 +199,70 @@ def _step(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[
     }
 
 
+def _dataset_frame(manager: Any, dataset_name: str) -> pd.DataFrame:
+    record = manager.get(dataset_name)
+    if record.data_type == "table":
+        return manager.get_table(dataset_name)
+    if record.data_type == "vector":
+        return pd.DataFrame(manager.get_vector(dataset_name).drop(columns=["geometry"], errors="ignore"))
+    raise TypeError(f"{dataset_name} is not a table or vector dataset")
+
+
+def _unified_training_filter(
+    manager: Any,
+    *,
+    training_dataset: str,
+    coverage_dataset: str,
+    raster_fields: list[str],
+    output_name: str,
+) -> dict[str, Any]:
+    training_df = manager.get_table(training_dataset)
+    coverage_df = _dataset_frame(manager, coverage_dataset)
+    if len(training_df) != len(coverage_df):
+        return tool_result_error(
+            "prepare_unified_training_samples",
+            inputs={"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_name": output_name},
+            error_code="UNIFIED_SAMPLE_ROW_MISMATCH",
+            error_title="Unified preprocessing failed",
+            user_message="Coverage sampling rows did not match the station training table rows.",
+            diagnostics={"training_rows": int(len(training_df)), "coverage_rows": int(len(coverage_df))},
+        ).to_dict()
+
+    valid_mask = pd.Series(True, index=training_df.index)
+    required_fields: list[str] = []
+    mask_fields: list[str] = []
+    for field in raster_fields:
+        if field not in coverage_df.columns:
+            continue
+        lower = field.lower()
+        required_fields.append(field)
+        values = pd.to_numeric(coverage_df[field], errors="coerce")
+        valid_mask &= values.notna()
+        if any(token in lower for token in ("lulc", "landcover", "land_cover", "lc_type")):
+            valid_mask &= values.ne(0)
+            mask_fields.append(field)
+
+    filtered_df = training_df.loc[valid_mask].reset_index(drop=True)
+    removed_df = training_df.loc[~valid_mask].copy()
+    saved_name = manager.put_table(output_name, filtered_df)
+    removed_stations = sorted({str(item) for item in removed_df.get("station_id", pd.Series(dtype=str)).dropna().unique()})
+    return tool_result_ok(
+        "prepare_unified_training_samples",
+        inputs={"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_name": output_name},
+        outputs={
+            "result_dataset": saved_name,
+            "row_count": int(len(filtered_df)),
+            "removed_row_count": int(len(removed_df)),
+            "removed_station_count": int(len(removed_stations)),
+            "removed_stations": removed_stations,
+            "required_raster_fields": required_fields,
+            "mask_raster_fields": mask_fields,
+        },
+        summary=f"Prepared unified training samples: kept {len(filtered_df)} row(s), removed {len(removed_df)} row(s).",
+        diagnostics={"coverage_dataset": coverage_dataset},
+    ).to_dict()
+
+
 def run_stm_soil_moisture_xgboost_workflow(
     manager: Any,
     *,
@@ -368,6 +432,94 @@ def run_stm_soil_moisture_xgboost_workflow(
                 temporal_composites[raster_name] = composite_dataset
 
     feature_rasters = [temporal_composites.get(raster_name, raster_name) for raster_name in rasters]
+    coverage_point_args = {
+        "dataset_name": training_dataset,
+        "x_col": "lon",
+        "y_col": "lat",
+        "crs": "EPSG:4326",
+        "output_name": f"{prefix}_coverage_points",
+    }
+    coverage_point_result = _invoke(tool_map, "table_to_points", coverage_point_args)
+    steps.append(_step("table_to_points", coverage_point_args, coverage_point_result))
+    artifacts.extend([item for item in coverage_point_result.get("artifacts", []) if isinstance(item, dict)])
+    if not coverage_point_result.get("ok"):
+        return tool_result_error(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs=coverage_point_args,
+            error_code=str(coverage_point_result.get("error_code") or "POINT_CONVERSION_FAILED"),
+            error_title="STM workflow failed",
+            user_message=str(coverage_point_result.get("user_message") or "Failed to convert unified preprocessing table to points."),
+            diagnostics={"steps": steps},
+        ).to_dict()
+    coverage_point_dataset = str(coverage_point_result.get("outputs", {}).get("result_dataset") or "")
+
+    coverage_args = {
+        "point_name": coverage_point_dataset,
+        "raster_names": ",".join(feature_rasters),
+        "output_name": f"{prefix}_coverage_samples",
+        "id_cols": "",
+        "output_mode": "wide",
+        "value_field_prefix": "raster",
+    }
+    coverage_result = _invoke(tool_map, "batch_register_points_to_rasters", coverage_args)
+    steps.append(_step("batch_register_points_to_rasters", coverage_args, coverage_result))
+    artifacts.extend([item for item in coverage_result.get("artifacts", []) if isinstance(item, dict)])
+    if not coverage_result.get("ok"):
+        return tool_result_error(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs=coverage_args,
+            error_code=str(coverage_result.get("error_code") or "UNIFIED_COVERAGE_SAMPLING_FAILED"),
+            error_title="STM workflow failed",
+            user_message=str(coverage_result.get("user_message") or "Failed to sample base rasters for unified preprocessing."),
+            diagnostics={"steps": steps},
+            next_actions=[str(item) for item in coverage_result.get("next_actions", []) if str(item).strip()],
+        ).to_dict()
+    coverage_dataset = str(coverage_result.get("outputs", {}).get("result_dataset") or "")
+    coverage_fields = [str(item) for item in coverage_result.get("outputs", {}).get("fields") or [] if str(item).strip()]
+    unified_result = _unified_training_filter(
+        manager,
+        training_dataset=training_dataset,
+        coverage_dataset=coverage_dataset,
+        raster_fields=coverage_fields,
+        output_name=f"{prefix}_unified_training",
+    )
+    steps.append(_step("prepare_unified_training_samples", {"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_name": f"{prefix}_unified_training"}, unified_result))
+    artifacts.extend([item for item in unified_result.get("artifacts", []) if isinstance(item, dict)])
+    if not unified_result.get("ok"):
+        return tool_result_error(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs={"training_dataset": training_dataset, "coverage_dataset": coverage_dataset, "output_prefix": output_prefix},
+            error_code=str(unified_result.get("error_code") or "UNIFIED_PREPROCESSING_FAILED"),
+            error_title="STM workflow failed",
+            user_message=str(unified_result.get("user_message") or "Failed to prepare unified training samples before deriving features."),
+            diagnostics={"steps": steps},
+            next_actions=[str(item) for item in unified_result.get("next_actions", []) if str(item).strip()],
+        ).to_dict()
+    unified_outputs = dict(unified_result.get("outputs") or {})
+    training_dataset = str(unified_outputs.get("result_dataset") or training_dataset)
+    row_count = int(unified_outputs.get("row_count") or 0)
+    if row_count < int(min_samples):
+        return tool_result_ok(
+            "run_stm_soil_moisture_xgboost_workflow",
+            inputs={"archive_path": archive_path, "raster_names": ",".join(feature_rasters), "output_prefix": output_prefix},
+            outputs={
+                "status": "needs_more_samples_after_unified_preprocessing",
+                "source_archive": archive_path,
+                "training_dataset": training_dataset,
+                "target_col": target_col,
+                "row_count": row_count,
+                "raster_features": feature_rasters,
+                "temporal_alignment": temporal_alignment,
+                "temporal_composites": temporal_composites,
+                "unified_preprocessing": unified_outputs,
+                "steps": steps,
+            },
+            artifacts=artifacts,
+            summary="Unified preprocessing succeeded, but too few valid samples remain for XGBoost.",
+            diagnostics={"minimum_samples": min_samples},
+            next_actions=["Relax the spatial mask, use more stations, or inspect raster coverage and NoData values."],
+        ).to_dict()
+
     for raster_name in list(rasters):
         if not _is_dem_like_raster(manager, raster_name):
             continue
@@ -556,6 +708,7 @@ def run_stm_soil_moisture_xgboost_workflow(
             "row_count": row_count,
             "temporal_alignment": temporal_alignment,
             "temporal_composites": temporal_composites,
+            "unified_preprocessing": unified_outputs,
             "model_result": xgb_result,
             "steps": steps,
         },
