@@ -163,6 +163,33 @@ class PresentationResultTests(unittest.TestCase):
         self.assertNotIn("E:/agent", rendered)
         self.assertNotIn("workspace/derived", rendered)
 
+    def test_png_artifact_without_images_list_is_still_exposed_as_image_ref(self) -> None:
+        bundle = build_presentation_bundle(
+            task_goal="show the XGBoost full basin prediction preview",
+            task_plan_summary={"primary_goal": "full_basin_xgboost_soil_moisture_prediction_map"},
+            coordinator_status="succeeded",
+            normalized_results=[
+                {
+                    "status": "succeeded",
+                    "step_id": "predict",
+                    "tool_name": "predict_xgboost_raster_map",
+                    "outputs": {"result_dataset": "soil_prediction"},
+                    "artifacts": [
+                        {"artifact_id": "artifact_raster", "title": "soil_prediction.tif", "type": "raster"},
+                        {"artifact_id": "artifact_preview", "title": "soil_prediction.png", "type": "png"},
+                        {"artifact_id": "artifact_summary", "title": "soil_prediction_summary.json", "type": "summary"},
+                    ],
+                    "map_layers": [{"layer_id": "dataset_soil_prediction", "name": "soil_prediction", "type": "raster"}],
+                    "images": [],
+                    "warnings": [],
+                    "errors": [],
+                    "next_actions": [],
+                }
+            ],
+        )
+
+        self.assertEqual([item["artifact_id"] for item in bundle["presentation_result"]["image_refs"]], ["artifact_preview"])
+
     def test_gcp_uncertainty_result_exposes_images_and_diagnostics_metrics(self) -> None:
         bundle = build_presentation_bundle(
             task_goal="explain the GCP uncertainty result and show its interval width map",

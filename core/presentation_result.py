@@ -197,6 +197,10 @@ def _metric_highlights(outputs: dict[str, Any]) -> list[str]:
     return highlights
 
 
+def _is_image_artifact_type(value: str) -> bool:
+    return str(value or "").strip().lower() in {"image", "png", "jpg", "jpeg", "webp"}
+
+
 def _collect_errors(result: dict[str, Any]) -> list[str]:
     messages: list[str] = []
     for error in _as_list(result.get("errors")):
@@ -266,15 +270,19 @@ def build_presentation_result(
             if not artifact_id or artifact_id in seen_artifacts:
                 continue
             seen_artifacts.add(artifact_id)
+            title = _clean_text(artifact.get("title") or artifact.get("filename") or artifact.get("name"), 120)
             artifact_refs.append(
                 {
                     "artifact_id": artifact_id,
-                    "title": _clean_text(artifact.get("title") or artifact.get("filename") or artifact.get("name"), 120),
+                    "title": title,
                     "type": artifact_type,
                     "source_step_id": step_id,
                     "source_tool": tool_name,
                 }
             )
+            if _is_image_artifact_type(artifact_type) and artifact_id not in seen_images:
+                seen_images.add(artifact_id)
+                image_refs.append({"artifact_id": artifact_id, "title": title, "source_step_id": step_id, "source_tool": tool_name})
         for layer in _as_list(result.get("map_layers")):
             if not isinstance(layer, dict):
                 continue
