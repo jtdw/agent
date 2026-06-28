@@ -224,4 +224,15 @@ def test_service_active_smoke_can_run_opt_in_xgboost_raster_prediction_case(tmp_
     assert "generic_xgboost_workflow" not in case["executed_tools"]
     assert "train_xgboost_fusion_model" not in case["executed_tools"]
     assert case["safe_tool_execution"]["artifact_count"] >= 3
+    presentation = case["presentation_contract"]
+    assert presentation["status"] == "succeeded"
+    assert presentation["artifact_types"] == ["raster", "png", "summary"]
+    assert presentation["map_layer_count"] == 1
+    assert presentation["image_ref_count"] == 1
+    assert presentation["has_prediction_raster"] is True
+    assert presentation["has_summary_json"] is True
+    assert "representative_date=2019-07-15" in presentation["result_highlights"]
+    assert "valid_prediction_pixels=" in " ".join(presentation["result_highlights"])
+    assert "[internal_path]" not in str(presentation)
+    assert ":\\\\" not in str(presentation)
     assert case["safe_tool_execution"]["external_download_tools_executed"] == []

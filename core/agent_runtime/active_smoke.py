@@ -382,6 +382,30 @@ def _case_ok(result: dict[str, Any], expected_tools: list[str], executed_tools: 
     return all(tool in executed_tools for tool in expected_tools)
 
 
+def _presentation_contract(presentation: dict[str, Any]) -> dict[str, Any]:
+    artifact_refs = presentation.get("artifact_refs") if isinstance(presentation.get("artifact_refs"), list) else []
+    map_layer_refs = presentation.get("map_layer_refs") if isinstance(presentation.get("map_layer_refs"), list) else []
+    image_refs = presentation.get("image_refs") if isinstance(presentation.get("image_refs"), list) else []
+    highlights = [
+        str(item)
+        for item in (presentation.get("result_highlights") if isinstance(presentation.get("result_highlights"), list) else [])
+        if str(item or "").strip()
+    ][:8]
+    artifact_types = [str(item.get("type") or "") for item in artifact_refs if isinstance(item, dict)]
+    artifact_titles = [str(item.get("title") or item.get("artifact_id") or "") for item in artifact_refs if isinstance(item, dict)]
+    searchable_artifacts = " ".join([*artifact_types, *artifact_titles]).lower()
+    return {
+        "status": str(presentation.get("status") or ""),
+        "artifact_types": artifact_types,
+        "artifact_count": len(artifact_refs),
+        "map_layer_count": len(map_layer_refs),
+        "image_ref_count": len(image_refs),
+        "has_prediction_raster": "raster" in artifact_types and any(token in searchable_artifacts for token in ("prediction", ".tif", "geotiff")),
+        "has_summary_json": any("summary" == item or "json" == item for item in artifact_types) or any("summary.json" in title.lower() for title in artifact_titles),
+        "result_highlights": highlights,
+    }
+
+
 def _summarize_case(case_id: str, setup: dict[str, Any], result: dict[str, Any], meta: dict[str, Any]) -> dict[str, Any]:
     executed_tools = _collect_tool_names({"result": result, "meta": meta})
     expected_tools = [str(item) for item in setup.get("expected_tools", []) if str(item or "").strip()]
@@ -409,6 +433,7 @@ def _summarize_case(case_id: str, setup: dict[str, Any], result: dict[str, Any],
             "artifact_count": len(result.get("artifacts") or []),
             "image_count": len(result.get("images") or []),
         },
+        "presentation_contract": _presentation_contract(presentation),
     }
 
 
