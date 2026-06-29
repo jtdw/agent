@@ -879,3 +879,23 @@
   - Inserted Phase 60A Knowledge seed refresh as in progress.
   - Moved post-merge staging observation prep to Phase 60B.
   - Moved CI runner/cache follow-up to Phase 61.
+- Wrote implementation plan `docs/superpowers/plans/2026-06-29-agent-knowledge-refresh-implementation-plan.md`.
+- Ran GitNexus impact before editing existing test symbols:
+  - `test_seed_documents_have_draft_front_matter_manifest_and_queries`: LOW risk, 0 affected processes.
+  - `test_seed_retrieval_questions_route_to_expected_reference_documents`: LOW risk, 0 affected processes.
+- TDD RED:
+  - Updated `tests/test_knowledge_seed_docs.py` to expect `09_ismn_soil_moisture_gcp_reference.md`, ISMN/GCP/ArcPy retrieval routes, and draft-only safety text.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py -q`.
+  - Expected failures: missing ninth manifest entry and missing new knowledge seed file.
+- TDD GREEN:
+  - Added `docs/knowledge_seed/09_ismn_soil_moisture_gcp_reference.md`.
+  - Added the ninth draft manifest entry with content hash `sha256:d71b7e75d97fc8a8083856c254b7003f9fc6e943834631aacf1fcbd2f216b887`.
+  - Adjusted the manifest-date contract so legacy seed docs remain `2026-06-22` while the new Phase 60A seed is `2026-06-29`.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py -q`: 4 passed.
+- Updated planning memory:
+  - Marked Phase 60A complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60A implementation findings to `.planning/langchain_agent_redesign/findings.md`.
+- Phase 60A verification:
+  - `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 21 passed.
+  - `git diff --check`: no whitespace errors; PowerShell output only included known LF-to-CRLF warnings for touched markdown/JSON/test files.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 6 files, 2 changed test symbols, 0 affected processes, LOW risk.

@@ -384,6 +384,9 @@ Date: 2026-06-29
 - ISMN references support the local archive stance: profile local archives, stations, sensors, variables, depths, and time ranges; do not automate login-protected downloads or credentials.
 - GeoConformal references support the current project boundary: model-agnostic spatial uncertainty, global split conformal fallback, and spatial weighting only when coordinate/calibration evidence is sufficient.
 - The `web-access` CDP check path listed in the skill was missing in this environment (`C:\Users\35299\.agents\skills\web-access\scripts\check-deps.mjs`). Use normal public-source retrieval for this phase and avoid repeating that path unless the skill installation is fixed.
+- Phase 60A implemented the low-risk path: a new draft seed document plus manifest/test coverage. It did not update `core/knowledge_base.py`, Tool Cards, runtime routing, staging exposure, production traffic, auth, billing, or download safety.
+- The new seed explicitly preserves key boundaries: no ISMN auto-download, no ArcPy runtime dependency, no replacement for Tool Cards/Plan Validator/ToolResult, and no fabricated XGBoost/GCP metrics or maps.
+- TDD evidence: the first knowledge-seed test run failed on the missing ninth document and manifest entry, then passed after adding `09_ismn_soil_moisture_gcp_reference.md`, manifest metadata, and a date-aware contract assertion.
 
 Date: 2026-06-29
 
