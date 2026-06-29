@@ -13,6 +13,55 @@ def test_ci_uses_stable_node_lts_for_frontend_jobs() -> None:
     assert ".\\scripts\\install_frontend_dependencies.ps1" in workflow
 
 
+def test_ci_cancels_superseded_runs_for_same_branch_or_pr() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "concurrency:" in workflow
+    assert "group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}" in workflow
+    assert "cancel-in-progress: true" in workflow
+
+
+def test_ci_uses_path_filter_to_skip_heavy_jobs_for_docs_only_changes() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "dorny/paths-filter@v3" in workflow
+    assert "docs_only:" in workflow
+    assert "docs/**" in workflow
+    assert ".planning/**" in workflow
+    assert "AGENTS.md" in workflow
+    assert "ui_next/**" in workflow
+    assert "core/**" in workflow
+    assert "api_server.py" in workflow
+    assert "requirements.txt" in workflow
+    assert ".github/workflows/**" in workflow
+
+
+def test_ci_has_docs_contract_job_for_docs_only_changes() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "docs-contract:" in workflow
+    assert "needs: changes" in workflow
+    assert "needs.changes.outputs.docs_only == 'true'" in workflow
+    assert "python -m pip install --upgrade pip pytest" in workflow
+    assert "tests\\test_runtime_staging_remote_runbook.py tests\\test_ci_baseline_workflow.py" in workflow
+
+
+def test_ci_splits_light_and_full_smoke() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "smoke-light:" in workflow
+    assert "smoke-full:" in workflow
+    assert "Run light E2E smoke with backend and frontend" in workflow
+    assert "Run full staging observation gates" in workflow
+    assert "github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'" in workflow
+    assert "run_agent_runtime_staging10_observation_gate.ps1" in workflow
+    assert "run_soil_moisture_gcp_smoke.ps1" in workflow
+
+
 def test_ci_caches_python_dependencies_for_python_jobs() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

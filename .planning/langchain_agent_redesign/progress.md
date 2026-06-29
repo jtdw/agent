@@ -801,3 +801,28 @@
   - `gh pr checks 3 --repo jtdw/agent`: `frontend-build`, `python-tests`, `smoke`, and CodeRabbit all passed before the Phase 56 commit.
   - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0.
   - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, soil moisture/GCP recurring gate `ok=true`, task quality window 3/3 passed, observation summary `ok=true`.
+- User approved Phase 57 conservative CI layering and path-filter acceleration.
+- Phase 57 impact note:
+  - `git status --short --branch` was clean before edits.
+  - GitNexus could not resolve `test_ci_baseline_workflow` as an indexed symbol; this phase only edits workflow/planning/contract tests and no runtime business symbols.
+- TDD RED for Phase 57:
+  - Extended `tests/test_ci_baseline_workflow.py` with contract checks for concurrency, path filtering, docs-only lightweight checks, `smoke-light`, and manual/nightly `smoke-full`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py -q`.
+  - Expected failure: 4 tests failed because the workflow did not yet have concurrency, paths-filter, docs-contract, or smoke split.
+- TDD GREEN for Phase 57:
+  - Updated `.github/workflows/ci.yml` with:
+    - `concurrency` cancel-in-progress per PR/ref.
+    - `changes` job using `dorny/paths-filter@v3`.
+    - `docs-contract` job for docs/planning-only changes.
+    - existing full E2E behavior renamed to PR-default `smoke-light`.
+    - `smoke-full` for `workflow_dispatch` and nightly schedule, running soil moisture/GCP and staging10 observation gates.
+  - Added minimal `pytest` install for docs-only contract job.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 16 passed.
+  - Parsed `.github/workflows/ci.yml` with PyYAML and verified expected jobs: `changes`, `docs-contract`, `python-tests`, `frontend-build`, `smoke-light`, `smoke-full`.
+  - `.venv\Scripts\python.exe -m pytest tests\test_admin_agent_runtime_diagnostics.py tests\test_agent_runtime_staging_observation_gate.py tests\test_agent_runtime_exposure_policy.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 35 passed.
+  - `scripts\test_agent_runtime_decision_eval.ps1`: 72 passed and strict report pass rate 1.0.
+  - Local `scripts\test_ci_python.ps1` and then `scripts\test_agent_runtime_active_smoke.ps1` exceeded local outer command timeouts. Follow-up inspection found no persistent active-smoke child process, and `outputs/agent_runtime_service_active_smoke_guard.json` contained 9/9 passed evidence. Treat remote PR CI as the final smoke validation for this workflow-only change.
+- Updated planning memory:
+  - Marked Phase 57 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 58 as planned CI runner/cache follow-up.
+  - Added Phase 57 findings to `.planning/langchain_agent_redesign/findings.md`.

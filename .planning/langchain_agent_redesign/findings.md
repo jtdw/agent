@@ -364,6 +364,17 @@ Date: 2026-06-28
 
 Date: 2026-06-29
 
+## Phase 57 CI Layering and Path-Filter Findings
+
+- Phase 57 keeps the default PR safety gates but avoids full CI for docs/planning-only changes. A new `changes` job uses path filtering to distinguish docs, frontend, Python/runtime/scripts/tests, and dependency/workflow changes.
+- Docs/planning-only changes now run a lightweight `docs-contract` job instead of installing full backend/frontend dependencies or launching E2E smoke.
+- The previous default `smoke` behavior is retained as `smoke-light` for code-impacting PRs: it still installs dependencies, starts backend/frontend, and runs the existing E2E smoke.
+- Heavy staging observation gates moved to `smoke-full`, which runs only through `workflow_dispatch` or nightly schedule. This keeps Phase 52 staging observation and soil moisture/GCP recurring gates available without making every PR wait on them.
+- `concurrency` now cancels superseded runs for the same PR or ref, reducing wasted CI time on rapid follow-up pushes.
+- This phase intentionally avoids Linux runner migration for core Python/frontend/smoke jobs. That remains a Phase 58 candidate because Windows path/PowerShell/GIS compatibility is still valuable for this project.
+
+Date: 2026-06-29
+
 ## Phase 56 Remote/Real Staging Sync Checklist Findings
 
 - Phase 56 completed the missing bridge between local staging 10% evidence and remote/real staging operation: the checklist now covers runtime env/config keys, service restart/reload, read-only admin exposure verification, recurring observation cadence, real-task quality metrics, rollback triggers, and CI cache timing observation.
