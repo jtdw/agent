@@ -301,6 +301,27 @@ Codex 每次完成任务后，应输出：
 
 如果只是审查任务，不要修改代码，只输出问题清单、风险等级、涉及文件和修复建议。
 
+## 十二、长期任务记忆与延续入口
+
+本项目存在一个跨会话、长期推进的 GIS runtime / staging / soil moisture / CI 工作流。未来 Codex 接手相关任务时，应先读取以下磁盘记忆，而不是只依赖对话摘要：
+
+* 活动计划目录：`.planning/langchain_agent_redesign/`
+  * `task_plan.md`：阶段状态和下一阶段。
+  * `findings.md`：长期发现、风险和决策依据。
+  * `progress.md`：跨会话执行日志、验证命令和证据文件。
+* 延续计划文档：`docs/superpowers/plans/2026-06-29-runtime-staging-ci-continuation-plan.md`。
+* 同一工作流的历史会话 ID：`019f07d3-5044-7870-940d-bc362a2b8a8b`、`019f0f8a-1ed9-7f41-95f0-33bf0607ea22`。
+
+当前推荐下一阶段是 Phase 56：远端/真实 staging 同步 checklist 与可回滚观测方案。重点不是继续提高本机 exposure 比例，而是把本机 Phase 47-52 的 gate 迁移成远端可执行、可审计、可回滚的流程。
+
+Phase 56 及后续 rollout 必须保持以下边界：
+
+* 不要仅因为本机 staging 10% gate 通过就自动提高 exposure 比例。
+* 提升 staging exposure、触碰生产流量、改真实部署环境、接入真实用户流量，都必须先让用户确认。
+* 远端 staging 必须包含 `.env`/部署配置核验、服务重启或重载、只读 admin exposure 检查、recurring observation gate、真实任务错误率、latency、artifact/map 输出、外部下载误触发、soil moisture/GCP 路径等指标。
+* 回滚优先使用 `GIS_AGENT_RUNTIME_ROLLBACK=1`，并在重启/重载服务后用只读 admin exposure 检查确认用户暴露已被阻断。
+* CI 依赖缓存原则：可以缓存 pip/npm/Yarn 下载缓存；不要缓存 `node_modules`、`.venv` 等安装产物目录。
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

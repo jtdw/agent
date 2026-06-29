@@ -363,3 +363,16 @@ Date: 2026-06-28
 - This keeps later staging decisions grounded in real outputs while avoiding repeated DEM derivative, temporal composite, raster prediction, and GCP recomputation on every local guard run.
 
 Date: 2026-06-29
+
+## Phase 47-55 Staging 10%, Observation Gates, and CI Findings
+
+- Phase 47-52 moved the local rollout posture from staging 10% readiness into reusable observation gates. The current evidence chain includes readiness dry-run, observation start, observation window, routed request smoke, quasi-real task quality window, and a hardened staging observation gate.
+- The Phase 52 observation gate should remain a recurring pre-rollout gate because it ties policy, routing, diagnostics, active smoke, and soil moisture/GCP evidence together in one repeatable check.
+- Do not raise staging exposure beyond 10% only because local gates passed. Phase 53 should first define remote/real staging synchronization: environment variables, service reload/restart, read-only admin exposure checks, recurring gate cadence, metrics collection, and rollback triggers.
+- Real user-task observation should track at least: request/error rate, active-vs-legacy routing distribution, external download false positives, artifact/map/raster/png/summary outputs, soil moisture/GCP path health, and latency.
+- Rollback remains operationally simple: set `GIS_AGENT_RUNTIME_ROLLBACK=1`, reload/restart the service so config is read, and verify read-only admin exposure reports `eligible_for_user_exposure=false` with `rollback_requested` or equivalent blocking reason.
+- Phase 54 stabilized CI by replacing broad or fragile commands with curated gates and explicit readiness checks. Smoke E2E must run while backend/frontend services are still alive in the same PowerShell step.
+- Phase 55 added package-manager caching only. This intentionally caches pip/npm/Yarn download stores, not `node_modules`, `.venv`, or other installed dependency directories that can go stale or encode runner-specific native state.
+- The active task lineage spans at least these Codex sessions: `019f07d3-5044-7870-940d-bc362a2b8a8b` and `019f0f8a-1ed9-7f41-95f0-33bf0607ea22`; future goal-mode runs should treat them as the same workstream and use `.planning/langchain_agent_redesign` as the continuity source.
+
+Date: 2026-06-29
