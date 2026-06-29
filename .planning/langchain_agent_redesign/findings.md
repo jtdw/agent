@@ -364,6 +364,16 @@ Date: 2026-06-28
 
 Date: 2026-06-29
 
+## Phase 60B Post-Merge Staging Observation Preflight Findings
+
+- Post-merge main CI remains green at merge commit `6e4b299`; the latest main run `28357274834` completed successfully.
+- Phase 60A branch changes have been pushed but there is no PR yet, so GitHub Actions did not run for the branch-only push.
+- Local soil moisture/GCP recurring smoke summary reports `overall_ok=true`, 3/3 cases, study-area filtering enabled, spatially weighted GCP evidence, and no failed validation checks.
+- Local staging10 observation gate reports `ok=true`, staging 10% policy eligible, routing sample near 10%, 3/3 quasi-real task cases passed, artifacts/maps/raster/png/summary checks passed, and no external download tools executed.
+- This preflight is not a real remote staging deployment or live-user observation. Any remote deployment/reload, exposure change, production traffic, or real-user routing still requires explicit user/operator confirmation.
+
+Date: 2026-06-29
+
 ## Phase 59 Final PR Delivery Audit Findings
 
 - PR #3 is open, non-draft, mergeable, and current checks are green: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed.

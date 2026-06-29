@@ -899,3 +899,16 @@
   - `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 21 passed.
   - `git diff --check`: no whitespace errors; PowerShell output only included known LF-to-CRLF warnings for touched markdown/JSON/test files.
   - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 6 files, 2 changed test symbols, 0 affected processes, LOW risk.
+- Phase 60A commit/push:
+  - Commit `a0b1589 docs(knowledge): refresh ismn soil moisture gcp seed`.
+  - Pushed branch `codex/phase60-post-merge-staging-observation`.
+- Continued Phase 60B safe post-merge preflight without deploying real staging or raising exposure.
+- Remote/main CI check:
+  - `gh run list --repo jtdw/agent --branch main --limit 3 --json ...` showed latest main CI run `28357274834` succeeded at merge commit `6e4b299`.
+  - Branch-only push for Phase 60A did not create a GitHub Actions run because no PR exists yet.
+- Local gate verification:
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; summary file reports `overall_ok=true`, 3 cases, `validation.ok=true`, and no failed checks.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: output reported `ok=true`, task quality window 3/3 passed, no external download tools, and artifact/map/raster/png/summary checks passed.
+- Updated planning memory:
+  - Marked Phase 60B preflight complete.
+  - Recorded that true remote staging deployment/reload, exposure change, production traffic, and real-user routing remain explicit approval points.
