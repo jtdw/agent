@@ -85,6 +85,17 @@ def test_ci_caches_package_manager_downloads_not_installed_modules() -> None:
             assert ".venv" not in line
 
 
+def test_smoke_light_caches_playwright_browser_binaries() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "Cache Playwright browser binaries" in workflow
+    assert "~\\AppData\\Local\\ms-playwright" in workflow
+    assert "hashFiles('requirements.txt')" in workflow
+    assert "${{ runner.os }}-playwright-" in workflow
+    assert "python -m playwright install chromium" in workflow
+
+
 def test_ci_python_gate_uses_curated_script_not_unbounded_discover() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

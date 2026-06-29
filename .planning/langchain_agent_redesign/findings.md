@@ -364,6 +364,16 @@ Date: 2026-06-28
 
 Date: 2026-06-29
 
+## Phase 58 Playwright Browser Cache Findings
+
+- Phase 58 chose the lowest-risk CI accelerator: cache Playwright browser binaries for `smoke-light` while leaving Windows runner behavior and E2E smoke flow unchanged.
+- The cache path is `~\AppData\Local\ms-playwright`, which matches Playwright's default Windows browser cache location.
+- The cache key is tied to `${{ runner.os }}` and `requirements.txt`, because the Python `playwright` package version is declared there. `python -m playwright install chromium` remains in the job so cache misses and browser-version changes still self-heal.
+- The existing policy remains intact: cache download/browser stores only, not `node_modules`, `.venv`, or other installed dependency directories.
+- Linux runner migration remains a later Phase 59 candidate because core smoke still benefits from Windows/PowerShell/path compatibility evidence.
+
+Date: 2026-06-29
+
 ## Phase 57 CI Layering and Path-Filter Findings
 
 - Phase 57 keeps the default PR safety gates but avoids full CI for docs/planning-only changes. A new `changes` job uses path filtering to distinguish docs, frontend, Python/runtime/scripts/tests, and dependency/workflow changes.

@@ -826,3 +826,22 @@
   - Marked Phase 57 complete in `.planning/langchain_agent_redesign/task_plan.md`.
   - Added Phase 58 as planned CI runner/cache follow-up.
   - Added Phase 57 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Continued Phase 58 with the low-risk Playwright browser cache option.
+- Phase 58 starting state:
+  - `git status --short --branch` was clean.
+  - PR #3 checks from Phase 57 were green: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed; `docs-contract` and `smoke-full` skipped as expected.
+  - GitNexus could not resolve `test_ci_baseline_workflow` as an indexed symbol. This phase only edits workflow/planning/contract tests, not runtime business symbols.
+- TDD RED for Phase 58:
+  - Added `test_smoke_light_caches_playwright_browser_binaries` to `tests/test_ci_baseline_workflow.py`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py -q`.
+  - Expected failure: the new test failed because `.github/workflows/ci.yml` did not yet include `Cache Playwright browser binaries`.
+- TDD GREEN for Phase 58:
+  - Added an `actions/cache@v4` step to `smoke-light` for `~\AppData\Local\ms-playwright`.
+  - Cache key is `${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}` with `${{ runner.os }}-playwright-` restore fallback.
+  - Preserved `python -m playwright install chromium` so cache misses and version changes still install correctly.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 17 passed.
+  - Parsed `.github/workflows/ci.yml` with PyYAML and verified `smoke-light` contains `Cache Playwright browser binaries`.
+- Updated planning memory:
+  - Marked Phase 58 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 59 as planned CI runner/cache follow-up.
+  - Added Phase 58 findings to `.planning/langchain_agent_redesign/findings.md`.
