@@ -937,3 +937,24 @@
   - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 10 files, 8 symbols, 0 affected processes, LOW risk.
   - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 41 passed, 26 subtests passed.
   - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact checks passed.
+- Continued Phase 60D PR #4 delivery audit without merging main, marking PR ready, raising exposure, touching production, or changing runtime code.
+- Current-state audit commands:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation` before audit edits.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 is open, draft, base `main`, head `codex/phase60-post-merge-staging-observation`, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+  - `gh pr diff 4 --repo jtdw/agent --name-only`: 10 expected knowledge/planning/test files.
+  - `git diff --stat origin/main...HEAD`: 10 files, 666 insertions, 2 deletions.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 10 files, 8 symbols, 0 affected processes, LOW risk.
+  - `node .gitnexus\run.cjs impact retrieve_knowledge_snippets --direction upstream`: HIGH blast radius, 7 impacted symbols, 1 affected process (`edit_user_message_and_retry`).
+  - `node .gitnexus\run.cjs impact Function:core/knowledge_base.py:_tokens --direction upstream`: HIGH blast radius, 5 impacted symbols, 1 affected process (`edit_user_message_and_retry`).
+  - `node .gitnexus\run.cjs impact LLMFirstLayerTests --direction upstream`: LOW risk, 0 impacted symbols.
+  - `git diff origin/main...HEAD -- core\knowledge_base.py`: confirmed the code diff only adds three static `_SNIPPETS` entries and does not edit retrieval/tokenization function bodies.
+  - `.venv\Scripts\python.exe -m py_compile core\knowledge_base.py tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 41 passed, 26 subtests passed.
+  - `git diff --check origin/main...HEAD`: exit code 0.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; recurring summary validation `ok=true`, 3 cases, no failed checks.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact/raster checks passed.
+- Added `docs/runbooks/pr4-knowledge-activation-delivery-audit.md` with PR status, change scope, GitNexus risk, validation evidence, knowledge activation boundaries, rollout boundaries, and ready-state recommendation.
+- Updated planning memory:
+  - Marked Phase 60D complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60D findings.
