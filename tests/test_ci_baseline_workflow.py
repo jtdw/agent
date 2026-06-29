@@ -44,7 +44,7 @@ def test_frontend_install_script_falls_back_when_npm_ci_leaves_incomplete_module
     assert "npm.cmd ci" in script
     assert "npm.cmd install" in script
     assert "corepack.cmd prepare yarn@1.22.22 --activate" in script
-    assert "yarn.cmd install --no-lockfile --non-interactive" in script
+    assert "yarn.cmd install --no-lockfile --non-interactive --ignore-engines" in script
     assert "node_modules" in script
     assert "tsc.cmd" in script
     assert "Invoke-Npm" in script

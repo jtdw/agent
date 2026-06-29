@@ -60,7 +60,7 @@ function Invoke-YarnInstall {
         }
     }
 
-    & yarn.cmd install --no-lockfile --non-interactive
+    & yarn.cmd install --no-lockfile --non-interactive --ignore-engines
     $script:YarnExitCode = $LASTEXITCODE
 }
 
