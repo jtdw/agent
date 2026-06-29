@@ -374,6 +374,15 @@ Date: 2026-06-29
 
 Date: 2026-06-29
 
+## Phase 60G PR #4 Ready-State Publication Findings
+
+- PR #4 ready-state is a safe publishing step distinct from merging `main`; it does not change runtime code, deployment config, exposure, production, or real-user traffic.
+- Fresh pre-ready validation passed: PR checks were green/skipped as designed, local contract tests passed, soil moisture/GCP recurring gate passed, and staging10 observation gate passed.
+- After `gh pr ready 4 --repo jtdw/agent`, PR #4 is open, non-draft, merge state `CLEAN`, and CodeRabbit completed successfully.
+- Remaining blockers are now narrowed to explicit human decisions: merge PR #4/main, execute real remote staging checklist, adjust exposure, or touch production/real-user traffic.
+
+Date: 2026-06-29
+
 ## Phase 60F PR #4 Ready/Merge Operator Checklist Findings
 
 - The repeated remaining blocker is procedural, not technical: PR #4 is green and clean, but still draft, and ready/merge/remote staging/exposure actions require explicit human confirmation.

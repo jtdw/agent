@@ -977,3 +977,19 @@
 - Updated planning memory:
   - Marked Phase 60F complete in `.planning/langchain_agent_redesign/task_plan.md`.
   - Added Phase 60F findings.
+- Continued Phase 60G ready-state publication.
+- Pre-ready verification:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation`.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 open, draft, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+  - `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py tests\test_runtime_staging_remote_runbook.py tests\test_ci_baseline_workflow.py -q`: 21 passed.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; summary `overall_ok=true`, validation `ok=true`, 3 cases, failed checks empty.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact/raster checks passed.
+- Executed `gh pr ready 4 --repo jtdw/agent`; PR #4 is now ready for review.
+- Post-ready verification:
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 open, `isDraft=false`, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; skipped jobs remain expected.
+- Added `docs/runbooks/pr4-ready-state-evidence.md`.
+- Updated planning memory:
+  - Marked Phase 60G complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60G findings.
