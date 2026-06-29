@@ -39,8 +39,8 @@ jobs:
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
       - name: Install frontend dependencies
-        working-directory: ui_next
-        run: npm ci
+        shell: pwsh
+        run: .\scripts\install_frontend_dependencies.ps1
       - name: Build frontend
         working-directory: ui_next
         run: npm run build
@@ -75,8 +75,8 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install chromium
       - name: Install frontend dependencies
-        working-directory: ui_next
-        run: npm ci
+        shell: pwsh
+        run: .\scripts\install_frontend_dependencies.ps1
       - name: Start backend and frontend
         shell: pwsh
         run: |

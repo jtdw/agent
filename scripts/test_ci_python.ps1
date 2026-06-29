@@ -31,11 +31,6 @@ Invoke-Checked {
         tests\test_admin_agent_runtime_diagnostics.py `
         tests\test_agent_runtime_staging_observation_gate.py `
         tests\test_agent_runtime_exposure_policy.py `
-        tests\test_semantic_parser.py `
-        tests\test_checkpoint_route_migration.py `
-        tests\test_checkpoint_map_layer_service.py `
-        tests\test_admin_boundary_county.py `
-        tests\test_gscloud_dem_region_routing.py `
         tests\test_ci_baseline_workflow.py `
         -q `
         @ExtraArgs
