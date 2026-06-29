@@ -66,6 +66,7 @@ def test_frontend_declares_geojson_types_for_yarn_fallback_build() -> None:
     package_json = json.loads((repo_root / "ui_next" / "package.json").read_text(encoding="utf-8"))
 
     assert "@types/geojson" in package_json["devDependencies"]
+    assert "react-is" in package_json["dependencies"]
 
 
 def test_smoke_workflow_waits_for_services_instead_of_fixed_sleep() -> None:
