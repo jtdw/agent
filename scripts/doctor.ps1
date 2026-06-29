@@ -1,5 +1,6 @@
 param(
     [string]$BackendUrl = "http://127.0.0.1:8765",
+    [string]$PythonPath = "",
     [switch]$Strict
 )
 
@@ -11,7 +12,8 @@ $env:PYTHONIOENCODING = "utf-8"
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+$ProjectPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+$Python = if ([string]::IsNullOrWhiteSpace($PythonPath)) { $ProjectPython } else { $PythonPath }
 $Problems = New-Object System.Collections.Generic.List[string]
 $Warnings = New-Object System.Collections.Generic.List[string]
 
@@ -29,10 +31,12 @@ function Test-CommandOk([scriptblock]$Block) {
 Write-Host "GIS Agent doctor"
 Write-Host "Project: $ProjectRoot"
 
-if (-not (Test-Path $Python)) {
+if ([string]::IsNullOrWhiteSpace($PythonPath) -and -not (Test-Path $Python)) {
     Add-Problem "Missing project virtualenv: .venv\Scripts\python.exe"
+} elseif (-not (Test-CommandOk { & $Python --version })) {
+    Add-Problem "Python executable is not available: $Python"
 } else {
-    $pyVersion = & $Python --version
+    $pyVersion = (& $Python --version) -join " "
     Write-Host "Python: $pyVersion"
     if ($pyVersion -notmatch "3\.12") {
         Add-Warning "Python 3.12 is recommended for Windows GIS wheels."

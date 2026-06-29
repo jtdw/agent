@@ -43,6 +43,18 @@ def test_frontend_install_script_falls_back_when_npm_ci_leaves_incomplete_module
 
     assert "npm.cmd ci" in script
     assert "npm.cmd install" in script
+    assert "corepack.cmd prepare yarn@1.22.22 --activate" in script
+    assert "yarn.cmd install --no-lockfile --non-interactive" in script
     assert "node_modules" in script
     assert "tsc.cmd" in script
     assert "Invoke-Npm" in script
+
+
+def test_ci_doctor_uses_actions_python_instead_of_requiring_project_venv() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    doctor = (repo_root / "scripts" / "doctor.ps1").read_text(encoding="utf-8")
+
+    assert ".\\scripts\\doctor.ps1 -PythonPath python" in workflow
+    assert "[string]$PythonPath" in doctor
+    assert "Missing project virtualenv" in doctor

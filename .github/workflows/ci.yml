@@ -27,7 +27,7 @@ jobs:
         run: .\scripts\test_ci_python.ps1
       - name: Run doctor
         shell: pwsh
-        run: .\scripts\doctor.ps1
+        run: .\scripts\doctor.ps1 -PythonPath python
 
   frontend-build:
     runs-on: windows-latest

@@ -44,6 +44,26 @@ function Invoke-Npm {
     $script:NpmExitCode = $LASTEXITCODE
 }
 
+function Invoke-YarnInstall {
+    $yarn = Get-Command "yarn.cmd" -ErrorAction SilentlyContinue
+    if (-not $yarn) {
+        & corepack.cmd enable
+        if ($LASTEXITCODE -ne 0) {
+            $script:YarnExitCode = $LASTEXITCODE
+            return
+        }
+
+        & corepack.cmd prepare yarn@1.22.22 --activate
+        if ($LASTEXITCODE -ne 0) {
+            $script:YarnExitCode = $LASTEXITCODE
+            return
+        }
+    }
+
+    & yarn.cmd install --no-lockfile --non-interactive
+    $script:YarnExitCode = $LASTEXITCODE
+}
+
 Invoke-Npm -Command "ci"
 $ciExit = $script:NpmExitCode
 if ($ciExit -eq 0 -and (Test-FrontendInstall)) {
@@ -55,8 +75,17 @@ Remove-FrontendNodeModules
 
 Invoke-Npm -Command "install"
 $installExit = $script:NpmExitCode
-if ($installExit -ne 0) {
-    exit $installExit
+if ($installExit -eq 0 -and (Test-FrontendInstall)) {
+    exit 0
+}
+
+Write-Warning "npm install did not leave a complete frontend install; retrying with yarn."
+Remove-FrontendNodeModules
+
+Invoke-YarnInstall
+$yarnExit = $script:YarnExitCode
+if ($yarnExit -ne 0) {
+    exit $yarnExit
 }
 
 if (-not (Test-FrontendInstall)) {
