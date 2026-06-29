@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -75,6 +77,22 @@ class LLMFirstLayerTests(unittest.TestCase):
             self.assertIn("version", item)
             self.assertIn("scope", item)
             self.assertIn("trust_level", item)
+
+    def test_builtin_knowledge_activates_ismn_gcp_and_arcgis_reference_snippets(self) -> None:
+        from core.knowledge_base import retrieve_knowledge_snippets
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            with mock.patch.dict(os.environ, {"GIS_AGENT_CAPABILITY_CONFIG_DIR": str(Path(tmp) / "capabilities")}, clear=False):
+                cases = {
+                    "ISMN 本地 archive 导入 土壤水分 观测": ("ISMN", "不得自动下载"),
+                    "GCP interval width uncertainty map 空间坐标不足 global split conformal": ("GCP", "global split conformal"),
+                    "ArcPy ArcGIS 是否意味着项目要新增 arcpy 依赖": ("ArcPy", "不新增 ArcPy"),
+                }
+                for query, expected_fragments in cases.items():
+                    snippets = retrieve_knowledge_snippets(query, limit=3)
+                    joined = "\n".join(item["title"] + " " + item["content"] for item in snippets)
+                    for fragment in expected_fragments:
+                        self.assertIn(fragment, joined, query)
 
     def test_asset_profiler_extracts_table_metadata_without_guessing_role_from_name(self) -> None:
         from core.asset_profiler import profile_dataset

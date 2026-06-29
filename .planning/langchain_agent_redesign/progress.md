@@ -866,3 +866,130 @@
   - Marked Phase 59 complete in `.planning/langchain_agent_redesign/task_plan.md`.
   - Added Phase 60 as planned CI runner/cache follow-up.
   - Added Phase 59 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Started Phase 60A knowledge seed refresh before post-merge staging observation at user request.
+- Current branch: `codex/phase60-post-merge-staging-observation`, created from merged `origin/main` at `6e4b299`.
+- Read current knowledge seed, manifest, contract tests, Tool Cards, and the previous ISMN/XGBoost/GCP design spec.
+- External references selected for design context:
+  - ArcGIS/ArcPy as GIS taxonomy and precondition reference only.
+  - ArcGIS XY Table To Point and Zonal Statistics as Table as workflow vocabulary references.
+  - ISMN docs for local archive interface and station/sensor metadata.
+  - GeoConformal Prediction arXiv/repository for model-agnostic spatial uncertainty context.
+- Wrote design spec `docs/superpowers/specs/2026-06-29-agent-knowledge-refresh-design.md`.
+- Updated planning memory:
+  - Inserted Phase 60A Knowledge seed refresh as in progress.
+  - Moved post-merge staging observation prep to Phase 60B.
+  - Moved CI runner/cache follow-up to Phase 61.
+- Wrote implementation plan `docs/superpowers/plans/2026-06-29-agent-knowledge-refresh-implementation-plan.md`.
+- Ran GitNexus impact before editing existing test symbols:
+  - `test_seed_documents_have_draft_front_matter_manifest_and_queries`: LOW risk, 0 affected processes.
+  - `test_seed_retrieval_questions_route_to_expected_reference_documents`: LOW risk, 0 affected processes.
+- TDD RED:
+  - Updated `tests/test_knowledge_seed_docs.py` to expect `09_ismn_soil_moisture_gcp_reference.md`, ISMN/GCP/ArcPy retrieval routes, and draft-only safety text.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py -q`.
+  - Expected failures: missing ninth manifest entry and missing new knowledge seed file.
+- TDD GREEN:
+  - Added `docs/knowledge_seed/09_ismn_soil_moisture_gcp_reference.md`.
+  - Added the ninth draft manifest entry with content hash `sha256:d71b7e75d97fc8a8083856c254b7003f9fc6e943834631aacf1fcbd2f216b887`.
+  - Adjusted the manifest-date contract so legacy seed docs remain `2026-06-22` while the new Phase 60A seed is `2026-06-29`.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py -q`: 4 passed.
+- Updated planning memory:
+  - Marked Phase 60A complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60A implementation findings to `.planning/langchain_agent_redesign/findings.md`.
+- Phase 60A verification:
+  - `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 21 passed.
+  - `git diff --check`: no whitespace errors; PowerShell output only included known LF-to-CRLF warnings for touched markdown/JSON/test files.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 6 files, 2 changed test symbols, 0 affected processes, LOW risk.
+- Phase 60A commit/push:
+  - Commit `a0b1589 docs(knowledge): refresh ismn soil moisture gcp seed`.
+  - Pushed branch `codex/phase60-post-merge-staging-observation`.
+- Continued Phase 60B safe post-merge preflight without deploying real staging or raising exposure.
+- Remote/main CI check:
+  - `gh run list --repo jtdw/agent --branch main --limit 3 --json ...` showed latest main CI run `28357274834` succeeded at merge commit `6e4b299`.
+  - Branch-only push for Phase 60A did not create a GitHub Actions run because no PR exists yet.
+- Local gate verification:
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; summary file reports `overall_ok=true`, 3 cases, `validation.ok=true`, and no failed checks.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: output reported `ok=true`, task quality window 3/3 passed, no external download tools, and artifact/map/raster/png/summary checks passed.
+- Updated planning memory:
+  - Marked Phase 60B preflight complete.
+  - Recorded that true remote staging deployment/reload, exposure change, production traffic, and real-user routing remain explicit approval points.
+- Started Phase 60C built-in knowledge activation after the user requested activating the refreshed knowledge in the agent.
+- GitNexus impact:
+  - `retrieve_knowledge_snippets`: HIGH risk, 7 impacted symbols, 1 affected process (`edit_user_message_and_retry`). Proceeded with a narrow static-data-only change and no retrieval logic changes.
+  - `test_knowledge_base_retrieves_versioned_scoped_snippets`: LOW risk, 0 affected processes.
+- TDD RED:
+  - Added `test_builtin_knowledge_activates_ismn_gcp_and_arcgis_reference_snippets` in `tests/test_llm_first_layers.py`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py::LLMFirstLayerTests::test_builtin_knowledge_activates_ismn_gcp_and_arcgis_reference_snippets -q`.
+  - Expected failure: `ISMN` was not found in built-in retrieved snippets.
+- TDD GREEN:
+  - Added three short built-in snippets in `core/knowledge_base.py`: `ismn-local-archive`, `gcp-uncertainty-interpretation`, and `arcgis-arcpy-taxonomy-boundary`.
+  - Re-ran the new test: 1 passed.
+- Related verification:
+  - `.venv\Scripts\python.exe -m py_compile core\knowledge_base.py tests\test_llm_first_layers.py`: passed.
+  - First wider run exposed a Phase 60A seed manifest hash mismatch after line-ending normalization; updated `docs/knowledge_seed/manifest.json` content hash for `09_ismn_soil_moisture_gcp_reference.md` to `sha256:0b11e0112c11bae5e2f3022bdfad210f95fb5d42d8d17af82055025c9f43a3d2`.
+  - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py -q`: 24 passed, 26 subtests passed.
+- Updated planning memory:
+  - Marked Phase 60C complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60C findings.
+- Phase 60C final verification before commit:
+  - `git status --short --branch`: only expected Phase 60C files were modified.
+  - `.venv\Scripts\python.exe -m py_compile core\knowledge_base.py tests\test_llm_first_layers.py`: passed.
+  - `git diff --check`: exit code 0; PowerShell output only included known LF-to-CRLF warnings.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 10 files, 8 symbols, 0 affected processes, LOW risk.
+  - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 41 passed, 26 subtests passed.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact checks passed.
+- Continued Phase 60D PR #4 delivery audit without merging main, marking PR ready, raising exposure, touching production, or changing runtime code.
+- Current-state audit commands:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation` before audit edits.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 is open, draft, base `main`, head `codex/phase60-post-merge-staging-observation`, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+  - `gh pr diff 4 --repo jtdw/agent --name-only`: 10 expected knowledge/planning/test files.
+  - `git diff --stat origin/main...HEAD`: 10 files, 666 insertions, 2 deletions.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 10 files, 8 symbols, 0 affected processes, LOW risk.
+  - `node .gitnexus\run.cjs impact retrieve_knowledge_snippets --direction upstream`: HIGH blast radius, 7 impacted symbols, 1 affected process (`edit_user_message_and_retry`).
+  - `node .gitnexus\run.cjs impact Function:core/knowledge_base.py:_tokens --direction upstream`: HIGH blast radius, 5 impacted symbols, 1 affected process (`edit_user_message_and_retry`).
+  - `node .gitnexus\run.cjs impact LLMFirstLayerTests --direction upstream`: LOW risk, 0 impacted symbols.
+  - `git diff origin/main...HEAD -- core\knowledge_base.py`: confirmed the code diff only adds three static `_SNIPPETS` entries and does not edit retrieval/tokenization function bodies.
+  - `.venv\Scripts\python.exe -m py_compile core\knowledge_base.py tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py`: passed.
+  - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 41 passed, 26 subtests passed.
+  - `git diff --check origin/main...HEAD`: exit code 0.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; recurring summary validation `ok=true`, 3 cases, no failed checks.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact/raster checks passed.
+- Added `docs/runbooks/pr4-knowledge-activation-delivery-audit.md` with PR status, change scope, GitNexus risk, validation evidence, knowledge activation boundaries, rollout boundaries, and ready-state recommendation.
+- Updated planning memory:
+  - Marked Phase 60D complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60D findings.
+- Continued Phase 60E goal completion audit after automatic goal continuation.
+- Current-state evidence:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation`.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 open, draft, base `main`, head `codex/phase60-post-merge-staging-observation`, merge state `CLEAN`, latest commit `963712e`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+  - `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py tests\test_runtime_staging_remote_runbook.py tests\test_ci_baseline_workflow.py -q`: 21 passed.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; summary `overall_ok=true`, validation `ok=true`, 3 cases, failed checks empty.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact/raster checks passed.
+- Added `docs/runbooks/phase60e-goal-completion-audit.md` with a requirement-by-requirement goal evidence matrix.
+- Audit conclusion: do not mark the goal complete yet; remaining actions require explicit human confirmation for PR ready/merge and real remote staging/exposure operations.
+- Continued Phase 60F after another automatic goal continuation without authorization to mark ready, merge, raise exposure, or touch production.
+- Current-state evidence:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation`.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 remains open, draft, base `main`, head `codex/phase60-post-merge-staging-observation`, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+- Added `docs/runbooks/pr4-ready-merge-operator-checklist.md` to separate ready-state, merge, post-merge local/readonly validation, real staging handoff, rollback verification, and forbidden actions.
+- Updated planning memory:
+  - Marked Phase 60F complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60F findings.
+- Continued Phase 60G ready-state publication.
+- Pre-ready verification:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation`.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 open, draft, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+  - `.venv\Scripts\python.exe -m pytest tests\test_knowledge_seed_docs.py tests\test_runtime_staging_remote_runbook.py tests\test_ci_baseline_workflow.py -q`: 21 passed.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0; summary `overall_ok=true`, validation `ok=true`, 3 cases, failed checks empty.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact/raster checks passed.
+- Executed `gh pr ready 4 --repo jtdw/agent`; PR #4 is now ready for review.
+- Post-ready verification:
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 open, `isDraft=false`, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; skipped jobs remain expected.
+- Added `docs/runbooks/pr4-ready-state-evidence.md`.
+- Updated planning memory:
+  - Marked Phase 60G complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60G findings.

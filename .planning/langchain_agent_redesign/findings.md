@@ -364,6 +364,64 @@ Date: 2026-06-28
 
 Date: 2026-06-29
 
+## Phase 60B Post-Merge Staging Observation Preflight Findings
+
+- Post-merge main CI remains green at merge commit `6e4b299`; the latest main run `28357274834` completed successfully.
+- Phase 60A branch changes have been pushed but there is no PR yet, so GitHub Actions did not run for the branch-only push.
+- Local soil moisture/GCP recurring smoke summary reports `overall_ok=true`, 3/3 cases, study-area filtering enabled, spatially weighted GCP evidence, and no failed validation checks.
+- Local staging10 observation gate reports `ok=true`, staging 10% policy eligible, routing sample near 10%, 3/3 quasi-real task cases passed, artifacts/maps/raster/png/summary checks passed, and no external download tools executed.
+- This preflight is not a real remote staging deployment or live-user observation. Any remote deployment/reload, exposure change, production traffic, or real-user routing still requires explicit user/operator confirmation.
+
+Date: 2026-06-29
+
+## Phase 60G PR #4 Ready-State Publication Findings
+
+- PR #4 ready-state is a safe publishing step distinct from merging `main`; it does not change runtime code, deployment config, exposure, production, or real-user traffic.
+- Fresh pre-ready validation passed: PR checks were green/skipped as designed, local contract tests passed, soil moisture/GCP recurring gate passed, and staging10 observation gate passed.
+- After `gh pr ready 4 --repo jtdw/agent`, PR #4 is open, non-draft, merge state `CLEAN`, and CodeRabbit completed successfully.
+- Remaining blockers are now narrowed to explicit human decisions: merge PR #4/main, execute real remote staging checklist, adjust exposure, or touch production/real-user traffic.
+
+Date: 2026-06-29
+
+## Phase 60F PR #4 Ready/Merge Operator Checklist Findings
+
+- The repeated remaining blocker is procedural, not technical: PR #4 is green and clean, but still draft, and ready/merge/remote staging/exposure actions require explicit human confirmation.
+- A separate operator checklist reduces merge-time risk by splitting ready, merge, post-merge local verification, real staging handoff, rollback verification, and forbidden actions into separate steps.
+- The checklist intentionally keeps merge strategy user-controlled and does not assume squash/merge/rebase. It also keeps post-merge validation to read-only/local gates before any real staging or exposure action.
+
+Date: 2026-06-29
+
+## Phase 60E Goal Completion Audit Findings
+
+- Current PR #4 evidence is strong enough for a human ready-state decision: PR is open/draft, merge state `CLEAN`, current remote checks are green or intentionally skipped by rules, and the local worktree is clean.
+- Fresh local gates during the audit passed: `tests/test_knowledge_seed_docs.py tests/test_runtime_staging_remote_runbook.py tests/test_ci_baseline_workflow.py` reported 21 passed; soil moisture/GCP recurring summary reports `overall_ok=true`, validation `ok=true`, 3 cases, no failed checks; staging10 observation gate reports `ok=true`, 3/3 cases, no external download tools, and artifact/raster checks passed.
+- The long-running goal should not be marked complete yet because PR #4 remains draft, merge/main changes require explicit confirmation, and true remote staging checklist execution/exposure changes remain explicit operator-confirmed actions.
+- The safe next decision is PR #4 ready-state confirmation. Any merge, real remote staging run, staging exposure adjustment, or production traffic action remains outside automatic execution.
+
+Date: 2026-06-29
+
+## Phase 60D PR #4 Delivery Audit Findings
+
+- PR #4 is open, draft, base `main`, head `codex/phase60-post-merge-staging-observation`, and `gh pr view` reports merge state `CLEAN`.
+- PR #4 remote checks are green or intentionally skipped by path/workflow rules: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed for this run.
+- PR #4 contains 10 changed files focused on knowledge seed docs, three built-in trusted snippets, regression/contract tests, and planning memory.
+- GitNexus compare against `origin/main` reports 10 files, 8 changed symbols, 0 affected processes, and LOW risk. `retrieve_knowledge_snippets` and `Function:core/knowledge_base.py:_tokens` still have HIGH upstream blast radius because they feed context/RAG/service ask paths, but the actual diff only adds static `_SNIPPETS` data and does not change retrieval/tokenization logic.
+- Local verification during the audit passed: `py_compile`, knowledge/RAG/CI/runbook pytest suite, `git diff --check origin/main...HEAD`, soil moisture/GCP recurring smoke, and staging10 observation gate.
+- The PR is ready for a human ready-state/merge decision, but this audit does not mark it ready, does not merge main, does not raise staging exposure, and does not authorize real remote staging or production traffic.
+
+Date: 2026-06-29
+
+## Phase 60C Built-In Knowledge Activation Findings
+
+- The user asked to activate the refreshed knowledge inside the agent rather than leaving it only as draft seed documentation.
+- The existing `CapabilityConfigStore` active knowledge path writes to `workspace/capability_config`, which is `.gitignore`d and therefore suitable for local/operator activation but not a reproducible PR deliverable.
+- The selected deliverable path is to add short trusted built-in snippets in `core/knowledge_base.py` while preserving the longer seed document as the reviewed reference.
+- GitNexus impact for `retrieve_knowledge_snippets` was HIGH because it feeds `build_conversation_context`, RAG document collection, and service ask/edit flows. The implementation therefore avoided changing retrieval logic and added only three static snippets.
+- Activated built-in snippets cover ISMN local archives, GCP/global split conformal uncertainty interpretation, and ArcGIS/ArcPy taxonomy boundaries. They explicitly do not authorize ISMN downloads, ArcPy dependency changes, or fabricated ToolResult metrics.
+- A wider knowledge/RAG/context test run initially exposed a content-hash mismatch for the Phase 60A seed document after working-tree line ending normalization. Updating the manifest hash to the current file bytes restored the seed-document contract.
+
+Date: 2026-06-29
+
 ## Phase 59 Final PR Delivery Audit Findings
 
 - PR #3 is open, non-draft, mergeable, and current checks are green: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed.
@@ -372,6 +430,21 @@ Date: 2026-06-29
 - Non-document/test symbol impact checks were LOW for `drawGeoJson` and `measurementLabel`; the affected surface is the `MapStage` frontend map process. No HIGH or CRITICAL blast radius was found.
 - Local gate verification remained green during the audit: CI/runbook contract tests passed, soil moisture/GCP recurring smoke returned `ok=true`, and staging10 observation gate returned `ok=true`.
 - The PR is ready for a human merge decision. The audit does not authorize merging, staging exposure increases, production traffic, database migration, or security-policy direction changes.
+
+Date: 2026-06-29
+
+## Phase 60A Knowledge Seed Refresh Findings
+
+- The user asked to refresh the agent knowledge base before the next staging observation so the observed agent posture matches current GIS, ISMN, soil-moisture XGBoost, and GCP capabilities.
+- Existing knowledge seeds stop at eight documents dated 2026-06-22. They cover GIS data roles, CRS/extent/NoData, download rules, raster/vector/table workflows, XGBoost, result interpretation, and security, but they do not yet summarize the Phase 39 ISMN/GCP semantic-card work.
+- Current Tool Cards already include `list_ismn_archives`, `profile_ismn_archive`, `import_ismn_soil_moisture_archive`, `generic_xgboost_workflow`, `predict_xgboost_raster_map`, `train_xgboost_fusion_model`, and `geographical_conformal_prediction`, so the safer first step is seed-document refresh rather than runtime logic changes.
+- ArcGIS/ArcPy references should be used as GIS operation taxonomy and precondition context only. They must not introduce an ArcPy dependency or override registered project tools.
+- ISMN references support the local archive stance: profile local archives, stations, sensors, variables, depths, and time ranges; do not automate login-protected downloads or credentials.
+- GeoConformal references support the current project boundary: model-agnostic spatial uncertainty, global split conformal fallback, and spatial weighting only when coordinate/calibration evidence is sufficient.
+- The `web-access` CDP check path listed in the skill was missing in this environment (`C:\Users\35299\.agents\skills\web-access\scripts\check-deps.mjs`). Use normal public-source retrieval for this phase and avoid repeating that path unless the skill installation is fixed.
+- Phase 60A implemented the low-risk path: a new draft seed document plus manifest/test coverage. It did not update `core/knowledge_base.py`, Tool Cards, runtime routing, staging exposure, production traffic, auth, billing, or download safety.
+- The new seed explicitly preserves key boundaries: no ISMN auto-download, no ArcPy runtime dependency, no replacement for Tool Cards/Plan Validator/ToolResult, and no fabricated XGBoost/GCP metrics or maps.
+- TDD evidence: the first knowledge-seed test run failed on the missing ninth document and manifest entry, then passed after adding `09_ismn_soil_moisture_gcp_reference.md`, manifest metadata, and a date-aware contract assertion.
 
 Date: 2026-06-29
 

@@ -22,6 +22,7 @@ EXPECTED_FILES = [
     "06_geospatial_xgboost_workflow.md",
     "07_result_interpretation_and_user_response.md",
     "08_security_and_data_lifecycle.md",
+    "09_ismn_soil_moisture_gcp_reference.md",
 ]
 
 
@@ -78,7 +79,8 @@ def test_seed_documents_have_draft_front_matter_manifest_and_queries() -> None:
         assert len(entry["retrieval_test_questions"]) >= 2
         assert entry["status"] == "draft"
         assert entry["content_hash"] == "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-        assert entry["reviewed_at"] == "2026-06-22"
+        expected_reviewed_at = "2026-06-29" if filename == "09_ismn_soil_moisture_gcp_reference.md" else "2026-06-22"
+        assert entry["reviewed_at"] == expected_reviewed_at
         assert entry["verified_against_code_revision"]
         assert entry["knowledge_type"]
         assert entry["owner"] == "system-knowledge-admin"
@@ -117,7 +119,20 @@ def test_seed_retrieval_questions_route_to_expected_reference_documents() -> Non
         "DEM 坡度坡向 当前工具是否支持": "05_raster_vector_table_workflows.md",
         "XGBoost 空间泄漏 随机划分 空间交叉验证": "06_geospatial_xgboost_workflow.md",
         "删除会话后 私有知识 artifact 是否还能访问": "08_security_and_data_lifecycle.md",
+        "ISMN 本地 archive 如何导入土壤水分观测": "09_ismn_soil_moisture_gcp_reference.md",
+        "GCP interval width uncertainty map 如何解释": "09_ismn_soil_moisture_gcp_reference.md",
+        "空间坐标不足时 GCP 为什么回退 global split conformal": "09_ismn_soil_moisture_gcp_reference.md",
+        "ArcPy ArcGIS 是否意味着项目要新增 arcpy 依赖": "09_ismn_soil_moisture_gcp_reference.md",
     }
 
     for query, expected in cases.items():
         assert expected in _retrieve_seed_docs(query, limit=3), query
+
+
+def test_ismn_gcp_seed_remains_draft_reference_only() -> None:
+    path = SEED_DIR / "09_ismn_soil_moisture_gcp_reference.md"
+    text = path.read_text(encoding="utf-8")
+    assert 'status: "draft"' in text
+    assert "不得自动下载 ISMN 数据" in text
+    assert "不新增 ArcPy 运行时依赖" in text
+    assert "不得替代 Tool Cards、Plan Validator 或真实 ToolResult" in text

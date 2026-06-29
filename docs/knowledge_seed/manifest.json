@@ -272,6 +272,41 @@
       "owner": "system-knowledge-admin",
       "last_verified_by": "Codex",
       "version": "2026-06-22.1"
+    },
+    {
+      "file": "09_ismn_soil_moisture_gcp_reference.md",
+      "title": "ISMN、土壤水分 XGBoost 与 GCP 不确定性参考",
+      "import_order": 9,
+      "status": "draft",
+      "tags": [
+        "ismn",
+        "soil_moisture",
+        "xgboost",
+        "gcp",
+        "geoconformal",
+        "arcpy",
+        "arcgis",
+        "uncertainty",
+        "土壤水分",
+        "不确定性",
+        "空间预测"
+      ],
+      "applicable_scope": "ismn_soil_moisture_gcp_reference",
+      "reliability": "high",
+      "source": "project-code: core/tool_cards.py; core/data_semantics.py; core/ismn_adapter.py; core/ml/generic_xgboost.py; core/gcp_uncertainty.py; external-reference: ArcGIS Pro ArcPy; ISMN docs; GeoConformal Prediction",
+      "retrieval_test_questions": [
+        "ISMN 本地 archive 如何导入土壤水分观测？",
+        "GCP interval width uncertainty map 如何解释？",
+        "空间坐标不足时 GCP 为什么回退 global split conformal？",
+        "ArcPy ArcGIS 是否意味着项目要新增 arcpy 依赖？"
+      ],
+      "content_hash": "sha256:0b11e0112c11bae5e2f3022bdfad210f95fb5d42d8d17af82055025c9f43a3d2",
+      "reviewed_at": "2026-06-29",
+      "verified_against_code_revision": "6e4b299",
+      "knowledge_type": "ismn_soil_moisture_gcp_reference",
+      "owner": "system-knowledge-admin",
+      "last_verified_by": "Codex",
+      "version": "2026-06-29.1"
     }
   ],
   "reviewed_at": "2026-06-22",
