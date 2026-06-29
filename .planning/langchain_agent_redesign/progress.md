@@ -845,3 +845,6 @@
   - Marked Phase 58 complete in `.planning/langchain_agent_redesign/task_plan.md`.
   - Added Phase 59 as planned CI runner/cache follow-up.
   - Added Phase 58 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Phase 58 remote CI verification after commit `b4486d7`:
+  - `gh pr checks 3 --repo jtdw/agent`: `changes` passed, `python-tests` passed, `frontend-build` passed, `smoke-light` passed, CodeRabbit passed.
+  - `docs-contract` and `smoke-full` skipped as expected for a workflow-impacting PR run.
