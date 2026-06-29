@@ -22,14 +22,9 @@ jobs:
           pip install -r requirements.txt
       - name: Compile Python modules
         run: python -m py_compile api_server.py core\api_security.py core\resource_tools.py core\commercial\security.py core\ops_config.py core\agent_runtime\decision_eval.py
-      - name: Run agent runtime decision eval guard
+      - name: Run curated Python CI gate
         shell: pwsh
-        run: .\scripts\test_agent_runtime_decision_eval.ps1
-      - name: Run agent runtime active smoke guard
-        shell: pwsh
-        run: .\scripts\test_agent_runtime_active_smoke.ps1
-      - name: Run Python tests
-        run: python -m unittest discover tests
+        run: .\scripts\test_ci_python.ps1
       - name: Run doctor
         shell: pwsh
         run: .\scripts\doctor.ps1
@@ -40,7 +35,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "20"
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
       - name: Install frontend dependencies
@@ -71,7 +66,7 @@ jobs:
           python-version: "3.12"
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "20"
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
       - name: Install Python dependencies
