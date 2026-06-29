@@ -467,7 +467,8 @@ export function MapStage({
   resultLayerState,
   mapCommand,
   onResultLayersChange,
-  onChatContextChange
+  onChatContextChange,
+  allowFallbackStations = true
 }: {
   theme: 'light' | 'dark';
   basemap: Basemap;
@@ -480,6 +481,7 @@ export function MapStage({
   mapCommand?: MapCommand | null;
   onResultLayersChange?: (layers: ResultMapLayer[]) => void;
   onChatContextChange?: (patch: Partial<ChatContextPayload>) => void;
+  allowFallbackStations?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
@@ -546,7 +548,7 @@ export function MapStage({
     const load = async () => {
       try {
         const data = await api.mapStations(userId);
-        if (userId && !hasStations(data)) {
+        if (allowFallbackStations && userId && !hasStations(data)) {
           const fallback = await api.mapStations();
           if (!cancelled) {
             setStationCollection(fallback);
@@ -560,6 +562,13 @@ export function MapStage({
         }
       } catch (err) {
         if (!userId) {
+          if (!cancelled) {
+            setStationCollection(null);
+            setStationError(err instanceof Error ? err.message : 'Station data failed to load');
+          }
+          return;
+        }
+        if (!allowFallbackStations) {
           if (!cancelled) {
             setStationCollection(null);
             setStationError(err instanceof Error ? err.message : 'Station data failed to load');
@@ -584,7 +593,7 @@ export function MapStage({
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [userId, allowFallbackStations]);
 
   useEffect(() => {
     let cancelled = false;
