@@ -94,6 +94,10 @@ GIS_AGENT_RUNTIME_EXPOSURE_PERCENT=10
 
 策略层会阻止 staging 初始比例超过 10%。更高比例需要先完成新的验证阶段。
 
+## Phase 53: 远端 staging 10% 观测
+
+本机 Phase 49-52 gate 通过后，不要直接把 staging 提升到更高比例。先按 [agent-runtime-phase53-remote-staging-observation.md](agent-runtime-phase53-remote-staging-observation.md) 把 10% gate 迁移到远端 staging 或实际部署环境，完成只读 admin exposure 检查、recurring observation gate、真实任务指标观察和 rollback probe。
+
 ## 可选 LLM Coordinator 门禁
 
 当需要把 LLM coordinator smoke 纳入 staging 门禁时：
