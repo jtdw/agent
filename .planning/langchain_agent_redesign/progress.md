@@ -848,3 +848,21 @@
 - Phase 58 remote CI verification after commit `b4486d7`:
   - `gh pr checks 3 --repo jtdw/agent`: `changes` passed, `python-tests` passed, `frontend-build` passed, `smoke-light` passed, CodeRabbit passed.
   - `docs-contract` and `smoke-full` skipped as expected for a workflow-impacting PR run.
+- Executed Phase 59 final PR delivery audit without merging main, raising exposure, or touching production.
+- Current-state audit commands:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase54-ci-baseline-stabilization`.
+  - `gh pr view 3 --repo jtdw/agent --json ...`: PR #3 is open, non-draft, mergeable, head `codex/phase54-ci-baseline-stabilization`, base `main`, with 17 files, 1138 additions, 34 deletions.
+  - `gh pr checks 3 --repo jtdw/agent`: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed; `smoke-full` skipped by design.
+  - `gh pr diff 3 --repo jtdw/agent --name-only`: listed workflow, planning docs, remote staging runbook, CI scripts/tests, and small frontend compatibility files.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 17 files, 8 changed symbols, 0 affected processes, LOW risk.
+  - `node .gitnexus\run.cjs impact drawGeoJson --direction upstream`: LOW risk, MapStage surface.
+  - `node .gitnexus\run.cjs impact measurementLabel --direction upstream`: LOW risk, MapStage surface.
+  - `node .gitnexus\run.cjs impact test_ci_runs_active_smoke_guard_without_llm_opt_in --direction upstream`: LOW risk, no impacted flows.
+  - `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 17 passed.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, task window 3/3, no external download tools, artifact/map/raster/png/summary checks passed.
+- Added `docs/runbooks/pr3-final-delivery-audit.md` with PR status, change scope, GitNexus risk, CI/gate evidence, rollout boundaries, remaining operational risks, and merge-decision recommendation.
+- Updated planning memory:
+  - Marked Phase 59 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60 as planned CI runner/cache follow-up.
+  - Added Phase 59 findings to `.planning/langchain_agent_redesign/findings.md`.
