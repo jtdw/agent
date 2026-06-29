@@ -138,3 +138,14 @@ def test_run_cli_recovers_and_validates_phase45_evidence(tmp_path: Path) -> None
     recovered = json.loads(output.read_text(encoding="utf-8"))
     assert recovered["overall_ok"] is True
     assert recovered["validation"]["ok"] is True
+
+
+def test_committed_ci_recurring_summary_fixture_validates() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    fixture = repo_root / "docs" / "runbooks" / "evidence" / "phase45_real_soil_gcp_recurring_smoke_summary.ci.json"
+
+    summary = json.loads(fixture.read_text(encoding="utf-8"))
+    validation = validate_smoke_summary(summary, min_cases=3, min_empirical_coverage=0.85)
+
+    assert validation["ok"] is True
+    assert validation["failed_checks"] == []

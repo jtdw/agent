@@ -1,0 +1,147 @@
+{
+  "evidence_id": "soil_moisture_gcp_recurring_smoke_summary_ci_fixture",
+  "created_at": "2026-06-29T11:16:12.163742+00:00",
+  "source_evidence": "sanitized_phase45_real_soil_gcp_three_sample_smoke",
+  "overall_ok": true,
+  "input_archive": "sanitized_local_ismn_archive.zip",
+  "input_rasters": {
+    "dem": {
+      "name": "shandianhe_dem_mosaic.tif",
+      "exists": true,
+      "crs": "EPSG:32650",
+      "count": 1
+    },
+    "ndvi_daily": {
+      "name": "Shandianhe_NDVI_2019_Daily_All.tif",
+      "exists": true,
+      "crs": "EPSG:4326",
+      "count": 365
+    },
+    "lst_daily": {
+      "name": "Shandianhe_LST_2019_Daily_All.tif",
+      "exists": true,
+      "crs": "EPSG:4326",
+      "count": 365
+    },
+    "precip_daily": {
+      "name": "Shandianhe_Precip_201812_202001_Daily.tif",
+      "exists": true,
+      "crs": "EPSG:4326",
+      "count": 396
+    },
+    "lulc": {
+      "name": "Shandianhe_LULC_2019_MODIS_500m.tif",
+      "exists": true,
+      "crs": "EPSG:4326",
+      "count": 1
+    }
+  },
+  "cases": [
+    {
+      "case_id": "summer_20190715",
+      "representative_date": "2019-07-15",
+      "ok": true,
+      "duration_seconds": 650.218,
+      "workflow_status": "modeled",
+      "training_rows": 9513,
+      "model_feature_count": 14,
+      "study_area_filter": {
+        "boundary_dataset": "shandianhe_basin_boundary",
+        "filter_method": "study_area_boundary",
+        "removed_row_count": 2522,
+        "removed_station_count": 7
+      },
+      "prediction": {
+        "status": "mapped",
+        "valid_pixels": 742,
+        "reference_source": "coarsest_feature_raster",
+        "reference_raster": "phase45_summer_20190715_raster_precip_daily_sum_3d_prediction_feature",
+        "tif_exists": true,
+        "png_exists": true
+      },
+      "gcp": {
+        "method": "spatially_weighted_gcp",
+        "target_coverage": 0.9,
+        "empirical_coverage": 0.8919315403422983,
+        "mean_interval_width": 0.31454970046527836,
+        "n_target": 2045,
+        "fallback_code": "",
+        "report_exists": true
+      }
+    },
+    {
+      "case_id": "spring_20190515",
+      "representative_date": "2019-05-15",
+      "ok": true,
+      "duration_seconds": 575.632,
+      "workflow_status": "modeled",
+      "training_rows": 9513,
+      "model_feature_count": 14,
+      "study_area_filter": {
+        "boundary_dataset": "shandianhe_basin_boundary",
+        "filter_method": "study_area_boundary",
+        "removed_row_count": 2522,
+        "removed_station_count": 7
+      },
+      "prediction": {
+        "status": "mapped",
+        "valid_pixels": 742,
+        "reference_source": "coarsest_feature_raster",
+        "reference_raster": "phase45_spring_20190515_raster_precip_daily_sum_3d_prediction_feature",
+        "tif_exists": true,
+        "png_exists": true
+      },
+      "gcp": {
+        "method": "spatially_weighted_gcp",
+        "target_coverage": 0.9,
+        "empirical_coverage": 0.8919315403422983,
+        "mean_interval_width": 0.31454970046527836,
+        "n_target": 2045,
+        "fallback_code": "",
+        "report_exists": true
+      }
+    },
+    {
+      "case_id": "early_window_20190115",
+      "representative_date": "2019-01-15",
+      "ok": true,
+      "duration_seconds": 639.525,
+      "workflow_status": "modeled",
+      "training_rows": 9513,
+      "model_feature_count": 14,
+      "study_area_filter": {
+        "boundary_dataset": "shandianhe_basin_boundary",
+        "filter_method": "study_area_boundary",
+        "removed_row_count": 2522,
+        "removed_station_count": 7
+      },
+      "prediction": {
+        "status": "mapped",
+        "valid_pixels": 725,
+        "reference_source": "coarsest_feature_raster",
+        "reference_raster": "phase45_early_window_20190115_raster_precip_daily_sum_3d_prediction_feature",
+        "tif_exists": true,
+        "png_exists": true
+      },
+      "gcp": {
+        "method": "spatially_weighted_gcp",
+        "target_coverage": 0.9,
+        "empirical_coverage": 0.8919315403422983,
+        "mean_interval_width": 0.31454970046527836,
+        "n_target": 2045,
+        "fallback_code": "",
+        "report_exists": true
+      }
+    }
+  ],
+  "runtime_summary": {
+    "total_case_seconds": 1865.375,
+    "max_case_seconds": 650.218,
+    "recommended_recurring_mode": "full_chain_once_plus_date_specific_lightweight_checks",
+    "bottleneck_note": "Full three-case smoke repeats training, DEM derivatives, temporal composites, raster prediction, and GCP. Use it as strong regression evidence; keep routine smoke lighter."
+  },
+  "phase_conclusion": {
+    "ready_for_next_decision": true,
+    "recommended_next_step": "Use this sanitized recurring summary fixture only for CI validation; real remote staging must validate deployment-local evidence."
+  }
+}

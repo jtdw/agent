@@ -118,3 +118,8 @@ def test_observation_gate_script_uses_pwsh_safe_case_array() -> None:
     assert "$ObservationCases" in content
     assert "-Case $ObservationCases" in content
     assert "core.agent_runtime.staging_observation_gate" in content
+    assert 'GIS_AGENT_RUNTIME_V2 = "1"' in content
+    assert 'GIS_AGENT_RUNTIME_MODE = "active"' in content
+    assert 'GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER = "1"' in content
+    assert 'GIS_AGENT_RUNTIME_EXPOSURE_ENV = "staging"' in content
+    assert 'GIS_AGENT_RUNTIME_EXPOSURE_PERCENT = "10"' in content
