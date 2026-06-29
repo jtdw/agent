@@ -13,6 +13,29 @@ def test_ci_uses_stable_node_lts_for_frontend_jobs() -> None:
     assert ".\\scripts\\install_frontend_dependencies.ps1" in workflow
 
 
+def test_ci_caches_python_dependencies_for_python_jobs() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert workflow.count("cache: pip") >= 2
+    assert workflow.count("cache-dependency-path: requirements.txt") >= 2
+
+
+def test_ci_caches_package_manager_downloads_not_installed_modules() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "Cache Yarn fallback download cache" in workflow
+    assert "actions/cache@v4" in workflow
+    assert "~\\AppData\\Local\\Yarn\\Cache" in workflow
+    assert "hashFiles('ui_next/package-lock.json')" in workflow
+
+    for line in workflow.splitlines():
+        if line.strip().startswith("path:"):
+            assert "node_modules" not in line
+            assert ".venv" not in line
+
+
 def test_ci_python_gate_uses_curated_script_not_unbounded_discover() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
