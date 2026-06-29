@@ -300,7 +300,7 @@
         "空间坐标不足时 GCP 为什么回退 global split conformal？",
         "ArcPy ArcGIS 是否意味着项目要新增 arcpy 依赖？"
       ],
-      "content_hash": "sha256:d71b7e75d97fc8a8083856c254b7003f9fc6e943834631aacf1fcbd2f216b887",
+      "content_hash": "sha256:0b11e0112c11bae5e2f3022bdfad210f95fb5d42d8d17af82055025c9f43a3d2",
       "reviewed_at": "2026-06-29",
       "verified_against_code_revision": "6e4b299",
       "knowledge_type": "ismn_soil_moisture_gcp_reference",

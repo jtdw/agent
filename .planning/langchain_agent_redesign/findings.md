@@ -374,6 +374,17 @@ Date: 2026-06-29
 
 Date: 2026-06-29
 
+## Phase 60C Built-In Knowledge Activation Findings
+
+- The user asked to activate the refreshed knowledge inside the agent rather than leaving it only as draft seed documentation.
+- The existing `CapabilityConfigStore` active knowledge path writes to `workspace/capability_config`, which is `.gitignore`d and therefore suitable for local/operator activation but not a reproducible PR deliverable.
+- The selected deliverable path is to add short trusted built-in snippets in `core/knowledge_base.py` while preserving the longer seed document as the reviewed reference.
+- GitNexus impact for `retrieve_knowledge_snippets` was HIGH because it feeds `build_conversation_context`, RAG document collection, and service ask/edit flows. The implementation therefore avoided changing retrieval logic and added only three static snippets.
+- Activated built-in snippets cover ISMN local archives, GCP/global split conformal uncertainty interpretation, and ArcGIS/ArcPy taxonomy boundaries. They explicitly do not authorize ISMN downloads, ArcPy dependency changes, or fabricated ToolResult metrics.
+- A wider knowledge/RAG/context test run initially exposed a content-hash mismatch for the Phase 60A seed document after working-tree line ending normalization. Updating the manifest hash to the current file bytes restored the seed-document contract.
+
+Date: 2026-06-29
+
 ## Phase 59 Final PR Delivery Audit Findings
 
 - PR #3 is open, non-draft, mergeable, and current checks are green: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed.

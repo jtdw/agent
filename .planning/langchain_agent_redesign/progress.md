@@ -912,3 +912,28 @@
 - Updated planning memory:
   - Marked Phase 60B preflight complete.
   - Recorded that true remote staging deployment/reload, exposure change, production traffic, and real-user routing remain explicit approval points.
+- Started Phase 60C built-in knowledge activation after the user requested activating the refreshed knowledge in the agent.
+- GitNexus impact:
+  - `retrieve_knowledge_snippets`: HIGH risk, 7 impacted symbols, 1 affected process (`edit_user_message_and_retry`). Proceeded with a narrow static-data-only change and no retrieval logic changes.
+  - `test_knowledge_base_retrieves_versioned_scoped_snippets`: LOW risk, 0 affected processes.
+- TDD RED:
+  - Added `test_builtin_knowledge_activates_ismn_gcp_and_arcgis_reference_snippets` in `tests/test_llm_first_layers.py`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py::LLMFirstLayerTests::test_builtin_knowledge_activates_ismn_gcp_and_arcgis_reference_snippets -q`.
+  - Expected failure: `ISMN` was not found in built-in retrieved snippets.
+- TDD GREEN:
+  - Added three short built-in snippets in `core/knowledge_base.py`: `ismn-local-archive`, `gcp-uncertainty-interpretation`, and `arcgis-arcpy-taxonomy-boundary`.
+  - Re-ran the new test: 1 passed.
+- Related verification:
+  - `.venv\Scripts\python.exe -m py_compile core\knowledge_base.py tests\test_llm_first_layers.py`: passed.
+  - First wider run exposed a Phase 60A seed manifest hash mismatch after line-ending normalization; updated `docs/knowledge_seed/manifest.json` content hash for `09_ismn_soil_moisture_gcp_reference.md` to `sha256:0b11e0112c11bae5e2f3022bdfad210f95fb5d42d8d17af82055025c9f43a3d2`.
+  - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py -q`: 24 passed, 26 subtests passed.
+- Updated planning memory:
+  - Marked Phase 60C complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60C findings.
+- Phase 60C final verification before commit:
+  - `git status --short --branch`: only expected Phase 60C files were modified.
+  - `.venv\Scripts\python.exe -m py_compile core\knowledge_base.py tests\test_llm_first_layers.py`: passed.
+  - `git diff --check`: exit code 0; PowerShell output only included known LF-to-CRLF warnings.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 10 files, 8 symbols, 0 affected processes, LOW risk.
+  - `.venv\Scripts\python.exe -m pytest tests\test_llm_first_layers.py tests\test_knowledge_seed_docs.py tests\test_agent_runtime_rag_ops.py tests\test_agent_runtime_vector_rag.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 41 passed, 26 subtests passed.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact checks passed.

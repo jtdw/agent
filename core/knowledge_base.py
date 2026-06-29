@@ -56,6 +56,36 @@ _SNIPPETS: tuple[dict[str, Any], ...] = (
         "scope": "map_display",
         "trust_level": "medium",
     },
+    {
+        "id": "ismn-local-archive",
+        "title": "ISMN 本地归档与土壤水分观测",
+        "content": "ISMN 土壤水分任务只使用用户上传、workspace 或 local_library 中已有的本地 archive。不得自动下载 ISMN 数据，不处理登录凭据、Cookie、token 或 storage_state；导入前应剖析 network、station、sensor、depth、variable、quality flag、坐标和时间范围。",
+        "tags": ["ismn", "archive", "soil_moisture", "station", "sensor", "depth", "土壤水分", "本地归档", "观测"],
+        "source": "project-gis-agent-knowledge",
+        "version": "2026-06-29",
+        "scope": "ismn_soil_moisture_reference",
+        "trust_level": "high",
+    },
+    {
+        "id": "gcp-uncertainty-interpretation",
+        "title": "GCP 空间预测不确定性解释",
+        "content": "GCP 必须基于真实观测、预测、残差和校准数据。global split conformal 是安全基线；只有坐标和校准样本充足时才解释为空间加权 GCP。interval width、coverage、uncertainty map 必须来自真实 ToolResult，坐标不足时应回退 global split conformal 并说明原因。",
+        "tags": ["gcp", "geoconformal", "uncertainty", "interval", "coverage", "global", "split", "conformal", "不确定性", "空间预测"],
+        "source": "project-gis-agent-knowledge",
+        "version": "2026-06-29",
+        "scope": "gcp_uncertainty_reference",
+        "trust_level": "high",
+    },
+    {
+        "id": "arcgis-arcpy-taxonomy-boundary",
+        "title": "ArcGIS 和 ArcPy 仅作为 GIS 术语参考",
+        "content": "ArcGIS Pro 和 ArcPy 文档可作为表格转点、分区统计、制图和地理处理术语参考。不新增 ArcPy 运行时依赖，不把外部 ArcPy 工具名当作已注册工具名；实际执行仍必须由本项目 Tool Cards、TaskPlan、Validator 和工具实现确认。",
+        "tags": ["arcgis", "arcpy", "taxonomy", "xy", "zonal", "table_to_points", "术语", "依赖", "分区统计"],
+        "source": "project-gis-agent-knowledge",
+        "version": "2026-06-29",
+        "scope": "gis_taxonomy_reference",
+        "trust_level": "high",
+    },
 )
 
 
