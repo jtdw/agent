@@ -364,6 +364,16 @@ Date: 2026-06-28
 
 Date: 2026-06-29
 
+## Phase 56 Remote/Real Staging Sync Checklist Findings
+
+- Phase 56 completed the missing bridge between local staging 10% evidence and remote/real staging operation: the checklist now covers runtime env/config keys, service restart/reload, read-only admin exposure verification, recurring observation cadence, real-task quality metrics, rollback triggers, and CI cache timing observation.
+- The remote checklist intentionally does not raise staging exposure beyond 10%, does not touch production, and does not weaken auth to collect observation traffic.
+- The runbook records both `GIS_AGENT_RUNTIME_SOIL_MOISTURE_GCP_SMOKE_REPORT` and the currently used `GIS_AGENT_RUNTIME_SOIL_MOISTURE_GCP_SMOKE_SUMMARY` naming so operators can keep them pointed at the same recurring gate summary until code-level env naming is unified.
+- Contract tests in `tests/test_runtime_staging_remote_runbook.py` now prevent future edits from silently removing the critical Phase 56 checklist fields.
+- The next rollout decision is operational: whether to run this checklist manually on remote staging, add a manual GitHub Actions `workflow_dispatch`, or plug it into an external scheduler. Any real remote staging change or exposure increase still requires user confirmation.
+
+Date: 2026-06-29
+
 ## Phase 47-55 Staging 10%, Observation Gates, and CI Findings
 
 - Phase 47-52 moved the local rollout posture from staging 10% readiness into reusable observation gates. The current evidence chain includes readiness dry-run, observation start, observation window, routed request smoke, quasi-real task quality window, and a hardened staging observation gate.
