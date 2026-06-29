@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 
@@ -58,3 +59,22 @@ def test_ci_doctor_uses_actions_python_instead_of_requiring_project_venv() -> No
     assert ".\\scripts\\doctor.ps1 -PythonPath python" in workflow
     assert "[string]$PythonPath" in doctor
     assert "Missing project virtualenv" in doctor
+
+
+def test_frontend_declares_geojson_types_for_yarn_fallback_build() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    package_json = json.loads((repo_root / "ui_next" / "package.json").read_text(encoding="utf-8"))
+
+    assert "@types/geojson" in package_json["devDependencies"]
+
+
+def test_smoke_workflow_waits_for_services_instead_of_fixed_sleep() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "Start-Sleep -Seconds 25" not in workflow
+    assert "-PassThru" in workflow
+    assert "Invoke-RestMethod" in workflow
+    assert "Invoke-WebRequest" in workflow
+    assert "/api/status" in workflow
+    assert ".HasExited" in workflow

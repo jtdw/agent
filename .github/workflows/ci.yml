@@ -80,8 +80,61 @@ jobs:
       - name: Start backend and frontend
         shell: pwsh
         run: |
-          Start-Process -FilePath python -ArgumentList @('-m','uvicorn','api_server:app','--host','127.0.0.1','--port','8765') -WindowStyle Hidden
-          Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory ui_next -WindowStyle Hidden
-          Start-Sleep -Seconds 25
+          $logRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { "outputs" }
+          $backendOut = Join-Path $logRoot "gis-agent-backend.out.log"
+          $backendErr = Join-Path $logRoot "gis-agent-backend.err.log"
+          $frontendOut = Join-Path $logRoot "gis-agent-frontend.out.log"
+          $frontendErr = Join-Path $logRoot "gis-agent-frontend.err.log"
+
+          function Show-LogTail {
+            param([string]$Path)
+            if (Test-Path -LiteralPath $Path) {
+              Get-Content -LiteralPath $Path -Tail 80
+            }
+          }
+
+          function Assert-ProcessRunning {
+            param([string]$Name, [System.Diagnostics.Process]$Process, [string]$Stdout, [string]$Stderr)
+            if ($Process.HasExited) {
+              Write-Host "$Name stdout:"
+              Show-LogTail -Path $Stdout
+              Write-Host "$Name stderr:"
+              Show-LogTail -Path $Stderr
+              throw "$Name exited before becoming ready with code $($Process.ExitCode)."
+            }
+          }
+
+          $backend = Start-Process -FilePath python -ArgumentList @('-m','uvicorn','api_server:app','--host','127.0.0.1','--port','8765') -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr -PassThru -WindowStyle Hidden
+          $frontend = Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory ui_next -RedirectStandardOutput $frontendOut -RedirectStandardError $frontendErr -PassThru -WindowStyle Hidden
+
+          $deadline = (Get-Date).AddSeconds(120)
+          do {
+            Assert-ProcessRunning -Name "Backend" -Process $backend -Stdout $backendOut -Stderr $backendErr
+            try {
+              $status = Invoke-RestMethod -Uri "$env:GIS_AGENT_BACKEND_URL/api/status" -TimeoutSec 5
+              if ($status.ok) { break }
+            } catch {}
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if (-not $status.ok) {
+            throw "Backend did not become ready before timeout."
+          }
+
+          $deadline = (Get-Date).AddSeconds(120)
+          $frontendReady = $false
+          do {
+            Assert-ProcessRunning -Name "Frontend" -Process $frontend -Stdout $frontendOut -Stderr $frontendErr
+            try {
+              $response = Invoke-WebRequest -Uri $env:GIS_AGENT_FRONTEND_URL -TimeoutSec 5
+              if ($response.StatusCode -eq 200) {
+                $frontendReady = $true
+                break
+              }
+            } catch {}
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if (-not $frontendReady) {
+            throw "Frontend did not become ready before timeout."
+          }
       - name: Run E2E smoke
         run: python scripts\e2e_smoke.py
