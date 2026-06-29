@@ -35,6 +35,22 @@
   - GREEN: set `GIS_AGENT_RUNTIME_V2=1`, `GIS_AGENT_RUNTIME_MODE=active`, `GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER=1`, staging 10% exposure policy fields, rollback false, and soil summary/smoke report paths inside the PowerShell process.
   - Re-ran the contract test: 1 passed.
   - Re-ran local simulated GitHub `smoke-full` script path with committed fixtures: soil validation ok, diagnostics ok, active task window 3/3 passed, staging10 gate `ok=true`.
+- Final PR #5 verification and merge:
+  - `gh pr checks 5 --repo jtdw/agent`: `python-tests`, `frontend-build`, `smoke-light`, CodeRabbit, and `changes` passed; `smoke-full` skipped on the PR path by design.
+  - `gh run view 28370463288 --repo jtdw/agent --json status,conclusion,url,headBranch,headSha,name`: manual CI run completed with `conclusion=success`, including `smoke-full`.
+  - `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_soil_moisture_gcp_smoke_runner.py tests\test_agent_runtime_staging_observation_gate.py tests\test_runtime_staging_remote_runbook.py -q`: 23 passed before merge.
+  - `gh pr merge 5 --merge --repo jtdw/agent`: succeeded.
+  - `git switch main; git pull --ff-only origin main`: local `main` advanced to merge commit `09aa54f`.
+  - Post-merge local tests: same 23 tests passed.
+  - Main CI run `28371199539`: completed with `conclusion=success`; `python-tests`, `frontend-build`, and `smoke-light` passed.
+  - `git status --short --branch`: clean `main...origin/main`.
+- Final closure documentation:
+  - Added `docs/runbooks/final-delivery-closure.md`.
+  - Marked Phase 61 complete and added Phase 62 real remote staging handoff as pending.
+  - Fresh final pytest: `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_soil_moisture_gcp_smoke_runner.py tests\test_agent_runtime_staging_observation_gate.py tests\test_runtime_staging_remote_runbook.py -q`: 23 passed.
+  - Fresh final soil moisture/GCP recurring smoke: `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0.
+  - Fresh final staging10 observation gate: `ok=true`, diagnostics capture ok, soil summary ok, active task window 3/3, final gate checks ok.
+  - No staging exposure increase, production change, database migration, auth/billing/download-security direction change, or real remote staging deployment was performed.
 
 ## 2026-06-27
 

@@ -8,6 +8,9 @@
 - The selected fix keeps runtime behavior unchanged: commit small sanitized CI fixtures under `docs/runbooks/evidence/`, validate the soil recurring summary with `-ValidateOnly`, pass the fixture paths into the staging10 observation gate, and still generate the Phase51 active task window live in CI.
 - A second remote failure on branch run `28369638152` showed the next missing self-contained input: the fresh runner has no local `.env`, so `run_agent_runtime_staging10_observation_gate.ps1` must set the active runtime/staging10 gate environment in-process before invoking active smoke.
 - This does not execute real remote staging, raise exposure, touch production, or include `.env`, API keys, tokens, cookies, storage_state, raw prompts, complete local paths, or original user data rows.
+- PR #5 was merged to `main` as `09aa54f2eb40fbc31b8ddaf87fc8751b6e4c324a` after local tests and PR checks passed.
+- Main CI run `28371199539` passed after the merge. The PR-default path kept `smoke-full` skipped by design, while manual full CI run `28370463288` passed on the same PR branch commit before merge.
+- The project is now closed out as a reproducible local/runtime/staging-gate/CI deliverable on `main`. True remote staging execution remains an operator task because staging URL/host, safe admin token retrieval, restart/reload method, and deployed config verification path are not available in this workspace.
 
 Date: 2026-06-29
 
