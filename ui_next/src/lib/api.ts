@@ -1,5 +1,6 @@
 
 import type { ChatContextPayload } from './chatContext';
+import type { FeatureCollection } from 'geojson';
 
 export type TiandituConfig = {
   enabled: boolean;
@@ -447,7 +448,7 @@ export type ResultMapLayer = {
   map_ready?: boolean;
   bounds?: [number, number, number, number];
   feature_count?: number;
-  geojson?: GeoJSON.FeatureCollection;
+  geojson?: FeatureCollection;
   preview_url?: string;
   meta?: Record<string, unknown>;
 };

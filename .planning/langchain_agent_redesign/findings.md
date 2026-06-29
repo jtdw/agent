@@ -363,3 +363,58 @@ Date: 2026-06-28
 - This keeps later staging decisions grounded in real outputs while avoiding repeated DEM derivative, temporal composite, raster prediction, and GCP recomputation on every local guard run.
 
 Date: 2026-06-29
+
+## Phase 59 Final PR Delivery Audit Findings
+
+- PR #3 is open, non-draft, mergeable, and current checks are green: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed.
+- `gh pr view` reports 17 changed files with 1138 additions and 34 deletions. The change set is mostly CI, rollout documentation, planning memory, and contract tests, with small frontend compatibility edits.
+- GitNexus compare against `origin/main` reported 17 files, 8 changed symbols, 0 affected execution flows, and LOW risk.
+- Non-document/test symbol impact checks were LOW for `drawGeoJson` and `measurementLabel`; the affected surface is the `MapStage` frontend map process. No HIGH or CRITICAL blast radius was found.
+- Local gate verification remained green during the audit: CI/runbook contract tests passed, soil moisture/GCP recurring smoke returned `ok=true`, and staging10 observation gate returned `ok=true`.
+- The PR is ready for a human merge decision. The audit does not authorize merging, staging exposure increases, production traffic, database migration, or security-policy direction changes.
+
+Date: 2026-06-29
+
+## Phase 58 Playwright Browser Cache Findings
+
+- Phase 58 chose the lowest-risk CI accelerator: cache Playwright browser binaries for `smoke-light` while leaving Windows runner behavior and E2E smoke flow unchanged.
+- The cache path is `~\AppData\Local\ms-playwright`, which matches Playwright's default Windows browser cache location.
+- The cache key is tied to `${{ runner.os }}` and `requirements.txt`, because the Python `playwright` package version is declared there. `python -m playwright install chromium` remains in the job so cache misses and browser-version changes still self-heal.
+- The existing policy remains intact: cache download/browser stores only, not `node_modules`, `.venv`, or other installed dependency directories.
+- Linux runner migration remains a later Phase 59 candidate because core smoke still benefits from Windows/PowerShell/path compatibility evidence.
+
+Date: 2026-06-29
+
+## Phase 57 CI Layering and Path-Filter Findings
+
+- Phase 57 keeps the default PR safety gates but avoids full CI for docs/planning-only changes. A new `changes` job uses path filtering to distinguish docs, frontend, Python/runtime/scripts/tests, and dependency/workflow changes.
+- Docs/planning-only changes now run a lightweight `docs-contract` job instead of installing full backend/frontend dependencies or launching E2E smoke.
+- The previous default `smoke` behavior is retained as `smoke-light` for code-impacting PRs: it still installs dependencies, starts backend/frontend, and runs the existing E2E smoke.
+- Heavy staging observation gates moved to `smoke-full`, which runs only through `workflow_dispatch` or nightly schedule. This keeps Phase 52 staging observation and soil moisture/GCP recurring gates available without making every PR wait on them.
+- `concurrency` now cancels superseded runs for the same PR or ref, reducing wasted CI time on rapid follow-up pushes.
+- This phase intentionally avoids Linux runner migration for core Python/frontend/smoke jobs. That remains a Phase 58 candidate because Windows path/PowerShell/GIS compatibility is still valuable for this project.
+
+Date: 2026-06-29
+
+## Phase 56 Remote/Real Staging Sync Checklist Findings
+
+- Phase 56 completed the missing bridge between local staging 10% evidence and remote/real staging operation: the checklist now covers runtime env/config keys, service restart/reload, read-only admin exposure verification, recurring observation cadence, real-task quality metrics, rollback triggers, and CI cache timing observation.
+- The remote checklist intentionally does not raise staging exposure beyond 10%, does not touch production, and does not weaken auth to collect observation traffic.
+- The runbook records both `GIS_AGENT_RUNTIME_SOIL_MOISTURE_GCP_SMOKE_REPORT` and the currently used `GIS_AGENT_RUNTIME_SOIL_MOISTURE_GCP_SMOKE_SUMMARY` naming so operators can keep them pointed at the same recurring gate summary until code-level env naming is unified.
+- Contract tests in `tests/test_runtime_staging_remote_runbook.py` now prevent future edits from silently removing the critical Phase 56 checklist fields.
+- The next rollout decision is operational: whether to run this checklist manually on remote staging, add a manual GitHub Actions `workflow_dispatch`, or plug it into an external scheduler. Any real remote staging change or exposure increase still requires user confirmation.
+
+Date: 2026-06-29
+
+## Phase 47-55 Staging 10%, Observation Gates, and CI Findings
+
+- Phase 47-52 moved the local rollout posture from staging 10% readiness into reusable observation gates. The current evidence chain includes readiness dry-run, observation start, observation window, routed request smoke, quasi-real task quality window, and a hardened staging observation gate.
+- The Phase 52 observation gate should remain a recurring pre-rollout gate because it ties policy, routing, diagnostics, active smoke, and soil moisture/GCP evidence together in one repeatable check.
+- Do not raise staging exposure beyond 10% only because local gates passed. Phase 53 should first define remote/real staging synchronization: environment variables, service reload/restart, read-only admin exposure checks, recurring gate cadence, metrics collection, and rollback triggers.
+- Real user-task observation should track at least: request/error rate, active-vs-legacy routing distribution, external download false positives, artifact/map/raster/png/summary outputs, soil moisture/GCP path health, and latency.
+- Rollback remains operationally simple: set `GIS_AGENT_RUNTIME_ROLLBACK=1`, reload/restart the service so config is read, and verify read-only admin exposure reports `eligible_for_user_exposure=false` with `rollback_requested` or equivalent blocking reason.
+- Phase 54 stabilized CI by replacing broad or fragile commands with curated gates and explicit readiness checks. Smoke E2E must run while backend/frontend services are still alive in the same PowerShell step.
+- Phase 55 added package-manager caching only. This intentionally caches pip/npm/Yarn download stores, not `node_modules`, `.venv`, or other installed dependency directories that can go stale or encode runner-specific native state.
+- The active task lineage spans at least these Codex sessions: `019f07d3-5044-7870-940d-bc362a2b8a8b` and `019f0f8a-1ed9-7f41-95f0-33bf0607ea22`; future goal-mode runs should treat them as the same workstream and use `.planning/langchain_agent_redesign` as the continuity source.
+
+Date: 2026-06-29

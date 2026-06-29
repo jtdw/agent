@@ -721,3 +721,148 @@
   - `tests/test_soil_moisture_gcp_smoke_runner.py tests/test_stm_xgboost_workflow.py -q`: 18 passed.
   - `tests/test_xgboost_raster_prediction.py tests/test_gcp_uncertainty.py tests/test_gcp_tool_contract.py -q`: 14 passed.
   - `py_compile` passed for the new runner and related STM/prediction/GCP modules.
+- Completed Phase 47 staging 10% readiness dry-run gate and pushed commit `4238d75`.
+- Hardened and documented the staging exposure runbook and pushed commit `eb3cc64`.
+- Completed Phase 48 staging 10% observation start:
+  - Local backend was observed on `127.0.0.1:8765`.
+  - Admin exposure reported staging 10%, eligible, soil moisture/GCP gate passed, active smoke 9/9, and routing sample about 9.8%.
+  - Evidence: `outputs/phase48_staging10_observation_start.json`.
+- Completed Phase 49 first staging 10% observation window:
+  - Policy, routing, diagnostics, smoke, and soil gate all reported ok.
+  - Evidence: `outputs/phase49_staging10_observation_window.json`.
+- Completed Phase 50 staged routed request smoke:
+  - A request inside the 10% bucket used runtime active planner.
+  - A request outside the 10% bucket used legacy fallback.
+  - No LLM/tool execution was needed for the routing smoke.
+  - Evidence: `outputs/phase50_staging10_routed_request_smoke.json`.
+- Completed Phase 51 short quasi-real task quality window:
+  - `active_vector_clip_map`, `active_table_to_points_map`, and `xgboost_raster_prediction_map` all passed.
+  - No external downloads were triggered.
+  - Artifact/map/raster/png/summary outputs were present as expected.
+  - Evidence: `outputs/phase51_staging10_quasi_real_task_window.json` and `outputs/phase51_staging10_short_window_quality_summary.json`.
+- Completed Phase 52 staging 10% observation hardening:
+  - Added `core/agent_runtime/staging_observation_gate.py`.
+  - Added `scripts/run_agent_runtime_staging10_observation_gate.ps1`.
+  - Added `tests/test_agent_runtime_staging_observation_gate.py`.
+  - Fixed deterministic active smoke to force runtime planner fallback and avoid accidental `default_llm` drift.
+  - Full gate output `outputs/phase52_staging10_observation_gate.json` reported `ok=true`.
+  - Pushed commit `f0d3a69 test(runtime): add staging observation gate`.
+- Phase 53 is the next rollout-planning phase, not a completed implementation phase:
+  - Do not directly raise staging exposure beyond 10%.
+  - Plan remote/real staging synchronization, `.env` deployment, service restart/reload, read-only admin exposure checks, recurring observation frequency, real user-task metrics, latency, artifact/map output checks, soil moisture/GCP path checks, and rollback triggers.
+- Completed Phase 54 CI baseline stabilization on branch `codex/phase54-ci-baseline-stabilization`:
+  - `scripts/test_ci_python.ps1` now defines the curated Python CI baseline.
+  - `scripts/install_frontend_dependencies.ps1` handles npm/yarn fallback paths.
+  - `scripts/doctor.ps1` supports `-PythonPath` for GitHub Actions without project `.venv`.
+  - Smoke starts backend/frontend, waits for readiness, runs E2E in the same PowerShell step, then cleans processes.
+  - `ui_next/package.json`, lockfile, and GeoJSON type imports were adjusted to make Windows CI fallback builds reliable.
+  - Remote PR #3 CI passed after commits through `b56a0c0`.
+- Completed Phase 55 CI dependency cache optimization:
+  - Added pip cache to Python jobs in `.github/workflows/ci.yml`.
+  - Retained setup-node npm cache and added `actions/cache@v4` for Yarn fallback download cache.
+  - Added contract tests in `tests/test_ci_baseline_workflow.py` to require package-manager cache and forbid installed-module cache paths such as `node_modules` and `.venv`.
+  - TDD RED failed on missing pip/Yarn cache; GREEN passed after workflow update.
+  - Verification: `tests/test_ci_baseline_workflow.py -q` passed 9 tests.
+  - `git diff --check` passed with only Windows line-ending warnings.
+  - GitNexus `detect-changes --scope all` reported no mapped business-symbol changes.
+  - Pushed commit `1a312b3 ci: cache package manager dependencies`.
+  - Remote PR #3 checks passed: `frontend-build`, `python-tests`, `smoke`, and CodeRabbit.
+- Current continuity note:
+  - Session IDs `019f07d3-5044-7870-940d-bc362a2b8a8b` and `019f0f8a-1ed9-7f41-95f0-33bf0607ea22` are the same workstream.
+  - Active planning root remains `.planning/langchain_agent_redesign`.
+  - Current branch is `codex/phase54-ci-baseline-stabilization`, synced to origin at the time of this planning update.
+- User confirmed writing the most important long-term continuity items to `AGENTS.md`.
+- Added an `AGENTS.md` section named "长期任务记忆与延续入口" with:
+  - the active planning directory `.planning/langchain_agent_redesign/`;
+  - the Phase 56 continuation plan path;
+  - the two same-workstream session IDs;
+  - the rule that Phase 56 should focus on remote/real staging synchronization and rollback-observable operations before increasing exposure;
+  - the CI cache policy to cache package-manager download caches but not `node_modules` or `.venv`.
+- Started Phase 56 remote/real staging synchronization checklist work under goal mode.
+- Initial `git status --short` was clean before edits.
+- Read `AGENTS.md`, `.planning/langchain_agent_redesign/task_plan.md`, `.planning/langchain_agent_redesign/findings.md`, `.planning/langchain_agent_redesign/progress.md`, and `docs/superpowers/plans/2026-06-29-runtime-staging-ci-continuation-plan.md`.
+- TDD RED for Phase 56:
+  - Added `tests/test_runtime_staging_remote_runbook.py`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_runtime_staging_remote_runbook.py -q`.
+  - Expected failure: 3 tests failed because `docs/runbooks/agent-runtime-remote-staging-sync.md` did not exist.
+- TDD GREEN for Phase 56:
+  - Added `docs/runbooks/agent-runtime-remote-staging-sync.md`.
+  - The runbook locks the remote staging env checklist, service restart/reload, read-only admin exposure validation, recurring observation cadence, real-task metrics, rollback triggers, and CI cache observation.
+  - It explicitly preserves safety boundaries: no exposure increase beyond 10%, no production traffic, no auth weakening, no sensitive `.env`/token/cookie/storage_state output.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_runtime_staging_remote_runbook.py -q`: 3 passed.
+- Updated planning memory:
+  - Marked Phase 56 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 57 as a planned remote gate scheduling decision.
+  - Added Phase 56 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Phase 56 verification:
+  - `.venv\Scripts\python.exe -m pytest tests\test_runtime_staging_remote_runbook.py tests\test_ci_baseline_workflow.py -q`: 12 passed.
+  - `git diff --check`: passed with only existing Windows LF-to-CRLF warnings for planning markdown files.
+  - `node .gitnexus\run.cjs detect-changes --scope all`: no changes detected, as this phase only touched docs/planning/tests outside mapped business symbols.
+  - `gh pr checks 3 --repo jtdw/agent`: `frontend-build`, `python-tests`, `smoke`, and CodeRabbit all passed before the Phase 56 commit.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, soil moisture/GCP recurring gate `ok=true`, task quality window 3/3 passed, observation summary `ok=true`.
+- User approved Phase 57 conservative CI layering and path-filter acceleration.
+- Phase 57 impact note:
+  - `git status --short --branch` was clean before edits.
+  - GitNexus could not resolve `test_ci_baseline_workflow` as an indexed symbol; this phase only edits workflow/planning/contract tests and no runtime business symbols.
+- TDD RED for Phase 57:
+  - Extended `tests/test_ci_baseline_workflow.py` with contract checks for concurrency, path filtering, docs-only lightweight checks, `smoke-light`, and manual/nightly `smoke-full`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py -q`.
+  - Expected failure: 4 tests failed because the workflow did not yet have concurrency, paths-filter, docs-contract, or smoke split.
+- TDD GREEN for Phase 57:
+  - Updated `.github/workflows/ci.yml` with:
+    - `concurrency` cancel-in-progress per PR/ref.
+    - `changes` job using `dorny/paths-filter@v3`.
+    - `docs-contract` job for docs/planning-only changes.
+    - existing full E2E behavior renamed to PR-default `smoke-light`.
+    - `smoke-full` for `workflow_dispatch` and nightly schedule, running soil moisture/GCP and staging10 observation gates.
+  - Added minimal `pytest` install for docs-only contract job.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 16 passed.
+  - Parsed `.github/workflows/ci.yml` with PyYAML and verified expected jobs: `changes`, `docs-contract`, `python-tests`, `frontend-build`, `smoke-light`, `smoke-full`.
+  - `.venv\Scripts\python.exe -m pytest tests\test_admin_agent_runtime_diagnostics.py tests\test_agent_runtime_staging_observation_gate.py tests\test_agent_runtime_exposure_policy.py tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 35 passed.
+  - `scripts\test_agent_runtime_decision_eval.ps1`: 72 passed and strict report pass rate 1.0.
+  - Local `scripts\test_ci_python.ps1` and then `scripts\test_agent_runtime_active_smoke.ps1` exceeded local outer command timeouts. Follow-up inspection found no persistent active-smoke child process, and `outputs/agent_runtime_service_active_smoke_guard.json` contained 9/9 passed evidence. Treat remote PR CI as the final smoke validation for this workflow-only change.
+- Updated planning memory:
+  - Marked Phase 57 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 58 as planned CI runner/cache follow-up.
+  - Added Phase 57 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Continued Phase 58 with the low-risk Playwright browser cache option.
+- Phase 58 starting state:
+  - `git status --short --branch` was clean.
+  - PR #3 checks from Phase 57 were green: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed; `docs-contract` and `smoke-full` skipped as expected.
+  - GitNexus could not resolve `test_ci_baseline_workflow` as an indexed symbol. This phase only edits workflow/planning/contract tests, not runtime business symbols.
+- TDD RED for Phase 58:
+  - Added `test_smoke_light_caches_playwright_browser_binaries` to `tests/test_ci_baseline_workflow.py`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py -q`.
+  - Expected failure: the new test failed because `.github/workflows/ci.yml` did not yet include `Cache Playwright browser binaries`.
+- TDD GREEN for Phase 58:
+  - Added an `actions/cache@v4` step to `smoke-light` for `~\AppData\Local\ms-playwright`.
+  - Cache key is `${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}` with `${{ runner.os }}-playwright-` restore fallback.
+  - Preserved `python -m playwright install chromium` so cache misses and version changes still install correctly.
+  - Re-ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 17 passed.
+  - Parsed `.github/workflows/ci.yml` with PyYAML and verified `smoke-light` contains `Cache Playwright browser binaries`.
+- Updated planning memory:
+  - Marked Phase 58 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 59 as planned CI runner/cache follow-up.
+  - Added Phase 58 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Phase 58 remote CI verification after commit `b4486d7`:
+  - `gh pr checks 3 --repo jtdw/agent`: `changes` passed, `python-tests` passed, `frontend-build` passed, `smoke-light` passed, CodeRabbit passed.
+  - `docs-contract` and `smoke-full` skipped as expected for a workflow-impacting PR run.
+- Executed Phase 59 final PR delivery audit without merging main, raising exposure, or touching production.
+- Current-state audit commands:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase54-ci-baseline-stabilization`.
+  - `gh pr view 3 --repo jtdw/agent --json ...`: PR #3 is open, non-draft, mergeable, head `codex/phase54-ci-baseline-stabilization`, base `main`, with 17 files, 1138 additions, 34 deletions.
+  - `gh pr checks 3 --repo jtdw/agent`: `changes`, `python-tests`, `frontend-build`, `smoke-light`, and CodeRabbit passed; `smoke-full` skipped by design.
+  - `gh pr diff 3 --repo jtdw/agent --name-only`: listed workflow, planning docs, remote staging runbook, CI scripts/tests, and small frontend compatibility files.
+  - `node .gitnexus\run.cjs detect-changes --scope compare --base-ref origin/main`: 17 files, 8 changed symbols, 0 affected processes, LOW risk.
+  - `node .gitnexus\run.cjs impact drawGeoJson --direction upstream`: LOW risk, MapStage surface.
+  - `node .gitnexus\run.cjs impact measurementLabel --direction upstream`: LOW risk, MapStage surface.
+  - `node .gitnexus\run.cjs impact test_ci_runs_active_smoke_guard_without_llm_opt_in --direction upstream`: LOW risk, no impacted flows.
+  - `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_runtime_staging_remote_runbook.py -q`: 17 passed.
+  - `pwsh -File .\scripts\run_soil_moisture_gcp_smoke.ps1`: exit code 0.
+  - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, task window 3/3, no external download tools, artifact/map/raster/png/summary checks passed.
+- Added `docs/runbooks/pr3-final-delivery-audit.md` with PR status, change scope, GitNexus risk, CI/gate evidence, rollout boundaries, remaining operational risks, and merge-decision recommendation.
+- Updated planning memory:
+  - Marked Phase 59 complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60 as planned CI runner/cache follow-up.
+  - Added Phase 59 findings to `.planning/langchain_agent_redesign/findings.md`.

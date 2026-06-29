@@ -5,9 +5,64 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "18 19 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.filter.outputs.docs == 'true' && steps.filter.outputs.python != 'true' && steps.filter.outputs.frontend != 'true' && steps.filter.outputs.full != 'true' }}
+      python: ${{ steps.filter.outputs.python }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      full: ${{ steps.filter.outputs.full }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Detect changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - '.planning/**'
+              - 'AGENTS.md'
+            frontend:
+              - 'ui_next/**'
+            python:
+              - 'api_server.py'
+              - 'core/**'
+              - 'tests/**'
+              - 'scripts/**'
+            full:
+              - '.github/workflows/**'
+              - 'requirements.txt'
+              - 'ui_next/package-lock.json'
+              - 'ui_next/package.json'
+
+  docs-contract:
+    needs: changes
+    if: needs.changes.outputs.docs_only == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install docs contract test dependency
+        run: python -m pip install --upgrade pip pytest
+      - name: Run docs and CI contract tests
+        shell: pwsh
+        run: python -m pytest tests\test_runtime_staging_remote_runbook.py tests\test_ci_baseline_workflow.py -q
+
   python-tests:
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     env:
       ZAI_API_KEY: ci-test-key
@@ -16,36 +71,42 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       - name: Compile Python modules
         run: python -m py_compile api_server.py core\api_security.py core\resource_tools.py core\commercial\security.py core\ops_config.py core\agent_runtime\decision_eval.py
-      - name: Run agent runtime decision eval guard
+      - name: Run curated Python CI gate
         shell: pwsh
-        run: .\scripts\test_agent_runtime_decision_eval.ps1
-      - name: Run agent runtime active smoke guard
-        shell: pwsh
-        run: .\scripts\test_agent_runtime_active_smoke.ps1
-      - name: Run Python tests
-        run: python -m unittest discover tests
+        run: .\scripts\test_ci_python.ps1
       - name: Run doctor
         shell: pwsh
-        run: .\scripts\doctor.ps1
+        run: .\scripts\doctor.ps1 -PythonPath python
 
   frontend-build:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "20"
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
+      - name: Cache Yarn fallback download cache
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Yarn\Cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('ui_next/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
       - name: Install frontend dependencies
-        working-directory: ui_next
-        run: npm ci
+        shell: pwsh
+        run: .\scripts\install_frontend_dependencies.ps1
       - name: Build frontend
         working-directory: ui_next
         run: npm run build
@@ -58,7 +119,9 @@ jobs:
           npm run test:research-workflow
           npm run test:analysis-panel
 
-  smoke:
+  smoke-light:
+    needs: changes
+    if: needs.changes.outputs.python == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.full == 'true'
     runs-on: windows-latest
     env:
       ZAI_API_KEY: ci-test-key
@@ -69,24 +132,140 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "20"
           cache: npm
           cache-dependency-path: ui_next/package-lock.json
+      - name: Cache Yarn fallback download cache
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Yarn\Cache
+          key: ${{ runner.os }}-yarn-${{ hashFiles('ui_next/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-yarn-
+      - name: Cache Playwright browser binaries
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install chromium
       - name: Install frontend dependencies
-        working-directory: ui_next
-        run: npm ci
-      - name: Start backend and frontend
+        shell: pwsh
+        run: .\scripts\install_frontend_dependencies.ps1
+      - name: Run light E2E smoke with backend and frontend
         shell: pwsh
         run: |
-          Start-Process -FilePath python -ArgumentList @('-m','uvicorn','api_server:app','--host','127.0.0.1','--port','8765') -WindowStyle Hidden
-          Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory ui_next -WindowStyle Hidden
-          Start-Sleep -Seconds 25
-      - name: Run E2E smoke
-        run: python scripts\e2e_smoke.py
+          $logRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { "outputs" }
+          $backendOut = Join-Path $logRoot "gis-agent-backend.out.log"
+          $backendErr = Join-Path $logRoot "gis-agent-backend.err.log"
+          $frontendOut = Join-Path $logRoot "gis-agent-frontend.out.log"
+          $frontendErr = Join-Path $logRoot "gis-agent-frontend.err.log"
+
+          function Show-LogTail {
+            param([string]$Path)
+            if (Test-Path -LiteralPath $Path) {
+              Get-Content -LiteralPath $Path -Tail 80
+            }
+          }
+
+          function Assert-ProcessRunning {
+            param([string]$Name, [System.Diagnostics.Process]$Process, [string]$Stdout, [string]$Stderr)
+            if ($Process.HasExited) {
+              Write-Host "$Name stdout:"
+              Show-LogTail -Path $Stdout
+              Write-Host "$Name stderr:"
+              Show-LogTail -Path $Stderr
+              throw "$Name exited before becoming ready with code $($Process.ExitCode)."
+            }
+          }
+
+          $backend = Start-Process -FilePath python -ArgumentList @('-m','uvicorn','api_server:app','--host','127.0.0.1','--port','8765') -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr -PassThru -WindowStyle Hidden
+          $frontend = Start-Process -FilePath npm.cmd -ArgumentList @('run','dev','--','--host','127.0.0.1','--port','5173') -WorkingDirectory ui_next -RedirectStandardOutput $frontendOut -RedirectStandardError $frontendErr -PassThru -WindowStyle Hidden
+
+          try {
+            $deadline = (Get-Date).AddSeconds(120)
+            do {
+              Assert-ProcessRunning -Name "Backend" -Process $backend -Stdout $backendOut -Stderr $backendErr
+              try {
+                $status = Invoke-RestMethod -Uri "$env:GIS_AGENT_BACKEND_URL/api/status" -TimeoutSec 5
+                if ($status.ok) { break }
+              } catch {}
+              Start-Sleep -Seconds 3
+            } while ((Get-Date) -lt $deadline)
+            if (-not $status.ok) {
+              throw "Backend did not become ready before timeout."
+            }
+
+            $deadline = (Get-Date).AddSeconds(120)
+            $frontendReady = $false
+            do {
+              Assert-ProcessRunning -Name "Frontend" -Process $frontend -Stdout $frontendOut -Stderr $frontendErr
+              try {
+                $response = Invoke-WebRequest -Uri $env:GIS_AGENT_FRONTEND_URL -TimeoutSec 5
+                if ($response.StatusCode -eq 200) {
+                  $frontendReady = $true
+                  break
+                }
+              } catch {}
+              Start-Sleep -Seconds 3
+            } while ((Get-Date) -lt $deadline)
+            if (-not $frontendReady) {
+              throw "Frontend did not become ready before timeout."
+            }
+
+            & python scripts\e2e_smoke.py
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "Backend stdout:"
+              Show-LogTail -Path $backendOut
+              Write-Host "Backend stderr:"
+              Show-LogTail -Path $backendErr
+              Write-Host "Frontend stdout:"
+              Show-LogTail -Path $frontendOut
+              Write-Host "Frontend stderr:"
+              Show-LogTail -Path $frontendErr
+              throw "E2E smoke failed with code $LASTEXITCODE."
+            }
+          } finally {
+            foreach ($process in @($frontend, $backend)) {
+              if ($process -and -not $process.HasExited) {
+                Stop-Process -Id $process.Id -Force
+              }
+            }
+          }
+
+  smoke-full:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: windows-latest
+    env:
+      ZAI_API_KEY: ci-test-key
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run full staging observation gates
+        shell: pwsh
+        run: |
+          .\scripts\run_soil_moisture_gcp_smoke.ps1
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          .\scripts\run_agent_runtime_staging10_observation_gate.ps1
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
