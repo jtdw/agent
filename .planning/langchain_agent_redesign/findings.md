@@ -375,6 +375,18 @@ Date: 2026-06-29
 
 Date: 2026-06-29
 
+## Phase 60A Knowledge Seed Refresh Findings
+
+- The user asked to refresh the agent knowledge base before the next staging observation so the observed agent posture matches current GIS, ISMN, soil-moisture XGBoost, and GCP capabilities.
+- Existing knowledge seeds stop at eight documents dated 2026-06-22. They cover GIS data roles, CRS/extent/NoData, download rules, raster/vector/table workflows, XGBoost, result interpretation, and security, but they do not yet summarize the Phase 39 ISMN/GCP semantic-card work.
+- Current Tool Cards already include `list_ismn_archives`, `profile_ismn_archive`, `import_ismn_soil_moisture_archive`, `generic_xgboost_workflow`, `predict_xgboost_raster_map`, `train_xgboost_fusion_model`, and `geographical_conformal_prediction`, so the safer first step is seed-document refresh rather than runtime logic changes.
+- ArcGIS/ArcPy references should be used as GIS operation taxonomy and precondition context only. They must not introduce an ArcPy dependency or override registered project tools.
+- ISMN references support the local archive stance: profile local archives, stations, sensors, variables, depths, and time ranges; do not automate login-protected downloads or credentials.
+- GeoConformal references support the current project boundary: model-agnostic spatial uncertainty, global split conformal fallback, and spatial weighting only when coordinate/calibration evidence is sufficient.
+- The `web-access` CDP check path listed in the skill was missing in this environment (`C:\Users\35299\.agents\skills\web-access\scripts\check-deps.mjs`). Use normal public-source retrieval for this phase and avoid repeating that path unless the skill installation is fixed.
+
+Date: 2026-06-29
+
 ## Phase 58 Playwright Browser Cache Findings
 
 - Phase 58 chose the lowest-risk CI accelerator: cache Playwright browser binaries for `smoke-light` while leaving Windows runner behavior and E2E smoke flow unchanged.

@@ -866,3 +866,16 @@
   - Marked Phase 59 complete in `.planning/langchain_agent_redesign/task_plan.md`.
   - Added Phase 60 as planned CI runner/cache follow-up.
   - Added Phase 59 findings to `.planning/langchain_agent_redesign/findings.md`.
+- Started Phase 60A knowledge seed refresh before post-merge staging observation at user request.
+- Current branch: `codex/phase60-post-merge-staging-observation`, created from merged `origin/main` at `6e4b299`.
+- Read current knowledge seed, manifest, contract tests, Tool Cards, and the previous ISMN/XGBoost/GCP design spec.
+- External references selected for design context:
+  - ArcGIS/ArcPy as GIS taxonomy and precondition reference only.
+  - ArcGIS XY Table To Point and Zonal Statistics as Table as workflow vocabulary references.
+  - ISMN docs for local archive interface and station/sensor metadata.
+  - GeoConformal Prediction arXiv/repository for model-agnostic spatial uncertainty context.
+- Wrote design spec `docs/superpowers/specs/2026-06-29-agent-knowledge-refresh-design.md`.
+- Updated planning memory:
+  - Inserted Phase 60A Knowledge seed refresh as in progress.
+  - Moved post-merge staging observation prep to Phase 60B.
+  - Moved CI runner/cache follow-up to Phase 61.
