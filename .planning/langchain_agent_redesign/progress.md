@@ -968,3 +968,12 @@
   - `pwsh -File .\scripts\run_agent_runtime_staging10_observation_gate.ps1`: `ok=true`, 3/3 cases passed, no external download tools, artifact/raster checks passed.
 - Added `docs/runbooks/phase60e-goal-completion-audit.md` with a requirement-by-requirement goal evidence matrix.
 - Audit conclusion: do not mark the goal complete yet; remaining actions require explicit human confirmation for PR ready/merge and real remote staging/exposure operations.
+- Continued Phase 60F after another automatic goal continuation without authorization to mark ready, merge, raise exposure, or touch production.
+- Current-state evidence:
+  - `git status --short --branch`: clean and synced with `origin/codex/phase60-post-merge-staging-observation`.
+  - `gh pr view 4 --repo jtdw/agent --json ...`: PR #4 remains open, draft, base `main`, head `codex/phase60-post-merge-staging-observation`, merge state `CLEAN`.
+  - `gh pr checks 4 --repo jtdw/agent`: `changes`, `python-tests`, `smoke-light`, and CodeRabbit passed; `docs-contract`, `frontend-build`, and `smoke-full` skipped as designed.
+- Added `docs/runbooks/pr4-ready-merge-operator-checklist.md` to separate ready-state, merge, post-merge local/readonly validation, real staging handoff, rollback verification, and forbidden actions.
+- Updated planning memory:
+  - Marked Phase 60F complete in `.planning/langchain_agent_redesign/task_plan.md`.
+  - Added Phase 60F findings.

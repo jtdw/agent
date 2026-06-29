@@ -374,6 +374,14 @@ Date: 2026-06-29
 
 Date: 2026-06-29
 
+## Phase 60F PR #4 Ready/Merge Operator Checklist Findings
+
+- The repeated remaining blocker is procedural, not technical: PR #4 is green and clean, but still draft, and ready/merge/remote staging/exposure actions require explicit human confirmation.
+- A separate operator checklist reduces merge-time risk by splitting ready, merge, post-merge local verification, real staging handoff, rollback verification, and forbidden actions into separate steps.
+- The checklist intentionally keeps merge strategy user-controlled and does not assume squash/merge/rebase. It also keeps post-merge validation to read-only/local gates before any real staging or exposure action.
+
+Date: 2026-06-29
+
 ## Phase 60E Goal Completion Audit Findings
 
 - Current PR #4 evidence is strong enough for a human ready-state decision: PR is open/draft, merge state `CLEAN`, current remote checks are green or intentionally skipped by rules, and the local worktree is clean.
