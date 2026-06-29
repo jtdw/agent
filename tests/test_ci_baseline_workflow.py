@@ -78,3 +78,6 @@ def test_smoke_workflow_waits_for_services_instead_of_fixed_sleep() -> None:
     assert "Invoke-WebRequest" in workflow
     assert "/api/status" in workflow
     assert ".HasExited" in workflow
+    assert "- name: Run E2E smoke\n        run: python scripts\\e2e_smoke.py" not in workflow
+    assert "python scripts\\e2e_smoke.py" in workflow
+    assert "Stop-Process -Id $process.Id" in workflow

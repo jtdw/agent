@@ -1,3 +1,5 @@
+import type { Feature, FeatureCollection } from 'geojson';
+
 export type DrawTool = 'point' | 'line' | 'polygon';
 export type DrawPoint = [number, number];
 
@@ -40,8 +42,8 @@ export function formatArea(squareMeters: number) {
   return squareMeters >= 1000000 ? `${(squareMeters / 1000000).toFixed(2)} km²` : `${squareMeters.toFixed(0)} m²`;
 }
 
-export function drawGeoJson(points: DrawPoint[], tool: DrawTool) {
-  const features: GeoJSON.Feature[] = points.map((coordinates, index) => ({
+export function drawGeoJson(points: DrawPoint[], tool: DrawTool): FeatureCollection {
+  const features: Feature[] = points.map((coordinates, index) => ({
     type: 'Feature',
     properties: { kind: 'point', label: String(index + 1) },
     geometry: { type: 'Point', coordinates }
@@ -63,7 +65,7 @@ export function drawGeoJson(points: DrawPoint[], tool: DrawTool) {
     });
   }
 
-  return { type: 'FeatureCollection' as const, features };
+  return { type: 'FeatureCollection', features };
 }
 
 export function measurementLabel(points: DrawPoint[], tool: DrawTool) {
