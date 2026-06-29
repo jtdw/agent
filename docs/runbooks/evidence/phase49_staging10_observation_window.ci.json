@@ -1,0 +1,31 @@
+{
+  "evidence_id": "phase49_staging10_observation_window_ci_fixture",
+  "created_at": "2026-06-29T00:00:00+00:00",
+  "ok": true,
+  "admin_exposure": {
+    "environment": "staging",
+    "requested_percent": 10,
+    "eligible_for_user_exposure": true,
+    "recommendation": "allow_staging_exposure",
+    "rollback_requested": false,
+    "production_override": false,
+    "deterministic_smoke": {
+      "status": "passed",
+      "case_count": 9,
+      "failed": 0
+    },
+    "soil_moisture_gcp_smoke": {
+      "status": "passed",
+      "case_count": 3
+    }
+  },
+  "routing_sample": {
+    "sample_count": 500,
+    "selected_count": 50,
+    "selected_percent": 10.0
+  },
+  "rollback": {
+    "ready_switch": "GIS_AGENT_RUNTIME_ROLLBACK=1",
+    "currently_requested": false
+  }
+}

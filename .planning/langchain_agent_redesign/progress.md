@@ -1,5 +1,41 @@
 # Progress
 
+## 2026-06-29 Phase 61 CI full-smoke reproducibility
+
+- After the user asked whether the previous execution was complete, confirmed it was not fully complete because manual GitHub `smoke-full` failed.
+- Inspected `gh run view 28368622440`; only `smoke-full` failed, while `python-tests`, `frontend-build`, and `smoke-light` passed.
+- Failure root cause: `FileNotFoundError` for `outputs\phase45_real_soil_gcp_smoke\phase45_real_soil_gcp_three_sample_smoke.json` in `core.workflows.soil_moisture_gcp_smoke`; `outputs/` is ignored and not present in a fresh CI checkout.
+- Created branch `codex/phase61-fix-full-smoke-ci-evidence`.
+- GitNexus impact:
+  - `test_run_cli_recovers_and_validates_phase45_evidence`: LOW risk, 0 affected processes.
+  - `test_ci_splits_light_and_full_smoke`: current index could not resolve the symbol; changes are limited to workflow contract tests and no runtime business symbol body.
+- TDD RED:
+  - Added workflow contract assertions requiring committed CI fixture paths and explicit `-ValidateOnly`, `-SoilMoistureGcpSummaryPath`, `-Phase49Path`, and `-Phase50Path` usage.
+  - Added `test_committed_ci_recurring_summary_fixture_validates`.
+  - Ran `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py::test_ci_splits_light_and_full_smoke tests\test_soil_moisture_gcp_smoke_runner.py::test_committed_ci_recurring_summary_fixture_validates -q`; expected 2 failures because fixture paths and files did not exist.
+- TDD GREEN:
+  - Added sanitized fixtures:
+    - `docs/runbooks/evidence/phase45_real_soil_gcp_recurring_smoke_summary.ci.json`
+    - `docs/runbooks/evidence/phase49_staging10_observation_window.ci.json`
+    - `docs/runbooks/evidence/phase50_staging10_routed_request_smoke.ci.json`
+  - Updated `.github/workflows/ci.yml` `smoke-full` to validate the committed soil summary fixture and pass Phase49/Phase50 fixture paths to `run_agent_runtime_staging10_observation_gate.ps1`.
+  - Re-ran the two target tests: 2 passed.
+- Local verification so far:
+  - Simulated the exact GitHub `smoke-full` script path with fixture variables: soil validation `ok=true`, active task window 3/3 passed, staging10 observation gate `ok=true`.
+  - `.venv\Scripts\python.exe -m pytest tests\test_ci_baseline_workflow.py tests\test_soil_moisture_gcp_smoke_runner.py tests\test_agent_runtime_staging_observation_gate.py tests\test_runtime_staging_remote_runbook.py -q`: 23 passed.
+  - Parsed `.github/workflows/ci.yml` with PyYAML and verified expected job names and final full-smoke step.
+  - `git diff --check`: exit code 0; output only included known LF-to-CRLF working-copy warnings.
+- Remote verification attempt:
+  - Created PR #5 and triggered manual CI run `28369638152`.
+  - `python-tests`, `frontend-build`, and `smoke-light` passed; `smoke-full` failed again, but progressed past the soil summary and diagnostics gates.
+  - New root cause: Phase51 active task window reported 0/3 because the fresh GitHub runner has no `.env`, and `run_agent_runtime_staging10_observation_gate.ps1` did not set active runtime gate env variables itself.
+- TDD fix for second failure:
+  - Added contract assertions requiring `run_agent_runtime_staging10_observation_gate.ps1` to set active/staging10 env values in-process.
+  - RED: `.venv\Scripts\python.exe -m pytest tests\test_agent_runtime_staging_observation_gate.py::test_observation_gate_script_uses_pwsh_safe_case_array -q` failed because the script lacked env settings.
+  - GREEN: set `GIS_AGENT_RUNTIME_V2=1`, `GIS_AGENT_RUNTIME_MODE=active`, `GIS_AGENT_RUNTIME_ALLOW_ACTIVE_CUTOVER=1`, staging 10% exposure policy fields, rollback false, and soil summary/smoke report paths inside the PowerShell process.
+  - Re-ran the contract test: 1 passed.
+  - Re-ran local simulated GitHub `smoke-full` script path with committed fixtures: soil validation ok, diagnostics ok, active task window 3/3 passed, staging10 gate `ok=true`.
+
 ## 2026-06-27
 
 - Confirmed user request: generate a plan only, no code.

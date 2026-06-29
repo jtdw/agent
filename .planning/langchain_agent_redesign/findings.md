@@ -1,5 +1,16 @@
 # Findings
 
+## Phase 61 CI full-smoke reproducibility
+
+- After PR #4 was merged, the manual `workflow_dispatch` CI run `28368622440` failed only in `smoke-full`; `python-tests`, `frontend-build`, and `smoke-light` passed.
+- Root cause: `smoke-full` called `scripts/run_soil_moisture_gcp_smoke.ps1` with default `outputs/phase45_real_soil_gcp_smoke/phase45_real_soil_gcp_three_sample_smoke.json`, but `outputs/` is `.gitignore`d and unavailable in a fresh GitHub runner checkout.
+- A second latent issue would have appeared after the soil gate: `run_agent_runtime_staging10_observation_gate.ps1` also defaults to ignored Phase49/Phase50 observation evidence files.
+- The selected fix keeps runtime behavior unchanged: commit small sanitized CI fixtures under `docs/runbooks/evidence/`, validate the soil recurring summary with `-ValidateOnly`, pass the fixture paths into the staging10 observation gate, and still generate the Phase51 active task window live in CI.
+- A second remote failure on branch run `28369638152` showed the next missing self-contained input: the fresh runner has no local `.env`, so `run_agent_runtime_staging10_observation_gate.ps1` must set the active runtime/staging10 gate environment in-process before invoking active smoke.
+- This does not execute real remote staging, raise exposure, touch production, or include `.env`, API keys, tokens, cookies, storage_state, raw prompts, complete local paths, or original user data rows.
+
+Date: 2026-06-29
+
 ## Phase 9 RAG readiness
 
 - Default API vector RAG should remain opt-in after Phase 9. The new readiness helper returns `ready_for_manual_enablement`, which means an operator still has to choose when to expose or enable it.

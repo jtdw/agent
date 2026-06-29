@@ -261,11 +261,18 @@ jobs:
       - name: Run full staging observation gates
         shell: pwsh
         run: |
-          .\scripts\run_soil_moisture_gcp_smoke.ps1
+          $soilSummary = "docs\runbooks\evidence\phase45_real_soil_gcp_recurring_smoke_summary.ci.json"
+          $phase49 = "docs\runbooks\evidence\phase49_staging10_observation_window.ci.json"
+          $phase50 = "docs\runbooks\evidence\phase50_staging10_routed_request_smoke.ci.json"
+
+          .\scripts\run_soil_moisture_gcp_smoke.ps1 -OutputPath $soilSummary -ValidateOnly
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          .\scripts\run_agent_runtime_staging10_observation_gate.ps1
+          .\scripts\run_agent_runtime_staging10_observation_gate.ps1 `
+            -SoilMoistureGcpSummaryPath $soilSummary `
+            -Phase49Path $phase49 `
+            -Phase50Path $phase50
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }

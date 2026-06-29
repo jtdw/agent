@@ -60,6 +60,13 @@ def test_ci_splits_light_and_full_smoke() -> None:
     assert "github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'" in workflow
     assert "run_agent_runtime_staging10_observation_gate.ps1" in workflow
     assert "run_soil_moisture_gcp_smoke.ps1" in workflow
+    assert "phase45_real_soil_gcp_recurring_smoke_summary.ci.json" in workflow
+    assert "phase49_staging10_observation_window.ci.json" in workflow
+    assert "phase50_staging10_routed_request_smoke.ci.json" in workflow
+    assert "-ValidateOnly" in workflow
+    assert "-SoilMoistureGcpSummaryPath $soilSummary" in workflow
+    assert "-Phase49Path $phase49" in workflow
+    assert "-Phase50Path $phase50" in workflow
 
 
 def test_ci_caches_python_dependencies_for_python_jobs() -> None:
