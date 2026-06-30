@@ -9,7 +9,9 @@ import geopandas as gpd
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
+from rasterio.warp import calculate_default_transform
 from shapely.geometry import Point
+from PIL import Image
 
 from core.config import Settings
 from core.map_layers import MapLayerService
@@ -143,6 +145,42 @@ class CheckpointMapLayerServiceTests(unittest.TestCase):
             self.assertIn("palette=magma", magma["preview_url"])
             self.assertNotEqual(terrain["preview_path"], magma["preview_path"])
             self.assertNotEqual(Path(terrain["preview_path"]).read_bytes(), Path(magma["preview_path"]).read_bytes())
+
+    def test_projected_raster_preview_is_reprojected_to_wgs84_grid(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            path = service.manager.derived_dir / "utm_dem.tif"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            transform = from_origin(881936.3973565536, 3488144.310702189, 30.0, 30.0)
+            data = np.arange(10000, dtype="float32").reshape((100, 100))
+            with rasterio.open(
+                path,
+                "w",
+                driver="GTiff",
+                height=data.shape[0],
+                width=data.shape[1],
+                count=1,
+                dtype="float32",
+                crs="EPSG:32647",
+                transform=transform,
+                nodata=-9999,
+            ) as dst:
+                dst.write(data, 1)
+            dataset_name = service.manager.register_raster_reference(path, name="utm_dem")
+            with rasterio.open(path) as src:
+                _, expected_width, expected_height = calculate_default_transform(
+                    src.crs,
+                    "EPSG:4326",
+                    src.width,
+                    src.height,
+                    *src.bounds,
+                )
+
+            preview = MapLayerService(service).ensure_raster_preview(dataset_name, palette="terrain")
+
+            self.assertEqual(Image.open(preview["preview_path"]).size, (expected_width, expected_height))
+            self.assertEqual(preview["meta"]["crs"], "EPSG:32647")
+            self.assertEqual(preview["meta"]["preview_crs"], "EPSG:4326")
 
     def test_raster_preview_reuses_cached_metadata_without_reopening_source(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

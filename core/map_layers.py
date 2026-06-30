@@ -18,6 +18,7 @@ RASTER_EXTS = {".tif", ".tiff", ".img"}
 SPATIAL_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 MAP_DISPLAYABLE_EXTS = VECTOR_EXTS.union(RASTER_EXTS)
 SHANDIAN_BOUNDARY_FILENAMES = ("shandianhe_basin_boundary_full.zip", "shandianhe_basin_boundary.zip")
+RASTER_PREVIEW_VERSION = "wgs84-reprojected-preview-v2"
 MAP_COLOR_SCHEMES: dict[str, list[str]] = {
     "cyan": ["#0f4c81", "#0ea5e9", "#22d3ee", "#a7f3d0"],
     "terrain": ["#2d5a27", "#8fbf5a", "#f6e27f", "#c77c3a", "#f8fafc"],
@@ -281,7 +282,9 @@ class MapLayerService:
         import numpy as np
         import rasterio
         from PIL import Image
-        from rasterio.warp import transform_bounds
+        from rasterio.enums import Resampling
+        from rasterio.transform import array_bounds
+        from rasterio.warp import calculate_default_transform, reproject, transform_bounds
 
         palette_name = safe_palette_name(palette)
         raster_path = self.service.manager.get_raster_path(dataset_name)
@@ -293,8 +296,12 @@ class MapLayerService:
             "palette": palette_name,
             "source": _safe_path_signature(raster_path),
             "preview_path": str(preview_path.resolve(strict=False)),
+            "preview_version": RASTER_PREVIEW_VERSION,
         }
-        if cache and preview_path.exists() and preview_path.stat().st_mtime >= raster_path.stat().st_mtime:
+        preview_is_fresh = preview_path.exists() and preview_path.stat().st_mtime >= raster_path.stat().st_mtime
+        cache_checked = False
+        if cache and preview_is_fresh:
+            cache_checked = True
             cached = cache.get(
                 user_id=str(user_id or ""),
                 session_id=str(session_id or ""),
@@ -304,18 +311,51 @@ class MapLayerService:
             if isinstance(cached, dict) and str(cached.get("preview_path") or "") == str(preview_path):
                 return cached
 
-        if not preview_path.exists() or preview_path.stat().st_mtime < raster_path.stat().st_mtime:
+        bounds: tuple[float, float, float, float]
+        raster_meta: dict[str, Any]
+        if not preview_is_fresh or cache_checked:
             with rasterio.open(raster_path) as src:
                 max_size = 1200
-                scale = max(src.width / max_size, src.height / max_size, 1)
-                out_width = max(1, int(src.width / scale))
-                out_height = max(1, int(src.height / scale))
-                data = src.read(1, out_shape=(out_height, out_width), masked=True)
-                masked = np.ma.asarray(data)
-                arr = np.asarray(masked.data, dtype="float32")
-                mask = np.ma.getmaskarray(masked)
-                if mask.any():
-                    arr[mask] = np.nan
+                source_crs = _crs_text(src.crs)
+                preview_crs = "EPSG:4326" if src.crs else source_crs
+                if src.crs and source_crs.upper() not in {"EPSG:4326", "WGS84"}:
+                    dst_transform, dst_width, dst_height = calculate_default_transform(
+                        src.crs,
+                        "EPSG:4326",
+                        src.width,
+                        src.height,
+                        *src.bounds,
+                    )
+                    scale = max(dst_width / max_size, dst_height / max_size, 1)
+                    out_width = max(1, int(dst_width / scale))
+                    out_height = max(1, int(dst_height / scale))
+                    preview_transform = dst_transform * dst_transform.scale(dst_width / out_width, dst_height / out_height)
+                    arr = np.full((out_height, out_width), np.nan, dtype="float32")
+                    reproject(
+                        source=rasterio.band(src, 1),
+                        destination=arr,
+                        src_transform=src.transform,
+                        src_crs=src.crs,
+                        src_nodata=src.nodata,
+                        dst_transform=preview_transform,
+                        dst_crs="EPSG:4326",
+                        dst_nodata=np.nan,
+                        resampling=Resampling.bilinear,
+                    )
+                    bounds = tuple(float(value) for value in array_bounds(out_height, out_width, preview_transform))
+                else:
+                    scale = max(src.width / max_size, src.height / max_size, 1)
+                    out_width = max(1, int(src.width / scale))
+                    out_height = max(1, int(src.height / scale))
+                    data = src.read(1, out_shape=(out_height, out_width), masked=True)
+                    masked = np.ma.asarray(data)
+                    arr = np.asarray(masked.data, dtype="float32")
+                    mask = np.ma.getmaskarray(masked)
+                    if mask.any():
+                        arr[mask] = np.nan
+                    bounds = tuple(src.bounds)
+                    if src.crs:
+                        bounds = tuple(float(value) for value in transform_bounds(src.crs, "EPSG:4326", *bounds, densify_pts=21))
                 valid = np.isfinite(arr)
                 rgba = np.zeros((out_height, out_width, 4), dtype=np.uint8)
                 if valid.any():
@@ -328,20 +368,34 @@ class MapLayerService:
                     rgba[..., 0:3] = rgb
                     rgba[..., 3] = np.where(valid, 190, 0).astype(np.uint8)
                 Image.fromarray(rgba, mode="RGBA").save(preview_path)
-
-        with rasterio.open(raster_path) as src:
-            bounds = tuple(src.bounds)
-            crs = _crs_text(src.crs)
-            if src.crs:
-                bounds = transform_bounds(src.crs, "EPSG:4326", *bounds, densify_pts=21)
-            raster_meta = {
-                "crs": crs,
-                "width": int(src.width),
-                "height": int(src.height),
-                "band_count": int(src.count),
-                "dtype": str(src.dtypes[0]) if src.dtypes else "",
-                "nodata": src.nodata,
-            }
+                raster_meta = {
+                    "crs": source_crs,
+                    "preview_crs": preview_crs,
+                    "preview_version": RASTER_PREVIEW_VERSION,
+                    "width": int(src.width),
+                    "height": int(src.height),
+                    "preview_width": int(out_width),
+                    "preview_height": int(out_height),
+                    "band_count": int(src.count),
+                    "dtype": str(src.dtypes[0]) if src.dtypes else "",
+                    "nodata": src.nodata,
+                }
+        else:
+            with rasterio.open(raster_path) as src:
+                bounds = tuple(src.bounds)
+                crs = _crs_text(src.crs)
+                if src.crs:
+                    bounds = tuple(float(value) for value in transform_bounds(src.crs, "EPSG:4326", *bounds, densify_pts=21))
+                raster_meta = {
+                    "crs": crs,
+                    "preview_crs": "EPSG:4326" if src.crs else crs,
+                    "preview_version": RASTER_PREVIEW_VERSION,
+                    "width": int(src.width),
+                    "height": int(src.height),
+                    "band_count": int(src.count),
+                    "dtype": str(src.dtypes[0]) if src.dtypes else "",
+                    "nodata": src.nodata,
+                }
         params = {"dataset_name": dataset_name}
         if str(user_id or "").strip():
             params["user_id"] = str(user_id or "").strip()
