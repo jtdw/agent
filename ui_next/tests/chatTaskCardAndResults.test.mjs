@@ -11,6 +11,7 @@ const conversationHeader = readFileSync(resolve(root, 'src/components/chat/ChatC
 const messageList = readFileSync(resolve(root, 'src/components/chat/ChatMessageList.tsx'), 'utf8');
 const composerFooter = readFileSync(resolve(root, 'src/components/chat/ChatComposerFooter.tsx'), 'utf8');
 const realtimeHook = readFileSync(resolve(root, 'src/components/chat/useChatRealtimeEvents.ts'), 'utf8');
+const realtimeModel = readFileSync(resolve(root, 'src/components/chat/chatRealtimeEventModel.ts'), 'utf8');
 const downloadsHook = readFileSync(resolve(root, 'src/components/chat/useChatDownloads.ts'), 'utf8');
 const promptStreamActionHook = readFileSync(resolve(root, 'src/components/chat/useChatPromptStreamAction.ts'), 'utf8');
 const api = readFileSync(resolve(root, 'src/lib/api.ts'), 'utf8');
@@ -29,8 +30,9 @@ assert.match(taskCard, /data-testid="task-card-result-dock"/, 'Task card should 
 assert.match(taskCard, /task-card-status-spine/, 'Task card should share the status-spine visual language with the A3 rail');
 assert.match(taskCard, /公开过程/, 'Task card should label public thinking as a public process, not hidden reasoning');
 assert.match(taskCard, /处理过程/, 'Task card must label the visible agent process section in Chinese');
-assert.match(taskCard, /正在检查输入数据/, 'Task card must explain input/data validation as a visible step');
-assert.match(taskCard, /注册成果与地图图层/, 'Task card must explain artifact and map layer registration');
+assert.match(taskCard, /TASK_STEP_TEMPLATES/, 'Task card must derive task-specific process steps from templates');
+assert.match(taskCard, /vector-validate|analysis-validate|field-profile/, 'Task card must explain input/data validation as a visible dynamic step');
+assert.match(taskCard, /download-register|map-export|analysis-package|generic-result/, 'Task card must explain artifact and map layer registration through task-specific closing steps');
 assert.match(taskCard, /GIS 任务/, 'TaskStatusCard must present a user-readable GIS task header');
 assert.match(taskCard, /任务结果/, 'ResultGroups must present a user-readable result section');
 assert.match(taskCard, /下一步建议/, 'ResultGroups must render canonical next_action_suggestions');
@@ -60,9 +62,13 @@ assert.doesNotMatch(renderer, /sendPrompt\(['"`]继续/, 'Confirmation button mu
 const chatModeIndex = composerFooter.indexOf('interaction-mode-chat');
 const toolModeIndex = composerFooter.indexOf('interaction-mode-tool');
 const composerIndex = composerFooter.indexOf('<ChatComposer');
+const headerUploadIndex = conversationHeader.indexOf('data-testid="chat-upload-button"');
+const headerModeIndex = conversationHeader.indexOf('{modeSwitch()}');
 assert.match(panel, /<ChatComposerFooter/, 'ChatPanel should render the composer footer component');
-assert.ok(chatModeIndex >= 0 && chatModeIndex < composerIndex, 'Mode segmented control must be rendered before the composer');
-assert.ok(toolModeIndex >= 0 && toolModeIndex < composerIndex, 'Tool mode button must be rendered before the composer');
+assert.equal(chatModeIndex, -1, 'Composer footer should not render a duplicate chat mode button');
+assert.equal(toolModeIndex, -1, 'Composer footer should not render a duplicate tool mode button');
+assert.ok(headerUploadIndex >= 0 && headerModeIndex > headerUploadIndex, 'Mode segmented control must be rendered after the upload action in the header');
+assert.ok(composerIndex >= 0, 'Composer footer should still render the input composer');
 assert.match(messageList, /function ThinkingStatusCard/, 'ChatMessageList must show a real-time status card while the assistant is working');
 assert.match(conversationHeader, /RealtimeSyncIndicator/, 'ChatConversationHeader must expose realtime connection state');
 assert.match(panel, /applyRealtimeEvent/, 'ChatPanel must merge realtime events into existing messages');
@@ -74,8 +80,9 @@ assert.match(panel, /progress: event\.progress/, 'Realtime task events must pres
 assert.match(realtimeHook, /export function useChatRealtimeEvents/, 'Realtime SSE lifecycle should live in useChatRealtimeEvents');
 assert.match(realtimeHook, /api\.replayChatEvents/, 'Realtime hook must replay missed events for reconnect recovery');
 assert.match(realtimeHook, /api\.openChatEventStream/, 'Realtime hook must subscribe to session task SSE events');
-assert.match(realtimeHook, /eventIdsRef/, 'Realtime hook must own event de-duplication state');
-assert.match(realtimeHook, /taskVersionRef/, 'Realtime hook must own stale-version gating');
+assert.match(realtimeHook, /shouldAcceptRealtimeEvent/, 'Realtime hook must delegate event de-duplication and stale-version gating');
+assert.match(realtimeModel, /TRANSIENT_EVENT_VERSION_FLOOR/, 'Realtime model must separate transient model stream versions from persisted task event versions');
+assert.match(realtimeModel, /latestPersistentVersion/, 'Realtime model must gate only persistent task event versions');
 assert.match(api, /phase\?: string/, 'RealtimeChatEvent must type backend phase updates');
 assert.match(api, /heartbeat_at\?: string/, 'RealtimeChatEvent must type backend heartbeat updates');
 assert.match(promptStreamActionHook, /api\.streamChat/, 'Prompt stream hook must use the POST SSE chat stream');
@@ -95,7 +102,8 @@ assert.match(downloadsHook, /api\.retryDownloadJob\(jobId, userId, sessionId\)/,
 assert.match(downloadsHook, /const retryDownload = async \(jobId: string\)/, 'Download hook must expose a structured retry handler');
 assert.match(panel, /retryDownload/, 'ChatPanel must still pass the structured retry handler through to the message list');
 assert.match(messageList, /onRetry=\{retryDownload\}/, 'Task card must receive the structured retry handler');
-assert.match(messageList, /max-w-\[min\(66%,34rem\)\]/, 'User message bubbles should remain compact instead of occupying the whole row');
+assert.match(messageList, /isUser && !isEditing && 'chat-user-bubble max-w-\[min\(72%,36rem\)\]/, 'Regular user message bubbles should remain compact instead of occupying the whole row');
+assert.match(messageList, /isUser && isEditing && 'w-full max-w-\[min\(92%,54rem\)\]/, 'Edited user messages should use the wider edit container only while editing');
 assert.doesNotMatch(panel, /Boolean\(meta\.presentation_result\)/, 'Answer-only PresentationResult must not promote a chat message into a tool task card');
 assert.doesNotMatch(renderer, /Boolean\(presentationResult\)/, 'Answer-only PresentationResult must render as conversation/result content, not a tool task card');
 

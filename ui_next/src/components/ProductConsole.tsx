@@ -1186,7 +1186,7 @@ export function ProductConsole({
           </div>
         </header>
 
-        <main className={cn('min-h-0 flex-1 p-4 sm:p-6', activeTab === 'chat' ? 'overflow-hidden' : 'overflow-y-auto')}>
+        <main className={cn('min-h-0 flex-1', activeTab === 'chat' ? 'overflow-hidden p-0' : 'overflow-y-auto p-4 sm:p-6')}>
           {renderContent()}
         </main>
       </div>

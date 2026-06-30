@@ -108,15 +108,6 @@ def create_chat_actions_router(
 
         def run_chat() -> None:
             start_chat_task(task_id, user_id=authorized_user_id, session_id=session_id)
-            event_store = task_event_store_for_service(service)
-            event_store.append(
-                user_id=authorized_user_id,
-                session_id=session_id,
-                task_id=task_id,
-                kind="task_status",
-                status="planning",
-                message="Preparing response or task plan.",
-            )
             try:
                 service.apply_frontend_context(body.frontend_context)
                 result = attach_chat_state(
@@ -132,10 +123,13 @@ def create_chat_actions_router(
                 result = attach_result_panel(service, authorized_user_id, result)
                 presentation = result.get("presentation_result") if isinstance(result.get("presentation_result"), dict) else {}
                 task_update = stream_task_update(result)
+                mode = str(result.get("mode") or "")
+                final_reply = str(result.get("reply") or "")
+                final_delta = final_reply[:2000] if mode == "answer_only" else ("" if emitted_deltas else final_reply[:2000])
                 status = str(
                     presentation.get("status")
                     or task_update.get("status")
-                    or ("succeeded" if str(result.get("mode") or "") == "answer_only" else "running")
+                    or ("succeeded" if mode == "answer_only" else "running")
                 )
                 if status not in {"planning", "awaiting_confirmation", "queued", "running", "waiting_login", "paused", "succeeded", "failed", "cancelled"}:
                     status = "running"
@@ -145,8 +139,8 @@ def create_chat_actions_router(
                     kind="model_complete",
                     task_id=task_id,
                     status=status,
-                    message="Response generated." if str(result.get("mode") or "") == "answer_only" else str(result.get("reply") or "Task status updated.")[:1200],
-                    delta="" if emitted_deltas else str(result.get("reply") or "")[:2000],
+                    message="Response generated." if mode == "answer_only" else (final_reply or "Task status updated.")[:1200],
+                    delta=final_delta,
                     management_view=task_update.get("management_view") if isinstance(task_update.get("management_view"), dict) else {},
                     presentation_result=presentation,
                     task_update=task_update,

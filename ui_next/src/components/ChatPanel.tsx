@@ -14,6 +14,7 @@ import { ChatConversationHeader } from './chat/ChatConversationHeader';
 import { ChatSessionSidebar } from './chat/ChatSessionSidebar';
 import { ChatMessageList } from './chat/ChatMessageList';
 import { ChatComposerFooter } from './chat/ChatComposerFooter';
+import { mergeRealtimeEventMeta } from './chat/chatRealtimeEventModel';
 import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
@@ -81,8 +82,6 @@ const PROMPT_GROUPS = [
     prompt: '根据当前工作区数据，检查是否可以下载 DEM、Sentinel-2 或土壤水分相关数据。'
   }
 ];
-
-const QUICK_PROMPTS = PROMPT_GROUPS.map((group) => group.prompt);
 
 function renderInlineMarkdown(text: string) {
   let offset = 0;
@@ -422,10 +421,11 @@ export function ChatWorkspace({
       for (let index = next.length - 1; index >= 0; index -= 1) {
         const existing = next[index];
         if (!messageMatchesRealtimeEvent(existing, event)) continue;
+        const mergedMeta = mergeRealtimeEventMeta(existing.meta || {}, meta, event);
         next[index] = {
           ...existing,
           content: event.kind === 'model_token' ? `${existing.content || ''}${content}` : (content || existing.content),
-          meta: { ...(existing.meta || {}), ...meta, streaming: event.kind === 'model_token' },
+          meta: { ...mergedMeta, streaming: event.kind === 'model_token' },
         };
         return next;
       }
@@ -587,6 +587,9 @@ export function ChatWorkspace({
           uploading={uploading}
           fileInputRef={fileInputRef}
           uploadFiles={uploadFiles}
+          currentInteractionMode={currentInteractionMode}
+          setInteractionMode={setInteractionMode}
+          interactionModeLabel={interactionModeLabel}
         />
 
         {isPage && (
@@ -641,11 +644,6 @@ export function ChatWorkspace({
 
         <ChatComposerFooter
           isPage={isPage}
-          quickPrompts={QUICK_PROMPTS}
-          sendPrompt={sendPrompt}
-          currentInteractionMode={currentInteractionMode}
-          setInteractionMode={setInteractionMode}
-          interactionModeLabel={interactionModeLabel}
           thinking={thinking}
           userId={userId}
           input={input}
@@ -683,7 +681,7 @@ export function ChatWorkspace({
     return (
       <section
         data-testid="chat-page-workspace"
-        className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white/82 shadow-[0_22px_60px_rgba(51,65,85,.10)] backdrop-blur dark:border-slate-800 dark:bg-slate-900/78 lg:grid lg:h-[calc(100vh-11rem)] lg:min-h-[620px] lg:grid-cols-[240px_minmax(0,1fr)_280px] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
+        className="relative flex h-full min-h-0 w-full flex-col overflow-hidden rounded-none border-0 bg-white/90 shadow-none backdrop-blur dark:bg-slate-900/86 lg:grid lg:h-full lg:min-h-0 lg:grid-cols-[190px_minmax(0,1fr)_340px] lg:grid-rows-[auto_minmax(0,1fr)_auto]"
       >
         {workspaceBody}
       </section>

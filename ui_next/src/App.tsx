@@ -228,7 +228,7 @@ export default function App() {
         {!consoleOpen && (
           <>
             <SettingsPanel />
-            <AnalysisPanel userId={user?.user_id || ''} resultPanel={latestResultPanel} onChatContextChange={updateChatContext} />
+            <AnalysisPanel userId={user?.user_id || ''} sessionId={currentSessionId} resultPanel={latestResultPanel} onChatContextChange={updateChatContext} />
           </>
         )}
       </Suspense>

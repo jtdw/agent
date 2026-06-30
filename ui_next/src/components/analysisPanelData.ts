@@ -135,36 +135,31 @@ function metricCards(rows: AnalysisMetricRow[], bestModel?: ModelMetricDatum) {
   ] : [];
 }
 
+function downloadFromArtifact(item: Record<string, unknown>): AnalysisDownload | null {
+  const artifactId = String(item.artifact_id || item.id || '');
+  if (!artifactId) return null;
+  const filename = String(item.filename || item.title || '').trim();
+  const name = String(filename || item.label || item.name || '成果文件');
+  const lower = name.toLowerCase();
+  const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
+  return { artifactId, label: name, url: '', kind };
+}
+
 function downloads(dashboard: unknown, resultPanel?: ResultPanel | null): AnalysisDownload[] {
-  if (resultPanel?.files?.length) {
-    return resultPanel.files
-      .map((item) => {
-        const artifactId = String(item.artifact_id || '');
-        if (!artifactId) return null;
-        const name = String(item.filename || item.label || item.name || '成果文件');
-        const lower = name.toLowerCase();
-        const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
-        return { artifactId, label: name, url: '', kind };
-      })
-      .filter((item): item is AnalysisDownload => Boolean(item))
-      .slice(0, 20);
-  }
   const root = asRecord(dashboard);
   const modelArtifacts = asArray(root.model_results).flatMap((result) => asArray(result.artifacts));
-  const artifacts = [...modelArtifacts, ...asArray(root.artifacts)];
+  const artifacts = [...asArray(resultPanel?.files), ...modelArtifacts, ...asArray(root.artifacts)];
   const seen = new Set<string>();
   return artifacts
     .map((item) => {
-      const artifactId = String(item.artifact_id || item.id || '');
-      if (!artifactId || seen.has(artifactId)) return null;
+      const download = downloadFromArtifact(asRecord(item));
+      const artifactId = download?.artifactId || '';
+      if (!download || seen.has(artifactId)) return null;
       seen.add(artifactId);
-      const name = String(item.filename || item.label || item.name || item.title || '成果文件');
-      const lower = name.toLowerCase();
-      const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
-      return { artifactId, label: name, url: '', kind };
+      return download;
     })
     .filter((item): item is AnalysisDownload => Boolean(item))
-    .slice(0, 8);
+    .slice(0, resultPanel?.files?.length ? 20 : 8);
 }
 
 function pipelineSteps(dashboard: unknown) {

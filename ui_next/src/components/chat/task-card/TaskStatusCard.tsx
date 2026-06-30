@@ -136,6 +136,53 @@ type AgentProcessStep = {
   toolName?: string;
 };
 
+type TaskKind = 'download' | 'map' | 'analysis' | 'data_check' | 'model' | 'generic';
+
+type TaskStepTemplate = {
+  id: string;
+  title: string;
+  detail: string;
+};
+
+const TASK_STEP_TEMPLATES: Record<TaskKind, TaskStepTemplate[]> = {
+  download: [
+    { id: 'download-discover', title: '解析下载目标', detail: '识别研究区、数据集、时间范围、分辨率和下载约束。' },
+    { id: 'download-search', title: '检索可用资源', detail: '查询候选影像或地理数据，并筛选覆盖范围与质量。' },
+    { id: 'download-fetch', title: '下载与裁剪', detail: '提交下载任务，跟踪外部数据源状态，必要时裁剪到当前会话研究区。' },
+    { id: 'download-register', title: '注册下载成果', detail: '把下载文件绑定到当前会话，生成可预览图层和下载入口。' },
+  ],
+  map: [
+    { id: 'map-context', title: '读取地图上下文', detail: '读取当前图层、范围、坐标系、样式目标和输出规格。' },
+    { id: 'map-symbolize', title: '配置制图表达', detail: '选择符号、分类、标注和图例，让地图能直接用于展示。' },
+    { id: 'map-render', title: '渲染地图输出', detail: '生成预览图、地图图层或版面成果，并检查可见范围。' },
+    { id: 'map-export', title: '导出制图成果', detail: '注册图片、报告或地图图层，供结果面板查看和下载。' },
+  ],
+  analysis: [
+    { id: 'analysis-context', title: '理解分析目标', detail: '识别空间分析类型、输入数据、参数和预期输出。' },
+    { id: 'analysis-validate', title: '校验空间关系', detail: '检查字段、坐标系、范围、栅格分辨率和矢量拓扑条件。' },
+    { id: 'analysis-run', title: '执行空间处理', detail: '运行裁剪、叠加、栅格计算、统计或重投影等 GIS 工具。' },
+    { id: 'analysis-package', title: '整理分析成果', detail: '汇总图层、表格、报告和下一步建议，方便继续工作。' },
+  ],
+  data_check: [
+    { id: 'vector-validate', title: '读取数据结构', detail: '识别矢量、栅格、表格或文档类型，并读取关键元数据。' },
+    { id: 'field-profile', title: '检查字段与坐标系', detail: '检查字段、编码、坐标系、范围、空值和潜在数据质量问题。' },
+    { id: 'quality-diagnose', title: '生成质量诊断', detail: '整理可用字段、空间范围、异常提示和适合的后续工具。' },
+    { id: 'profile-summary', title: '输出数据摘要', detail: '把诊断结果写入对话、结果面板和可下载摘要。' },
+  ],
+  model: [
+    { id: 'model-feature', title: '准备训练特征', detail: '读取样本、栅格因子、标签字段和训练区域。' },
+    { id: 'model-train', title: '训练或调用模型', detail: '运行模型训练、预测或评估，并跟踪关键指标。' },
+    { id: 'model-map', title: '生成预测地图', detail: '把预测结果转换为地图图层、栅格或图像预览。' },
+    { id: 'model-report', title: '整理模型报告', detail: '输出指标、变量贡献、图件和可继续验证的建议。' },
+  ],
+  generic: [
+    { id: 'generic-context', title: '接收任务', detail: '读取你的请求，识别目标区域、数据类型、制图或 GIS 工具需求。' },
+    { id: 'generic-plan', title: '制定执行计划', detail: '拆解为数据检查、参数校验、工具调用、成果整理和回复生成。' },
+    { id: 'generic-run', title: '调用工具或工作流', detail: '等待后端返回具体工具步骤；实时事件到达后会继续更新这里。' },
+    { id: 'generic-result', title: '注册成果与回复', detail: '绑定产物、地图图层、表格和预览资源，并生成下一步建议。' },
+  ],
+};
+
 function userReadableStatus(status = '') {
   const normalized = String(status || '').toLowerCase();
   if (['success', 'completed', 'complete'].includes(normalized)) return 'succeeded';
@@ -154,7 +201,79 @@ function countLabel(count: number, unit: string) {
   return count > 0 ? `${count} 个${unit}` : '';
 }
 
-function buildAgentProcessSteps(message: ChatMessage, result: PresentationResult | null, status: string): AgentProcessStep[] {
+function inferTaskKind(message: ChatMessage, result: PresentationResult | null): TaskKind {
+  const cardMeta = metaRecord(message.meta?.task_card);
+  const managementView = metaRecord(message.meta?.management_view || message.meta?.download_management_view);
+  const plan = metaRecord(message.meta?.plan);
+  const action = metaRecord(message.meta?.action_required);
+  const executedText = (result?.executed_steps || []).map((step) => `${step?.tool_name || ''} ${step?.step_id || ''}`).join(' ');
+  const searchable = [
+    cardMeta.title,
+    cardMeta.summary,
+    cardMeta.current_step,
+    managementView.current_step,
+    managementView.task_id,
+    message.meta?.task_type,
+    message.meta?.status,
+    message.meta?.reason,
+    plan.primary_goal,
+    action.type,
+    action.message,
+    result?.concise_summary,
+    result?.error_summary,
+    executedText,
+  ].join(' ').toLowerCase();
+
+  if (message.meta?.download_management_view || /download|gscloud|sentinel|landsat|modis|dem|下载|检索资源/.test(searchable)) return 'download';
+  if ((result?.map_layer_refs || []).length || /cartography|map|render|symbol|layout|制图|地图|图层|出图/.test(searchable)) return 'map';
+  if (/xgboost|model|predict|train|prediction|模型|训练|预测/.test(searchable)) return 'model';
+  if (/clip|overlay|buffer|raster|terrain|slope|aspect|ndvi|statistics|reproject|resample|裁剪|叠加|栅格|坡度|重投影|统计/.test(searchable)) return 'analysis';
+  if (/validate|profile|workspace|field|schema|table|vector|检查|字段|坐标系|质量|表格|矢量/.test(searchable)) return 'data_check';
+  return 'generic';
+}
+
+function taskStepDetail(template: TaskStepTemplate, context: {
+  activeStep: string;
+  dataSourceCount: number;
+  outputParts: string[];
+  executionSummary: Record<string, unknown>;
+  cardMeta: Record<string, unknown>;
+  result: PresentationResult | null;
+}) {
+  if (/plan|context|discover|analysis-context|generic-plan/.test(template.id)) {
+    return firstText(context.executionSummary.summary, context.cardMeta.summary, template.detail);
+  }
+  if (/validate|profile|field|quality/.test(template.id) && context.dataSourceCount > 0) {
+    return `检查 ${context.dataSourceCount} 个数据源的会话归属、字段、坐标系、范围和必要参数。`;
+  }
+  if (/run|fetch|render|train/.test(template.id)) {
+    return firstText(context.activeStep, template.detail);
+  }
+  if (/register|export|package|summary|result|report/.test(template.id) && context.outputParts.length) {
+    return `把 ${context.outputParts.join('、')} 绑定到当前会话，供地图面板、结果面板和下载按钮使用。`;
+  }
+  if (/report|summary/.test(template.id) && context.result?.next_action_suggestions?.[0]) {
+    return `整理结果摘要，并给出下一步建议：${context.result.next_action_suggestions[0]}`;
+  }
+  return template.detail;
+}
+
+function templateStepStatus(index: number, total: number, status: string, executedCount: number, outputReady: boolean) {
+  const normalized = String(status || '').toLowerCase();
+  const terminal = ['succeeded', 'failed', 'blocked', 'cancelled', 'canceled'].includes(normalized);
+  if (terminal) {
+    if (normalized === 'succeeded') return 'succeeded';
+    return index < Math.max(1, total - 1) ? 'succeeded' : normalized;
+  }
+  if (index === 0) return 'succeeded';
+  if (executedCount && index <= Math.min(total - 2, 2 + executedCount)) return 'succeeded';
+  if (outputReady && index < total - 1) return 'succeeded';
+  if (!executedCount && index === 1) return 'running';
+  if (executedCount && index === Math.min(total - 1, 2 + executedCount)) return 'running';
+  return 'queued';
+}
+
+function buildAgentProcessSteps(message: ChatMessage, result: PresentationResult | null, status: string, taskKind: TaskKind): AgentProcessStep[] {
   const cardMeta = metaRecord(message.meta?.task_card);
   const managementView = metaRecord(message.meta?.management_view || message.meta?.download_management_view);
   const executionSummary = metaRecord(message.meta?.execution_summary);
@@ -170,35 +289,15 @@ function buildAgentProcessSteps(message: ChatMessage, result: PresentationResult
     countLabel(layerCount, '地图图层'),
     countLabel(tableCount, '表格'),
   ].filter(Boolean);
-  const running = ['planning', 'queued', 'running', 'waiting_login', 'awaiting_confirmation', 'paused'].includes(String(status || '').toLowerCase());
-  const terminal = ['succeeded', 'failed', 'blocked', 'cancelled', 'canceled'].includes(String(status || '').toLowerCase());
-  const baseStatus = terminal ? 'succeeded' : 'running';
-  const steps: AgentProcessStep[] = [
-    {
-      id: 'receive',
-      title: '接收任务',
-      detail: '读取你的请求，识别目标区域、数据类型、制图或 GIS 工具需求。',
-      status: baseStatus,
-    },
-    {
-      id: 'plan',
-      title: '制定执行计划',
-      detail: firstText(
-        executionSummary.summary,
-        cardMeta.summary,
-        '拆解为数据检查、参数校验、工具调用、成果整理和回复生成。'
-      ),
-      status: baseStatus,
-    },
-    {
-      id: 'validate',
-      title: '正在检查输入数据',
-      detail: dataSourceCount > 0
-        ? `检查 ${dataSourceCount} 个数据源的会话归属、字段、坐标系、范围和必要参数。`
-        : '检查工作区数据、会话、文件、字段、坐标系和必要参数。',
-      status: executed.length || terminal ? 'succeeded' : (running ? 'running' : status),
-    },
-  ];
+  const templates = TASK_STEP_TEMPLATES[taskKind] || TASK_STEP_TEMPLATES.generic;
+  const outputReady = outputParts.length > 0 || status === 'succeeded';
+  const context = { activeStep, dataSourceCount, outputParts, executionSummary, cardMeta, result };
+  const steps: AgentProcessStep[] = templates.map((template, index) => ({
+    id: template.id,
+    title: template.title,
+    detail: taskStepDetail(template, context),
+    status: templateStepStatus(index, templates.length, status, executed.length, outputReady),
+  }));
 
   if (executed.length) {
     executed.slice(0, 6).forEach((step, index) => {
@@ -214,33 +313,8 @@ function buildAgentProcessSteps(message: ChatMessage, result: PresentationResult
         toolName,
       });
     });
-  } else {
-    steps.push({
-      id: 'execute',
-      title: '调用工具或工作流',
-      detail: activeStep || '等待后端返回具体工具步骤；实时事件到达后会继续更新这里。',
-      status: running ? 'running' : status,
-    });
   }
 
-  steps.push({
-    id: 'register-results',
-    title: '注册成果与地图图层',
-    detail: outputParts.length
-      ? `把 ${outputParts.join('、')} 绑定到当前会话，供地图面板、结果面板和下载按钮使用。`
-      : '等待工具产物返回后，注册 artifact、地图图层、表格和预览资源。',
-    status: outputParts.length || status === 'succeeded' ? 'succeeded' : (terminal ? status : 'queued'),
-  });
-  steps.push({
-    id: 'respond',
-    title: '生成回复和下一步建议',
-    detail: firstText(
-      result?.concise_summary,
-      result?.next_action_suggestions?.[0] ? `整理结果摘要，并给出下一步建议：${result.next_action_suggestions[0]}` : '',
-      '汇总执行结果、风险提示、可下载成果和可继续操作。'
-    ),
-    status: terminal ? status : 'queued',
-  });
   return steps;
 }
 
@@ -277,14 +351,15 @@ function processStepVisualStatus(step: AgentProcessStep, index: number, overallS
   return normalized || 'queued';
 }
 
-function AgentProcessTimeline({ steps, overallStatus }: { steps: AgentProcessStep[]; overallStatus: string }) {
+function AgentProcessTimeline({ steps, overallStatus, taskKind }: { steps: AgentProcessStep[]; overallStatus: string; taskKind: TaskKind }) {
   return (
-    <section className="rounded-[18px] border border-slate-200/75 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-900/38">
+    <section className="agent-process-timeline relative overflow-hidden rounded-[18px] border border-slate-200/75 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-900/38" data-task-kind={taskKind}>
+      <span className={cn('task-card-motion-rail bg-gradient-to-r', statusAccent(overallStatus))} aria-hidden="true" />
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <div className="text-sm font-black text-slate-900 dark:text-slate-100">处理过程</div>
           <div className="mt-0.5 text-[11px] font-semibold leading-5 text-slate-500 dark:text-slate-400">
-            智能体按顺序完成数据检查、工具调用、成果注册和结果说明。
+            不同任务会显示对应的执行阶段；真实工具步骤会随实时事件继续补充。
           </div>
         </div>
         <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-black', statusTone(overallStatus))}>
@@ -298,7 +373,9 @@ function AgentProcessTimeline({ steps, overallStatus }: { steps: AgentProcessSte
           const active = ['running', 'planning', 'queued', 'waiting_login', 'awaiting_confirmation', 'paused'].includes(visualStatus);
           return (
             <div key={`${step.id}-${index}`} className={cn(
-              'rounded-2xl border px-3 py-2.5 text-xs',
+              'agent-process-step-card rounded-2xl border px-3 py-2.5 text-xs',
+              active && !completed && 'is-active',
+              completed && 'is-complete',
               completed && 'border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/25 dark:text-emerald-200',
               active && !completed && 'border-blue-200 bg-blue-50 text-blue-800 dark:border-blue-900 dark:bg-blue-950/25 dark:text-blue-200',
               !completed && !active && 'border-slate-200 bg-white text-slate-600 dark:border-slate-800 dark:bg-slate-950/35 dark:text-slate-300',
@@ -547,7 +624,8 @@ export function TaskStatusCard({
   const confirmedActionId = String(action?.confirmed_action_id || '');
   const presentation = buildTaskCardPresentation({ message, result });
   const status = presentation.status;
-  const steps = buildAgentProcessSteps(message, result, status);
+  const taskKind = inferTaskKind(message, result);
+  const steps = buildAgentProcessSteps(message, result, status, taskKind);
   const cardMeta = metaRecord(message.meta?.task_card);
   const managementView = metaRecord(message.meta?.management_view || message.meta?.download_management_view);
   const executionSummary = metaRecord(message.meta?.execution_summary);
@@ -570,7 +648,7 @@ export function TaskStatusCard({
   };
   const showTechnicalDetails = technicalDetailsEnabled();
   return (
-    <section data-testid="task-status-card" className="agent-task-card relative mt-3 overflow-hidden rounded-[24px] border border-slate-200/85 bg-white/92 shadow-[0_22px_54px_rgba(15,23,42,.12)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/72">
+    <section data-testid="task-status-card" data-task-kind={taskKind} className="agent-task-card relative mt-3 overflow-hidden rounded-[24px] border border-slate-200/85 bg-white/92 shadow-[0_22px_54px_rgba(15,23,42,.12)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/72">
       <div className={cn('h-1.5 bg-gradient-to-r', statusAccent(status))} />
       <div className={cn('task-card-status-spine absolute bottom-4 left-2 top-5 w-1 rounded-full', statusSpine(status))} />
       <div className="space-y-4 p-4">
@@ -616,7 +694,7 @@ export function TaskStatusCard({
 
         <TaskThinkingSummary thinking={presentation.thinking} />
 
-        <AgentProcessTimeline steps={steps} overallStatus={status} />
+        <AgentProcessTimeline steps={steps} overallStatus={status} taskKind={taskKind} />
 
         {(highlights.length > 0 || dataSources.length > 0) && (
           <div className="grid gap-2 sm:grid-cols-2">

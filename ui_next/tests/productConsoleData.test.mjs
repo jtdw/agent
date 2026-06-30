@@ -16,6 +16,7 @@ async function loadTs(path) {
 
 const data = await loadTs('src/components/productConsoleData.ts');
 const consoleSource = await readFile('src/components/ProductConsole.tsx', 'utf8');
+const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 const appSource = await readFile('src/App.tsx', 'utf8');
 
 assert.match(consoleSource, /openMap/, 'ProductConsole sidebar nav must expose a map workbench action');
@@ -31,6 +32,8 @@ assert.match(consoleSource, /api\.artifactMetadata/, 'ProductConsole download ac
 assert.doesNotMatch(consoleSource, /job\.download_url/, 'ProductConsole main download management path must not consume raw job.download_url');
 assert.doesNotMatch(consoleSource, /if \(error\) return <StateMessage/, 'ProductConsole must not replace the whole page with a dashboard error banner');
 assert.match(consoleSource, /\{error && <StateMessage tone="error">\{error\}<\/StateMessage>\}/, 'ProductConsole should show dashboard errors inline while preserving page content');
+assert.doesNotMatch(layerPanelSource, /api\.dashboard\(userId,\s*sessionId\)\.then\(setDashboard\)\.catch\(\(\) => setDashboard\(null\)\)/, 'LayerPanel must keep previous dashboard results when a refresh fails');
+assert.doesNotMatch(layerPanelSource, /\.catch\(\(\) => setJobs\(\[\]\)\)/, 'LayerPanel must keep previous jobs when a refresh fails');
 const openChatWorkspaceSource = consoleSource.match(/const openChatWorkspace = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
 assert.doesNotMatch(openChatWorkspaceSource, /onOpenChat\?\.\(\)/, 'ProductConsole chat tab must not also mount the floating ChatPanel');
 assert.match(

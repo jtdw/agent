@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type RealtimeChatEvent } from '@/lib/api';
+import { createRealtimeEventGateState, shouldAcceptRealtimeEvent, type RealtimeEventGateState } from './chatRealtimeEventModel';
 
 export type RealtimeSyncState = 'connecting' | 'live' | 'polling';
 
@@ -22,8 +23,7 @@ const REALTIME_EVENT_TYPES: RealtimeChatEvent['kind'][] = [
 export function useChatRealtimeEvents({ userId, sessionId, onEvent }: UseChatRealtimeEventsArgs) {
   const [realtimeSyncState, setRealtimeSyncState] = useState<RealtimeSyncState>('polling');
   const sourceRef = useRef<EventSource | null>(null);
-  const eventIdsRef = useRef<Set<string>>(new Set());
-  const taskVersionRef = useRef(0);
+  const eventGateRef = useRef<RealtimeEventGateState>(createRealtimeEventGateState());
   const syncStateRef = useRef<RealtimeSyncState>('polling');
 
   const setSyncState = useCallback((state: RealtimeSyncState) => {
@@ -32,25 +32,14 @@ export function useChatRealtimeEvents({ userId, sessionId, onEvent }: UseChatRea
   }, []);
 
   const applyRealtimeEvent = useCallback((event: RealtimeChatEvent) => {
-    const eventId = String(event.event_id || '').trim();
-    if (!eventId || eventIdsRef.current.has(eventId)) return;
-    eventIdsRef.current.add(eventId);
-    if (eventIdsRef.current.size > 800) {
-      eventIdsRef.current = new Set(Array.from(eventIdsRef.current).slice(-400));
-    }
-    const version = Number(event.version || 0);
-    if (version > 0 && version < 1_000_000_000) {
-      if (version <= taskVersionRef.current) return;
-      taskVersionRef.current = version;
-    }
+    if (!shouldAcceptRealtimeEvent(event, eventGateRef.current)) return;
     onEvent(event, syncStateRef.current);
   }, [onEvent]);
 
   useEffect(() => {
     sourceRef.current?.close();
     sourceRef.current = null;
-    eventIdsRef.current = new Set();
-    taskVersionRef.current = 0;
+    eventGateRef.current = createRealtimeEventGateState();
     if (!userId || !sessionId) {
       setSyncState('polling');
       return;

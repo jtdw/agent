@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, type ChatMessage, type ChatSession } from '@/lib/api';
+import { deriveNextSessionState } from './chatSessionModel';
 
 type UseChatSessionsArgs = {
   userId: string;
@@ -19,12 +20,14 @@ export function useChatSessions({
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState('');
   const sessionRefreshSeqRef = useRef(0);
+  const currentSessionIdRef = useRef('');
   const lastKnownUserIdRef = useRef('');
   const lastSuccessfulSessionUserIdRef = useRef('');
   const latestUserIdRef = useRef('');
   const callbacksRef = useRef({ onSessionChange, onMessagesCleared, onMessagesRefreshed, onRefreshError });
 
   latestUserIdRef.current = userId;
+  currentSessionIdRef.current = currentSessionId;
   callbacksRef.current = { onSessionChange, onMessagesCleared, onMessagesRefreshed, onRefreshError };
 
   const visibleSessions = useMemo(() => {
@@ -67,16 +70,13 @@ export function useChatSessions({
     }
     if (seq !== sessionRefreshSeqRef.current || latestUserIdRef.current !== requestedUserId) return;
 
-    const nextSessions = (result.sessions || []).length > 0
-      ? result.sessions || []
-      : result.current_session_id
-        ? [{ session_id: result.current_session_id, title: '新对话' }]
-        : [];
+    const derived = deriveNextSessionState({ result, previousSessionId: currentSessionIdRef.current });
+    const nextSessions = derived.sessions;
     if (nextSessions.length === 0 && lastSuccessfulSessionUserIdRef.current === requestedUserId) return;
 
     setSessions(nextSessions);
     if (nextSessions.length > 0) lastSuccessfulSessionUserIdRef.current = requestedUserId;
-    const nextSessionId = result.current_session_id || '';
+    const nextSessionId = derived.currentSessionId;
     setCurrentSessionId(nextSessionId);
     callbacksRef.current.onSessionChange?.(nextSessionId);
     callbacksRef.current.onMessagesRefreshed(result.messages);

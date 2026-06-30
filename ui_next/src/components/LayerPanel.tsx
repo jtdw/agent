@@ -150,24 +150,38 @@ export function LayerPanel({
   const [jobs, setJobs] = useState<DownloadJob[]>([]);
   const completedSeenRef = useRef<Set<string>>(new Set());
   const jobsInitializedRef = useRef(false);
+  const dashboardScopeRef = useRef('');
+  const jobsScopeRef = useRef('');
   const userId = user?.user_id || '';
 
   const refreshDashboard = () => {
     if (!user) {
       setDashboard(null);
+      dashboardScopeRef.current = '';
       return;
     }
-    api.dashboard(userId, sessionId).then(setDashboard).catch(() => setDashboard(null));
+    const requestedScope = `${userId}|${sessionId || ''}`;
+    api.dashboard(userId, sessionId)
+      .then((nextDashboard) => {
+        dashboardScopeRef.current = requestedScope;
+        setDashboard(nextDashboard);
+      })
+      .catch(() => {
+        if (dashboardScopeRef.current !== requestedScope) setDashboard(null);
+      });
   };
 
   const refreshJobs = () => {
     if (!user) {
       setJobs([]);
+      jobsScopeRef.current = '';
       return;
     }
+    const requestedScope = `${userId}|${sessionId || ''}`;
     api.jobs(userId, sessionId)
       .then((r) => {
         const nextJobs = attachManagementViews(r.jobs || [], r.management_views || []);
+        jobsScopeRef.current = requestedScope;
         setJobs(nextJobs);
         if (!jobsInitializedRef.current) {
           nextJobs
@@ -183,7 +197,9 @@ export function LayerPanel({
           refreshDashboard();
         }
       })
-      .catch(() => setJobs([]));
+      .catch(() => {
+        if (jobsScopeRef.current !== requestedScope) setJobs([]);
+      });
   };
 
   useEffect(() => {

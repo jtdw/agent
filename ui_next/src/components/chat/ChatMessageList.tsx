@@ -154,8 +154,9 @@ export function ChatMessageList({
             <motion.div key={messageKey(m)} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className={cn('flex', isUser ? 'justify-end' : 'justify-start')}>
               <div className={cn(
                 'group min-w-0 whitespace-pre-wrap break-words text-sm leading-6',
-                !isToolTask && 'rounded-[22px] px-4 py-3 shadow-[0_14px_32px_rgba(15,23,42,.09)]',
-                isUser && 'max-w-[min(66%,34rem)] rounded-[18px] bg-gradient-to-br from-blue-600 to-cyan-600 px-3.5 py-2.5 text-white shadow-[0_12px_26px_rgba(15,98,254,.18)]',
+                !isUser && !isToolTask && 'rounded-[22px] px-4 py-3 shadow-[0_14px_32px_rgba(15,23,42,.09)]',
+                isUser && !isEditing && 'chat-user-bubble max-w-[min(72%,36rem)] rounded-[20px] border border-slate-200/85 bg-white px-3.5 py-2.5 text-slate-900 shadow-sm dark:border-white/10 dark:bg-slate-900/80 dark:text-slate-100',
+                isUser && isEditing && 'w-full max-w-[min(92%,54rem)] rounded-[22px] border border-slate-200/85 bg-white/96 px-4 py-3 text-slate-900 shadow-sm backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/85 dark:text-slate-100',
                 !isUser && (isToolTask ? 'w-full max-w-[min(96%,58rem)]' : 'max-w-[min(86%,48rem)]'),
                 !isUser && !isSystem && 'border border-slate-200/80 bg-white/78 text-slate-700 backdrop-blur-xl dark:border-white/10 dark:bg-slate-900/55 dark:text-slate-200',
                 isToolTask && 'border-0 bg-transparent p-0 shadow-none backdrop-blur-0 dark:bg-transparent',
@@ -167,11 +168,11 @@ export function ChatMessageList({
                     <textarea
                       value={editText}
                       onChange={(e) => setEditText(e.target.value)}
-                      className="min-h-24 w-full resize-y rounded-2xl border border-white/40 bg-white/95 px-3 py-2 text-slate-900 outline-none"
+                      className="chat-message-edit-textarea"
                     />
                     <div className="flex justify-end gap-2">
-                      <button onClick={cancelEdit} className="rounded-xl bg-white/20 p-2" title="取消"><X size={15} /></button>
-                      <button onClick={retryEditedMessage} className="rounded-xl bg-white/25 p-2" title="保存并重新生成"><Check size={15} /></button>
+                      <button onClick={cancelEdit} className="rounded-xl border border-slate-200 bg-slate-50 p-2 text-slate-600 transition hover:bg-slate-100 dark:border-white/10 dark:bg-white/5 dark:text-slate-200 dark:hover:bg-white/10" title="取消"><X size={15} /></button>
+                      <button onClick={retryEditedMessage} className="rounded-xl bg-slate-950 p-2 text-white transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-950 dark:hover:bg-white" title="保存并重新生成"><Check size={15} /></button>
                     </div>
                   </div>
                 ) : (

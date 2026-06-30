@@ -212,8 +212,68 @@ def test_chat_stream_api_forwards_model_deltas_and_completion() -> None:
         assert '"kind":"model_token"' in body
         assert '"delta":"你好"' in body
         assert '"kind":"model_complete"' in body
+        assert '"delta":"你好，GIS"' in body
         assert '"user_id"' not in body
         assert '"session_id"' not in body
+
+
+def test_answer_only_chat_stream_does_not_replay_generic_planning_event() -> None:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        root = Path(tmp)
+        import api_server
+
+        class StreamService:
+            current_session_id = "s1"
+            manager = SimpleNamespace(workdir=root)
+
+            def apply_frontend_context(self, _context):
+                return None
+
+            def ask(self, _prompt, **_kwargs):
+                return {"reply": "Plain answer", "mode": "answer_only", "reason": "chat_only_direct_answer"}
+
+        service = StreamService()
+        decorated = {
+            "reply": "Plain answer",
+            "mode": "answer_only",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "Plain answer",
+                    "meta": {
+                        "mode": "answer_only",
+                        "interaction_type": "chat_answer",
+                        "reason": "chat_only_direct_answer",
+                    },
+                }
+            ],
+        }
+        with (
+            mock.patch.object(api_server, "_scoped_workspace_service", return_value=service),
+            mock.patch.object(api_server, "_require_request_user_if_present", return_value="u1"),
+            mock.patch.object(api_server, "attach_chat_state", side_effect=lambda _service, result: {**decorated, **result}),
+            mock.patch.object(api_server, "_attach_result_panel", side_effect=lambda _service, _user, result: result),
+        ):
+            client = TestClient(api_server.app)
+            with client.stream(
+                "POST",
+                "/api/chat/stream",
+                json={"prompt": "What is GIS?", "user_id": "u1", "session_id": "s1", "task_id": "chat-a"},
+            ) as response:
+                body = "".join(response.iter_text())
+            replay = client.get("/api/chat/events/replay", params={"user_id": "u1", "session_id": "s1"})
+
+        assert response.status_code == 200
+        assert '"kind":"model_complete"' in body
+        assert replay.status_code == 200
+        events = replay.json()["events"]
+        assert not [
+            event
+            for event in events
+            if event["kind"] == "task_status"
+            and event["status"] == "planning"
+            and event["message"] == "Preparing response or task plan."
+        ]
 
 
 def test_transient_model_tokens_are_scoped_and_not_persisted() -> None:

@@ -8,4 +8,4 @@ $env:PYTHONIOENCODING = "utf-8"
 
 Set-Location -Path "$PSScriptRoot\ui_next"
 npm install
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173

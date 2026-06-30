@@ -16,7 +16,7 @@ function ChartSkeleton() {
   return <div className="h-full overflow-hidden rounded-2xl bg-white/35 dark:bg-white/5"><div className="h-full w-1/2 animate-shimmer bg-gradient-to-r from-transparent via-white/50 to-transparent" /></div>;
 }
 
-export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextChange }: { userId?: string; resultPanel?: ResultPanel | null; onChatContextChange?: (patch: Partial<ChatContextPayload>) => void }) {
+export function AnalysisPanel({ userId = '', sessionId = '', resultPanel = null, onChatContextChange }: { userId?: string; sessionId?: string; resultPanel?: ResultPanel | null; onChatContextChange?: (patch: Partial<ChatContextPayload>) => void }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [downloadingArtifactId, setDownloadingArtifactId] = useState('');
@@ -33,7 +33,7 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
       return;
     }
     try {
-      setDashboard(await api.dashboard(userId));
+      setDashboard(await api.dashboard(userId, sessionId));
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取分析结果失败');
     } finally {
@@ -51,7 +51,7 @@ export function AnalysisPanel({ userId = '', resultPanel = null, onChatContextCh
     setDownloadingArtifactId(artifactId);
     setError('');
     try {
-      await api.downloadArtifactById(artifactId, label || '成果文件', userId);
+      await api.downloadArtifactById(artifactId, label || '成果文件', userId, sessionId);
     } catch (e) {
       setError(e instanceof Error ? e.message : '文件已清理、无访问权限或下载链接已失效。');
     } finally {

@@ -325,7 +325,7 @@ Phase 56 及后续 rollout 必须保持以下边界：
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **agent** (9231 symbols, 20862 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **agent** (9670 symbols, 22156 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
@@ -353,10 +353,6 @@ This project is indexed by GitNexus as **agent** (9231 symbols, 20862 relationsh
 | `gitnexus://repo/agent/clusters` | All functional areas |
 | `gitnexus://repo/agent/processes` | All execution flows |
 | `gitnexus://repo/agent/process/{name}` | Step-by-step execution trace |
-
-## CLI Compatibility
-
-This project uses GitNexus CLI 1.6.8 compatible parameters. Do not use `--max-depth`; this version does not accept it. When limiting analysis scope, pass an explicit path to `node .gitnexus/run.cjs analyze` or configure `.gitnexusignore`. Before using version-sensitive flags, check the current command help with `node .gitnexus/run.cjs <command> --help`.
 
 ## CLI
 

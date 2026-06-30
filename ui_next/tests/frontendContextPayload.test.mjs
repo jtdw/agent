@@ -69,5 +69,8 @@ assert.match(analysisPanelSource, /selected_artifact_id:\s*item\.artifactId\s*\|
 assert.match(analysisPanelSource, /selected_model_result_id/, 'AnalysisPanel must report selected model result');
 assert.match(analysisPanelSource, /view\.bestModel\?\.modelResultId/, 'AnalysisPanel must send backend model_result_id');
 assert.doesNotMatch(analysisPanelSource, /selected_model_result_id:\s*view\.bestModel\?\.name/, 'AnalysisPanel must not use display model name as selected_model_result_id');
+assert.match(analysisPanelSource, /sessionId\?:\s*string/, 'AnalysisPanel must accept a session id for scoped result loading');
+assert.match(analysisPanelSource, /api\.dashboard\(userId,\s*sessionId\)/, 'AnalysisPanel must load dashboard results in the current session scope');
+assert.match(appSource, /<AnalysisPanel userId=\{user\?\.user_id \|\| ''\} sessionId=\{currentSessionId\}/, 'App must pass the current session id into AnalysisPanel');
 
 console.log('frontend context payload tests passed');

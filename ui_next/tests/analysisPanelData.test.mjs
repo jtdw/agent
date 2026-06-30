@@ -141,4 +141,27 @@ assert.equal(resultPanelView.downloads[0].artifactId, 'artifact_metrics_001');
 assert.equal(resultPanelView.downloads[0].url, '');
 assert.equal(resultPanelView.recommendations[0], 'check metrics');
 
+const mergedResultPanelView = analysis.buildAnalysisPanelView(
+  {
+    artifacts: [
+      { artifact_id: 'artifact_existing_report', name: 'existing_report.pdf', path: 'derived/existing_report.pdf', type: 'report' }
+    ],
+    latest_pipeline: null,
+    analysis: {}
+  },
+  {
+    has_results: true,
+    title: 'Latest chat result',
+    files: [
+      { artifact_id: 'artifact_latest_metrics', label: 'latest_metrics.csv', path: 'derived/latest_metrics.csv', kind: 'report' }
+    ],
+    recommendations: []
+  }
+);
+assert.deepEqual(
+  mergedResultPanelView.downloads.map((item) => item.artifactId),
+  ['artifact_latest_metrics', 'artifact_existing_report'],
+  'AnalysisPanel downloads should keep existing workspace artifacts when latest resultPanel files arrive'
+);
+
 console.log('analysis panel data tests passed');

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const composer = await readFile('src/components/ChatComposer.tsx', 'utf8');
 const chatPanel = await readFile('src/components/ChatPanel.tsx', 'utf8');
 const composerFooter = await readFile('src/components/chat/ChatComposerFooter.tsx', 'utf8');
+const conversationHeader = await readFile('src/components/chat/ChatConversationHeader.tsx', 'utf8');
 const voiceHook = await readFile('src/components/chat/useChatVoiceInput.ts', 'utf8');
 const css = await readFile('src/index.css', 'utf8');
 
@@ -43,12 +44,14 @@ assert.match(chatPanel, /<ChatComposerFooter/, 'ChatPanel should render the bott
 assert.doesNotMatch(chatPanel, /chat-quick-prompt/, 'ChatPanel should not own quick-prompt footer markup inline');
 assert.match(composerFooter, /export function ChatComposerFooter/, 'ChatComposerFooter should be exported');
 assert.match(composerFooter, /data-testid="chat-composer-footer"/, 'Composer footer should expose a stable root test id');
-assert.match(composerFooter, /常用指令/, 'Composer footer should label quick prompts in Chinese');
-assert.match(composerFooter, /会话模式/, 'Composer footer should label the mode switch in Chinese');
-assert.match(composerFooter, /data-testid="interaction-mode-chat"/, 'Composer footer must preserve chat mode test id');
-assert.match(composerFooter, /data-testid="interaction-mode-tool"/, 'Composer footer must preserve tool mode test id');
-assert.match(css, /\.chat-composer-footer\s*\{[\s\S]*border-top:/, 'Composer footer should have a stable bordered footer surface');
-assert.match(css, /\.chat-composer-footer-meta\s*\{[\s\S]*display:\s*flex/, 'Composer footer metadata row should be a flexible row');
+assert.doesNotMatch(composerFooter, /常用指令|chat-quick-prompt-row|quickPrompts\.slice/, 'Composer footer should not render quick prompts in the chat bar');
+assert.doesNotMatch(composerFooter, /chat-composer-mode-panel|data-testid="interaction-mode-chat"|data-testid="interaction-mode-tool"/, 'Composer footer should only contain the input capsule after the mode switch moves to the header');
+assert.match(conversationHeader, /会话模式/, 'Conversation header should label the mode switch in Chinese');
+assert.match(conversationHeader, /data-testid="interaction-mode-chat"/, 'Conversation header must preserve chat mode test id');
+assert.match(conversationHeader, /data-testid="interaction-mode-tool"/, 'Conversation header must preserve tool mode test id');
+assert.match(conversationHeader, /data-testid="chat-upload-button"[\s\S]*\{modeSwitch\(\)\}/, 'Header mode switch should sit after the upload data action in the page toolbar');
+assert.match(css, /\.chat-composer-footer\s*\{[\s\S]*border-top:\s*0/, 'Composer footer should not keep a visible backing plate under the input capsule');
+assert.match(css, /\.chat-header-mode-panel\s*\{[\s\S]*display:\s*inline-flex/, 'Header mode switch should have a stable toolbar container');
 assert.match(css, /\.chat-interaction-mode-switch\s*\{[\s\S]*display:\s*inline-flex/, 'Mode switch should have a stable segmented-control style');
 
 console.log('chatComposerExperience.test.mjs passed');
