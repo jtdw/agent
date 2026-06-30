@@ -51,6 +51,8 @@ class ManagementViewTests(unittest.TestCase):
             "status": "waiting_login",
             "progress": 5,
             "stage": "needs_login",
+            "current_scene": "/tmp/secret/current_scene.tif",
+            "scan_stop_reason": "/home/app/private/stop.json",
             "storage_state_path": r"E:\\secret\\storage_state.json",
             "error_message": "Traceback: raw stack",
             "updated_at": "2026-06-21T10:00:00",
@@ -68,6 +70,8 @@ class ManagementViewTests(unittest.TestCase):
         self.assertNotIn("user_id", rendered)
         self.assertNotIn("session_id", rendered)
         self.assertNotIn("storage_state", rendered)
+        self.assertNotIn("/tmp/secret", rendered)
+        self.assertNotIn("/home/app/private", rendered)
         self.assertNotIn("Traceback", rendered)
 
     def test_completed_download_view_exposes_artifact_action_not_raw_path(self) -> None:
@@ -99,6 +103,41 @@ class ManagementViewTests(unittest.TestCase):
         self.assertIn("view_artifacts", view["available_actions"])
         self.assertIn("add_to_map", view["available_actions"])
         self.assertNotIn("download_url", json.dumps(view, ensure_ascii=False))
+
+    def test_download_view_ignores_legacy_path_based_artifact_refs(self) -> None:
+        job = {
+            "job_id": "job_legacy",
+            "source_key": "gscloud",
+            "resource_type": "dem",
+            "region": "chengdu",
+            "status": "completed",
+            "progress": 100,
+        }
+        tool_result = {
+            "status": "succeeded",
+            "tool_name": "download_job",
+            "artifacts": [
+                {
+                    "artifact_id": "download:job_legacy:output_path",
+                    "path": r"E:\agent\workspace\users\u1\sions\s1\downloads\job_legacy\dem.tif",
+                    "title": "dem.tif",
+                    "type": "raster",
+                },
+                {"artifact_id": "artifact_registered", "title": "registered.tif", "type": "raster"},
+            ],
+            "map_layers": [],
+            "warnings": [],
+            "errors": [],
+        }
+
+        view = download_job_to_management_view(job, tool_result=tool_result)
+        rendered = json.dumps(view, ensure_ascii=False)
+
+        self.assertEqual(view["artifact_refs"], [{"artifact_id": "artifact_registered", "title": "registered.tif", "type": "raster"}])
+        self.assertIn("view_artifacts", view["available_actions"])
+        self.assertNotIn("download:", rendered)
+        self.assertNotIn("output_path", rendered)
+        self.assertNotIn("E:\\agent", rendered)
 
     def test_task_outcome_uses_management_view_without_raw_job(self) -> None:
         result = {

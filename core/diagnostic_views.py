@@ -38,6 +38,11 @@ def _clean_text(value: Any, limit: int = 220) -> str:
         "workspace\\",
         "workspace/",
         ":\\",
+        "/tmp/",
+        "/home/",
+        "/var/",
+        "/etc/",
+        "/root/",
         "/users/",
         "\\users\\",
     )

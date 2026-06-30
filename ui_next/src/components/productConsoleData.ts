@@ -38,8 +38,7 @@ export type JobSummary = {
 export type ConsoleArtifact = {
   artifactId: string;
   label: string;
-  url: string;
-  path: string;
+  previewUrl?: string;
   kind: 'report' | 'visual' | 'archive' | 'data' | 'artifact';
 };
 
@@ -104,14 +103,14 @@ export function groupArtifacts(artifacts: WorkspaceArtifact[] = []): ConsoleArti
     .map((artifact) => {
       const artifactId = String(artifact.artifact_id || '');
       if (!artifactId) return null;
-      const label = String(artifact.name || artifact.path?.split(/[\\/]/).pop() || '结果文件');
+      const label = String(artifact.filename || artifact.name || artifact.title || artifactId);
       const lower = label.toLowerCase();
       let kind: ConsoleArtifact['kind'] = 'artifact';
       if (/\.(png|jpg|jpeg|webp|svg)$/i.test(lower)) kind = 'visual';
       else if (/\.(zip|7z|rar)$/i.test(lower)) kind = 'archive';
       else if (/\.(csv|xlsx|xls|md|txt|docx|pdf)$/i.test(lower)) kind = 'report';
       else if (/\.(geojson|json|tif|tiff|shp|gpkg)$/i.test(lower)) kind = 'data';
-      return { artifactId, label, url: '', path: String(artifact.path || ''), kind };
+      return { artifactId, label, kind };
     })
     .filter((item): item is ConsoleArtifact => Boolean(item));
 }

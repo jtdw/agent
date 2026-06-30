@@ -175,6 +175,71 @@ def _build_download_plan_from_semantics(semantic: dict[str, Any], prompt: str) -
     return plan
 
 
+def _download_semantic_from_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    if not plan:
+        return {}
+    resource_type = str(plan.get("resource_type") or "").strip()
+    normalized_resource = "DEM" if resource_type.lower() == "dem" else resource_type
+    return {
+        "intent": "data_download",
+        "action": "download",
+        "resource_type": normalized_resource,
+        "region_raw": str(plan.get("region") or plan.get("region_raw") or ""),
+        "region": str(plan.get("region") or ""),
+        "region_standard": str(plan.get("region_standard") or ""),
+        "admin_level": str(plan.get("admin_level") or ""),
+        "resolution": str(plan.get("resolution") or ""),
+        "data_source": str(plan.get("source_key") or plan.get("data_source") or ""),
+        "product_key": str(plan.get("product_key") or ("gscloud_dem" if normalized_resource == "DEM" else "")),
+        "dataset_id": str(plan.get("dataset_id") or ""),
+        "confidence": 0.86,
+        "needs_clarification": False,
+        "missing_slots": [],
+        "clarification_question": "",
+    }
+
+
+def _previous_download_semantic(context: dict[str, Any]) -> dict[str, Any]:
+    active_task = _as_dict(context.get("active_task"))
+    if str(active_task.get("task_type") or "") == "data_download":
+        semantic = _download_semantic_from_plan(_as_dict(active_task.get("download_plan")))
+        if semantic.get("resource_type") or semantic.get("region"):
+            return semantic
+    user_goal = str(context.get("user_goal") or "").strip()
+    if user_goal:
+        previous = parse_user_semantics(user_goal, {})
+        if str(previous.get("intent") or "") == "data_download":
+            return previous
+    return {}
+
+
+def _is_download_continuation_prompt(prompt: str) -> bool:
+    text = str(prompt or "")
+    lowered = text.lower()
+    return any(token in text for token in ("完成登录", "已经登录", "继续下载", "继续", "接着下载")) or "logged in" in lowered
+
+
+def _inherit_download_semantics(semantic: dict[str, Any], context: dict[str, Any], prompt: str = "") -> dict[str, Any]:
+    previous = _previous_download_semantic(context)
+    if not previous:
+        return semantic
+    merged = dict(semantic)
+    prefer_previous = _is_download_continuation_prompt(prompt) and not str(merged.get("resource_type") or "").strip()
+    for key in ("resource_type", "region_raw", "region", "region_standard", "admin_level", "resolution", "data_source", "product_key", "dataset_id"):
+        if (prefer_previous or not str(merged.get(key) or "").strip()) and str(previous.get(key) or "").strip():
+            merged[key] = previous[key]
+    if str(merged.get("resource_type") or "").strip() and str(merged.get("region") or "").strip():
+        merged["intent"] = "data_download"
+        merged["action"] = "download"
+        merged["needs_clarification"] = False
+        merged["missing_slots"] = []
+        merged["clarification_question"] = ""
+        merged["confidence"] = max(float(merged.get("confidence") or 0.0), 0.86)
+        inherited = [str(item) for item in merged.get("inherited_slots", []) if str(item).strip()]
+        merged["inherited_slots"] = list(dict.fromkeys([*inherited, "previous_download_request"]))
+    return merged
+
+
 def _semantic_candidates(context: dict[str, Any], prompt: str) -> dict[str, Any]:
     existing = context.get("semantic_field_candidates")
     if isinstance(existing, dict):
@@ -1813,7 +1878,7 @@ def _prompt_has_ascii_token(prompt: str, token: str) -> bool:
 
 
 def _registered_workflow_compatible(plan: dict[str, Any], template: dict[str, Any], prompt: str, context: dict[str, Any]) -> bool:
-    if str(plan.get("task_type") or "") == "modeling":
+    if str(plan.get("task_type") or "") in {"modeling", "data_download"}:
         return False
     workflow_id = str(template.get("workflow_id") or "")
     data_type = _dataset_type(context)
@@ -1924,6 +1989,9 @@ def build_task_plan(prompt: str, intent: dict[str, Any], context: dict[str, Any]
     text = str(prompt or "")
     semantic = parse_user_semantics(text, context)
     task_type = str(intent.get("intent") or semantic.get("intent") or "unclear_request")
+    if task_type == "data_download":
+        semantic = _inherit_download_semantics(semantic, context, text)
+        task_type = str(intent.get("intent") or semantic.get("intent") or task_type)
     if task_type == "unclear_request" and semantic.get("intent") != "unclear_request":
         task_type = str(semantic.get("intent") or task_type)
     if task_type == "data_download" and _has_dataset(context):

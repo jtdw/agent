@@ -181,7 +181,7 @@ export function ChatMessageList({
                     {isSystem && Array.isArray(m.meta?.upload_summaries) && <UploadResultCard summaries={m.meta.upload_summaries} />}
                     <ChatMessageRenderer
                       message={m}
-                      content={isUser || isSystem ? m.content : assistantReplyContent(m.content)}
+                      content={isUser || isSystem ? m.content : m.meta?.streaming ? m.content : assistantReplyContent(m.content)}
                       isUser={isUser}
                       isSystem={isSystem}
                       resumeReady={resumeReadyJobIds.has(String(m.meta?.action_required?.job_id || ''))}

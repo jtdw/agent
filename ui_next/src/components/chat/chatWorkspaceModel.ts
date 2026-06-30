@@ -45,9 +45,18 @@ export function messageKey(message: ChatMessage) {
 export function messageIsToolTask(message: ChatMessage) {
   const meta = message.meta || {};
   const mode = String(meta.mode || '');
+  const responseMode = String(meta.response_mode || '');
   const actionType = String(meta.action_required?.type || '');
   const interactionType = String(meta.interaction_type || '');
   const reason = String(meta.reason || '');
+  if (
+    interactionType === 'chat_answer'
+    || mode === 'answer_only'
+    || responseMode === 'answer_only'
+    || reason === 'chat_only_direct_answer'
+  ) {
+    return false;
+  }
   return reason !== 'tool_mode_required' && (
     interactionType === 'tool_task'
     || Boolean(meta.task_card)
@@ -58,18 +67,87 @@ export function messageIsToolTask(message: ChatMessage) {
   );
 }
 
+function taskLifecycleIds(message: ChatMessage) {
+  const meta = message.meta || {};
+  const mode = String(meta.mode || '');
+  const responseMode = String(meta.response_mode || '');
+  const interactionType = String(meta.interaction_type || '');
+  const reason = String(meta.reason || '');
+  if (
+    message.role !== 'assistant'
+    || interactionType === 'chat_answer'
+    || mode === 'answer_only'
+    || responseMode === 'answer_only'
+    || reason === 'chat_only_direct_answer'
+  ) {
+    return [];
+  }
+  const action = record(meta.action_required);
+  const management = record(meta.management_view || meta.download_management_view);
+  const card = record(meta.task_card);
+  const ids = [
+    action.confirmed_action_id,
+    meta.confirmed_pending_confirmation_id,
+    meta.confirmation_id,
+    action.job_id,
+    meta.job_id,
+    meta.task_id,
+    card.task_id,
+    management.task_id,
+    management.job_id,
+  ];
+  const seen = new Set<string>();
+  return ids
+    .map((value) => String(value || '').trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+}
+
+function shouldConsumePreviousAction(existing: ChatMessage, incoming: ChatMessage) {
+  if (!messageIsToolTask(existing) || !messageIsToolTask(incoming)) return false;
+  const meta = incoming.meta || {};
+  if (meta.action_required) return false;
+  const status = String(meta.status || record(meta.task_card).status || record(meta.management_view || meta.download_management_view).status || '').toLowerCase();
+  return Boolean(
+    meta.job_id
+    || meta.task_id
+    || meta.management_view
+    || meta.download_management_view
+    || meta.presentation_result
+    || ['queued', 'running', 'success', 'succeeded', 'completed', 'complete', 'failed', 'cancelled', 'canceled'].includes(status)
+  );
+}
+
+function mergeRenderMessage(existing: ChatMessage, incoming: ChatMessage) {
+  const mergedMeta = { ...(existing.meta || {}), ...(incoming.meta || {}) } as NonNullable<ChatMessage['meta']>;
+  if (shouldConsumePreviousAction(existing, incoming)) {
+    delete mergedMeta.action_required;
+  }
+  return {
+    ...existing,
+    ...incoming,
+    id: existing.id || incoming.id,
+    message_id: existing.message_id || incoming.message_id,
+    content: incoming.content || existing.content,
+    meta: mergedMeta,
+  };
+}
+
 export function buildRenderMessages(messages: ChatMessage[]) {
   const byKey = new Map<string, ChatMessage>();
+  const taskAliases = new Map<string, string>();
   messages.forEach((message) => {
-    const key = messageKey(message);
+    const lifecycleKeys = taskLifecycleIds(message).map((id) => `task:${id}`);
+    const key = lifecycleKeys.map((candidate) => taskAliases.get(candidate)).find(Boolean)
+      || lifecycleKeys[0]
+      || messageKey(message);
+    lifecycleKeys.forEach((candidate) => taskAliases.set(candidate, key));
     const existing = byKey.get(key);
     byKey.set(key, existing
-      ? {
-          ...existing,
-          ...message,
-          content: message.content || existing.content,
-          meta: { ...(existing.meta || {}), ...(message.meta || {}) },
-        }
+      ? mergeRenderMessage(existing, message)
       : message);
   });
   return Array.from(byKey.values());

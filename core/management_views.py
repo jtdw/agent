@@ -63,6 +63,11 @@ def _clean_text(value: Any, limit: int = 180) -> str:
         ":\\",
         "/users/",
         "\\users\\",
+        "/tmp/",
+        "/home/",
+        "/var/",
+        "/etc/",
+        "/root/",
         "session_",
         "user_id",
         "session_id",
@@ -109,6 +114,8 @@ def _artifact_refs(tool_result: dict[str, Any]) -> list[dict[str, str]]:
     for item in _as_list(tool_result.get("artifacts")):
         artifact = _as_dict(item)
         artifact_id = _clean_text(artifact.get("artifact_id") or artifact.get("id"), 120)
+        if artifact_id.startswith("download:"):
+            continue
         if not artifact_id or artifact_id in seen:
             continue
         seen.add(artifact_id)

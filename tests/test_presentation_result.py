@@ -386,6 +386,94 @@ class PresentationResultTests(unittest.TestCase):
         self.assertNotIn("Traceback", rendered)
         self.assertNotIn("job_1", rendered)
 
+    def test_sanitized_bundle_strips_legacy_private_fields_from_layer_and_table_refs(self) -> None:
+        bundle = build_presentation_bundle(
+            task_goal="render legacy migrated layer results",
+            task_plan_summary={"primary_goal": "legacy_layer_projection"},
+            coordinator_status="succeeded",
+            normalized_results=[
+                {
+                    "status": "succeeded",
+                    "step_id": "map",
+                    "tool_name": "plot_dataset",
+                    "outputs": {},
+                    "artifacts": [],
+                    "map_layers": [
+                        {
+                            "layer_id": "layer_safe",
+                            "name": "safe layer",
+                            "path": r"E:\agent\workspace\secret.geojson",
+                            "download_url": "/api/files/artifact?path=secret.geojson",
+                            "storage_state_path": "storage_state.json",
+                        }
+                    ],
+                    "tables": [
+                        {
+                            "table_id": "table_safe",
+                            "title": "safe table",
+                            "absolute_path": r"E:\agent\workspace\secret.csv",
+                            "download_url": "/downloads/secret.csv",
+                            "user_id": "u_secret",
+                        }
+                    ],
+                    "images": [],
+                    "warnings": [],
+                    "errors": [],
+                    "next_actions": [],
+                }
+            ],
+        )
+
+        rendered = json.dumps(bundle, ensure_ascii=False)
+
+        self.assertEqual(bundle["presentation_result"]["map_layer_refs"][0]["layer_id"], "layer_safe")
+        self.assertEqual(bundle["presentation_result"]["table_refs"][0]["table_id"], "table_safe")
+        self.assertNotIn("E:\\agent", rendered)
+        self.assertNotIn("download_url", rendered)
+        self.assertNotIn("storage_state_path", rendered)
+        self.assertNotIn("user_id", rendered)
+
+    def test_sanitized_bundle_strips_unix_private_paths_from_public_text(self) -> None:
+        bundle = build_presentation_bundle(
+            task_goal="handle migrated linux worker output",
+            task_plan_summary={"primary_goal": "linux_worker_output"},
+            coordinator_status="failed",
+            normalized_results=[
+                {
+                    "status": "failed",
+                    "step_id": "worker",
+                    "tool_name": "legacy_worker",
+                    "outputs": {"result_dataset": "safe_dataset"},
+                    "artifacts": [],
+                    "warnings": ["临时文件 /tmp/secret/intermediate.tif 已删除"],
+                    "errors": [{"code": "FAILED", "message": "日志位于 /home/app/private/worker.log"}],
+                    "next_actions": ["检查 /var/log/gis-agent/worker.log 后重试"],
+                }
+            ],
+        )
+
+        rendered = json.dumps(bundle, ensure_ascii=False)
+
+        self.assertIn("safe_dataset", rendered)
+        self.assertNotIn("/tmp/secret", rendered)
+        self.assertNotIn("/home/app/private", rendered)
+        self.assertNotIn("/var/log/gis-agent", rendered)
+
+    def test_result_interpreter_fallback_strips_unix_private_paths(self) -> None:
+        from core.result_interpreter import interpret_result
+
+        reply = interpret_result(
+            "解释失败原因",
+            {"intent": "troubleshooting"},
+            {"task_type": "troubleshooting"},
+            "失败日志见 /tmp/secret/runtime.log",
+            {},
+            {},
+        )
+
+        self.assertNotIn("/tmp/secret", reply)
+        self.assertIn("No canonical execution facts", reply)
+
     def test_raw_workflow_and_tool_outputs_are_adapted_to_presentation_bundle(self) -> None:
         plan = {
             "plan_id": "plan_1",

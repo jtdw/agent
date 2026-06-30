@@ -172,7 +172,7 @@ export function AnalysisPanel({ userId = '', sessionId = '', resultPanel = null,
                               disabled={!item.artifactId || downloadingArtifactId === item.artifactId}
                               onClick={() => {
                                 onChatContextChange?.({
-                                  selected_artifact_id: item.artifactId || item.label,
+                                  selected_artifact_id: item.artifactId,
                                   selected_artifact_type: item.kind,
                                   last_visible_panel: 'analysis',
                                   user_focus_hint: `selected artifact ${item.label}`

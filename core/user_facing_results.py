@@ -10,6 +10,40 @@ from uuid import uuid4
 
 from .tool_contracts import is_tool_result_success
 
+_PRIVATE_DETAIL_KEYS = {
+    "path",
+    "absolute_path",
+    "relative_path",
+    "display_path",
+    "source_path",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "url",
+    "direct_url",
+    "local_file_path",
+    "request_text",
+    "status_path",
+    "log_path",
+    "storage_state_path",
+    "state_path",
+    "user_id",
+    "session_id",
+    "account_id",
+    "token",
+    "password",
+    "cookie",
+    "cookies",
+}
+_PRIVATE_DETAIL_TEXT_MARKERS = (
+    "traceback",
+    "storage_state",
+    "token=",
+    "cookie",
+    "/api/files/artifact",
+    "/api/downloads/artifact",
+)
+
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
@@ -34,6 +68,45 @@ def _fmt(value: Any, digits: int = 4) -> str:
     if parsed is None:
         return "--"
     return f"{parsed:.{digits}g}"
+
+
+def _looks_private_detail_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if not text:
+        return False
+    if any(marker in lowered for marker in _PRIVATE_DETAIL_TEXT_MARKERS):
+        return True
+    if (
+        ":\\" in text
+        or "\\workspace\\" in text
+        or "/workspace/" in text
+        or text.startswith(("/tmp/", "/home/", "/var/", "/etc/", "/root/", "/Users/"))
+    ):
+        return True
+    if text.startswith(("http://", "https://", "file:", "/api/files/artifact", "/api/downloads/artifact")):
+        return True
+    return False
+
+
+def _public_detail_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _PRIVATE_DETAIL_KEYS:
+                continue
+            cleaned = _public_detail_value(item)
+            if cleaned in ({}, [], ""):
+                continue
+            output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        output = [_public_detail_value(item) for item in value]
+        return [item for item in output if item not in ({}, [], "")]
+    if isinstance(value, str):
+        return "" if _looks_private_detail_text(value) else value[:500]
+    return value
 
 
 def _filename(artifact: dict[str, Any]) -> str:
@@ -100,6 +173,16 @@ def _artifact_title(artifact: dict[str, Any], filename: str, kind: str) -> str:
             return "预测空间分布图"
         return str(artifact.get("title") or "图像结果")
     return str(artifact.get("title") or filename)
+
+
+def _canonical_download_url(artifact: dict[str, Any], artifact_id: str) -> str:
+    if not artifact_id:
+        return ""
+    url = str(artifact.get("download_url") or "").strip()
+    prefix = f"/api/artifacts/{artifact_id}/download"
+    if url == prefix or url.startswith(f"{prefix}?"):
+        return url
+    return ""
 
 
 def _artifact_group(artifact: dict[str, Any], filename: str, kind: str, title: str) -> str:
@@ -179,13 +262,14 @@ def public_artifact_card(artifact: dict[str, Any], *, include_preview: bool = Tr
     title = _artifact_title(artifact, filename, kind)
     group = _artifact_group(artifact, filename, kind, title)
     mime_type = _mime_type(artifact, filename)
+    artifact_id = str(artifact.get("artifact_id") or artifact.get("id") or "")
     previewable = kind in {"image", "table", "json", "markdown", "gis"} and kind != "model"
     raw_path = str(artifact.get("path") or artifact.get("absolute_path") or "")
     status = "available"
     if raw_path and (not Path(raw_path).exists() or not Path(raw_path).is_file()):
         status = "missing"
     card = {
-        "artifact_id": str(artifact.get("artifact_id") or artifact.get("id") or ""),
+        "artifact_id": artifact_id,
         "title": title,
         "description": str(artifact.get("description") or ""),
         "filename": filename,
@@ -195,7 +279,7 @@ def public_artifact_card(artifact: dict[str, Any], *, include_preview: bool = Tr
         "mime_type": mime_type,
         "previewable": bool(previewable),
         "preview_available": bool(artifact.get("preview_available") or previewable),
-        "download_url": str(artifact.get("download_url") or ""),
+        "download_url": _canonical_download_url(artifact, artifact_id),
         "group": group,
         "priority": _priority(title, group, filename),
         "hidden_by_default": group == "高级诊断",
@@ -634,6 +718,8 @@ def build_user_facing_result(value: Any, *, manager: Any = None, context: dict[s
         return build_user_facing_result_from_tool_results([payload], manager=manager)
     if isinstance(value, list):
         return build_user_facing_result_from_tool_results(value, manager=manager)
+    public_details = _public_detail_value(payload)
+    technical_details = public_details if isinstance(public_details, dict) else {}
     return {
         "schema_version": "user-facing-result/v1",
         "summary": str(payload.get("summary") or payload.get("message") or "任务结果已生成。"),
@@ -647,7 +733,7 @@ def build_user_facing_result(value: Any, *, manager: Any = None, context: dict[s
         "insights": [],
         "warnings": [],
         "next_actions": [],
-        "technical_details": {"raw_result": payload},
+        "technical_details": technical_details,
         "debug": {},
     }
 

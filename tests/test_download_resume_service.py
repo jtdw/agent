@@ -28,6 +28,8 @@ class DownloadResumeServiceTests(unittest.TestCase):
         result = self.service.resume("u_1", job["job_id"])
 
         self.assertEqual(result["reason"], "clarification_required")
+        self.assertNotIn("job", result)
+        self.assertEqual(result["management_view"]["task_id"], job["job_id"])
         self.assertEqual(result["action_required"]["missing_parameters"], ["region"])
         self.start_download.assert_not_called()
 
@@ -39,6 +41,8 @@ class DownloadResumeServiceTests(unittest.TestCase):
         result = self.service.resume("u_1", job["job_id"])
 
         self.assertEqual(result["reason"], "login_required")
+        self.assertNotIn("job", result)
+        self.assertEqual(result["management_view"]["task_id"], job["job_id"])
         self.assertEqual(result["action_required"]["job_id"], job["job_id"])
         self.start_download.assert_not_called()
 
@@ -50,6 +54,8 @@ class DownloadResumeServiceTests(unittest.TestCase):
         result = self.service.resume("u_1", job["job_id"])
 
         self.assertTrue(result["auto_started"])
+        self.assertNotIn("job", result)
+        self.assertEqual(result["management_view"]["task_id"], job["job_id"])
         self.start_download.assert_called_once()
         self.assertEqual(self.start_download.call_args.args[0]["job_id"], job["job_id"])
 

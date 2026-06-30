@@ -105,6 +105,22 @@ const messages = [
     }
   },
   {
+    id: 'chat-answer-stale-card',
+    role: 'assistant',
+    content: '普通聊天回答，不应进入任务栏。',
+    meta: {
+      mode: 'answer_only',
+      response_mode: 'answer_only',
+      interaction_type: 'chat_answer',
+      reason: 'chat_only_direct_answer',
+      task_card: {
+        task_id: 'stale_task_card',
+        status: 'running',
+        current_step: '旧任务卡残留'
+      }
+    }
+  },
+  {
     id: 'task-secret',
     role: 'assistant',
     content: '',
@@ -122,10 +138,80 @@ const messages = [
 ];
 
 const renderMessages = model.buildRenderMessages(messages);
-assert.equal(renderMessages.length, 3, 'render-message model should de-duplicate by stable message key');
+assert.equal(renderMessages.filter((message) => message.meta?.task_id === 'task_harness_running').length, 1, 'duplicate task messages with the same task id should collapse before rendering');
+
+const lifecycleMessages = [
+  {
+    id: 'confirm-card',
+    role: 'assistant',
+    content: '请确认执行成都 DEM 下载。',
+    meta: {
+      interaction_type: 'tool_task',
+      status: 'awaiting_confirmation',
+      action_required: {
+        type: 'confirmation_required',
+        confirmed_action_id: 'confirm_chengdu_dem'
+      },
+      task_card: {
+        title: '下载成都30m DEM'
+      }
+    }
+  },
+  {
+    id: 'download-running',
+    role: 'assistant',
+    content: '成都30m DEM 正在下载。',
+    meta: {
+      interaction_type: 'tool_task',
+      confirmed_pending_confirmation_id: 'confirm_chengdu_dem',
+      job_id: 'job_chengdu_dem',
+      status: 'running',
+      progress: 35,
+      management_view: {
+        task_id: 'job_chengdu_dem',
+        status: 'running'
+      }
+    }
+  },
+  {
+    id: 'download-complete',
+    role: 'assistant',
+    content: '成都30m DEM 下载完成，结果已注册。',
+    meta: {
+      interaction_type: 'tool_task',
+      job_id: 'job_chengdu_dem',
+      confirmed_pending_confirmation_id: 'confirm_chengdu_dem',
+      status: 'completed',
+      progress: 100,
+      management_view: {
+        task_id: 'job_chengdu_dem',
+        status: 'completed'
+      },
+      presentation_result: {
+        status: 'succeeded',
+        concise_summary: '成都30m DEM 下载完成，结果已注册。',
+        artifact_refs: [{ artifact_id: 'dem_result', title: '成都30m DEM.tif', type: 'raster' }],
+        next_action_suggestions: ['查看或下载结果文件']
+      }
+    }
+  }
+];
+
+const lifecycleRenderMessages = model.buildRenderMessages(lifecycleMessages);
+assert.equal(lifecycleRenderMessages.length, 1, 'one confirmed task lifecycle should render as one updated task card');
+assert.equal(lifecycleRenderMessages[0].content, '成都30m DEM 下载完成，结果已注册。');
+assert.equal(lifecycleRenderMessages[0].meta.status, 'completed');
+assert.equal(lifecycleRenderMessages[0].meta.action_required, undefined, 'completed task cards must not keep the old confirmation button');
+assert.equal(lifecycleRenderMessages[0].meta.presentation_result.artifact_refs[0].artifact_id, 'dem_result');
+assert.equal(renderMessages.length, 4, 'render-message model should de-duplicate by stable message key');
 
 const taskSummaryItems = model.buildChatTaskSummary(messages);
 assert.equal(taskSummaryItems.length, 2, 'task rail should include only assistant tool task messages');
+assert.equal(
+  taskSummaryItems.some((item) => item.id === 'stale_task_card' || item.id === 'chat-answer-stale-card'),
+  false,
+  'answer-only chat replies with stale task_card metadata must not be treated as tool tasks'
+);
 const runningItem = taskSummaryItems.find((item) => item.id === 'task_harness_running');
 assert.ok(runningItem, 'task rail should include the running synthetic task');
 assert.equal(runningItem.status, 'running');

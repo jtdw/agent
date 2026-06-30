@@ -106,7 +106,6 @@ export type ChatArtifact = {
   name?: string;
   title?: string;
   filename?: string;
-  path?: string;
   description?: string;
   type?: string;
   kind?: string;
@@ -116,7 +115,6 @@ export type ChatArtifact = {
   size_kb?: number;
   created_at?: string;
   updated_at?: string;
-  download_url?: string;
   group?: string;
   priority?: number;
   previewable?: boolean;
@@ -127,6 +125,10 @@ export type ChatArtifact = {
   status?: 'available' | 'missing' | string;
   source?: { tool_name?: string; workflow_id?: string; [key: string]: unknown };
   meta?: Record<string, unknown>;
+};
+
+export type ResolvedArtifactMetadata = ChatArtifact & {
+  download_url?: string;
 };
 
 export type UserFacingResult = {
@@ -262,7 +264,7 @@ export type AdminSystemResetResponse = {
 export type StorageCleanupCandidate = {
   candidate_id: string;
   category: string;
-  path: string;
+  label?: string;
   kind?: string;
   file_count?: number;
   size_bytes?: number;
@@ -272,7 +274,6 @@ export type StorageCleanupCandidate = {
 
 export type StorageCleanupScanResponse = {
   schema_version: string;
-  root: string;
   candidates: StorageCleanupCandidate[];
   total_candidates: number;
   total_size_bytes: number;
@@ -282,7 +283,7 @@ export type StorageCleanupScanResponse = {
 export type StorageCleanupDeleteResponse = {
   ok: boolean;
   schema_version: string;
-  deleted: Array<{ candidate_id: string; path: string; files?: number; bytes?: number }>;
+  deleted: Array<{ candidate_id: string; label?: string; files?: number; bytes?: number }>;
   errors: string[];
   deleted_count: number;
   freed_bytes: number;
@@ -337,7 +338,6 @@ export type UploadSummary = {
   size_bytes?: number;
   row_count?: number;
   dataset_name?: string;
-  path?: string;
   message?: string;
 };
 
@@ -349,7 +349,6 @@ export type WorkspaceMention = {
   label?: string;
   description?: string;
   filename?: string;
-  path?: string;
   row_count?: number | null;
   column_count?: number | null;
   crs?: string;
@@ -411,11 +410,9 @@ export type WorkspaceArtifact = {
   name?: string;
   title?: string;
   filename?: string;
-  path: string;
   type?: string;
   size?: number;
   updated_at?: string;
-  download_url?: string;
   status?: 'available' | 'missing' | string;
 };
 
@@ -425,8 +422,6 @@ export type ResultPanelFile = {
   name?: string;
   title?: string;
   filename?: string;
-  path?: string;
-  download_url?: string;
   kind?: string;
 };
 
@@ -470,9 +465,6 @@ export type DownloadJob = {
   progress?: number;
   stage?: string;
   error_message?: string;
-  output_path?: string;
-  zip_path?: string;
-  download_url?: string;
   artifacts?: ChatArtifact[];
   charged?: number;
   quota_reserved?: number;
@@ -527,6 +519,46 @@ export type DiagnosticEventView = {
   next_action?: string;
 };
 
+export type DownloadArtifactRef = { artifact_id: string; title?: string; type?: string };
+
+export type DownloadManagementListResponse = {
+  management_views?: DownloadManagementView[];
+  artifact_refs?: DownloadArtifactRef[];
+  available_actions?: string[];
+  deprecated_raw_job_api?: boolean;
+};
+
+export type DownloadManagementActionResponse = DownloadManagementListResponse & {
+  ok?: boolean;
+  management_view?: DownloadManagementView;
+  auto_supported?: boolean;
+  auto_started?: boolean;
+  reason?: string;
+  action_required?: ChatActionRequired;
+};
+
+export type DownloadSubmitResponse = DownloadManagementActionResponse & {
+  presentation_result?: PresentationResult;
+  execution_summary?: ExecutionSummary;
+};
+
+export type DownloadJobLogResponse = {
+  management_view?: DownloadManagementView;
+  diagnostic_event_views?: {
+    scene_jobs?: DiagnosticEventView[];
+    tile_jobs?: DiagnosticEventView[];
+    audit_events?: DiagnosticEventView[];
+  };
+  artifact_refs?: DownloadArtifactRef[];
+  available_actions?: string[];
+  deprecated_raw_job_api?: boolean;
+};
+
+export type DownloadDeleteResponse = DownloadManagementListResponse & {
+  ok: boolean;
+  deleted_job_id: string;
+};
+
 export type LoginHealthResponse = {
   source_key: string;
   account_mode: string;
@@ -534,7 +566,6 @@ export type LoginHealthResponse = {
     ok?: boolean;
     reason?: string;
     action?: string;
-    path?: string;
     detail?: string;
     [key: string]: unknown;
   };
@@ -582,7 +613,6 @@ export type WorkspaceDashboard = {
     gcp_metric_rows?: Array<Record<string, unknown>>;
   };
   latest_pipeline?: Record<string, unknown> | null;
-  workdir?: string;
   current_session_id?: string;
   sessions?: ChatSession[];
   messages?: ChatMessage[];
@@ -605,7 +635,7 @@ export type LocalLibraryItem = {
   name: string;
   category: string;
   data_type: string;
-  path: string;
+  filename?: string;
   description?: string;
   tags?: string[];
   region?: string;
@@ -622,9 +652,6 @@ export type LocalLibraryItem = {
 };
 
 export type LocalLibraryResponse = {
-  root: string;
-  data_dir: string;
-  manifest_path: string;
   items: LocalLibraryItem[];
   categories: string[];
   data_types: string[];
@@ -945,7 +972,7 @@ export const api = {
     if (user_id) q.set('user_id', user_id);
     if (session_id) q.set('session_id', session_id);
     const query = q.toString();
-    return request<ChatArtifact>(`/api/artifacts/${encodeURIComponent(artifact_id)}${query ? `?${query}` : ''}`);
+    return request<ResolvedArtifactMetadata>(`/api/artifacts/${encodeURIComponent(artifact_id)}${query ? `?${query}` : ''}`);
   },
   async downloadArtifactById(artifact_id: string, fallbackName = 'download', user_id?: string, session_id?: string) {
     const q = new URLSearchParams();
@@ -983,19 +1010,19 @@ export const api = {
     return request<{ items: WorkspaceMention[]; count: number }>(`/api/workspace/mentions${q}`);
   },
   async exportWorkspace(user_id?: string, session_id?: string, mode: 'latest' | 'all' = 'all') {
-    return request<{ zip_path: string; download_url?: string; file_count: number }>('/api/workspace/export', {
+    return request<{ artifact_id: string; download_url?: string; file_count: number; mode?: 'latest' | 'all' | string }>('/api/workspace/export', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', mode })
     });
   },
-  async deleteWorkspaceArtifact(input: { user_id?: string; session_id?: string; artifact_id?: string; path?: string }) {
-    return request<{ ok: boolean; path: string; deleted_files: string[]; deleted_artifacts: string[]; deleted_datasets: string[]; dashboard: WorkspaceDashboard }>('/api/workspace/artifacts/delete', {
+  async deleteWorkspaceArtifact(input: { user_id?: string; session_id?: string; artifact_id: string }) {
+    return request<{ ok: boolean; artifact_id: string; status: string; file_deleted: boolean; deleted_artifacts: string[]; deleted_datasets: string[]; dashboard: WorkspaceDashboard }>('/api/workspace/artifacts/delete', {
       method: 'POST',
-      body: JSON.stringify({ user_id: input.user_id || '', session_id: input.session_id || '', artifact_id: input.artifact_id || '', path: input.path || '' })
+      body: JSON.stringify({ user_id: input.user_id || '', session_id: input.session_id || '', artifact_id: input.artifact_id || '' })
     });
   },
   async runSoilMoistureWorkflow(user_id?: string, session_id?: string) {
-    return request<{ reply: string; model?: string; reason?: string }>('/api/workflows/shandian-soil-moisture', {
+    return request<{ reply: string; model?: string; reason?: string; messages?: ChatMessage[]; sessions?: ChatSession[]; current_session_id?: string; result_panel?: ResultPanel }>('/api/workflows/shandian-soil-moisture', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', run_now: true })
     });
@@ -1010,15 +1037,15 @@ export const api = {
     return request<LocalLibraryResponse>(`/api/local-library${q}`);
   },
   async rescanLocalLibrary() {
-    return request<{ ok: boolean; root: string; added: number; updated: number; total: number }>('/api/local-library/rescan', {
+    return request<{ ok: boolean; added: number; updated: number; total: number }>('/api/local-library/rescan', {
       method: 'POST',
       body: JSON.stringify({})
     });
   },
-  async importLocalLibrary(item_ids: string[], user_id?: string) {
+  async importLocalLibrary(item_ids: string[], user_id?: string, session_id?: string) {
     return request<{ ok: boolean; count: number; messages: string[]; dashboard: WorkspaceDashboard; task_outcome?: Record<string, unknown>; outcome_markdown?: string }>('/api/local-library/import', {
       method: 'POST',
-      body: JSON.stringify({ user_id: user_id || '', item_ids })
+      body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', item_ids })
     });
   },
   async capabilityResources(resource_type: CapabilityResourceType, params: { include_disabled?: boolean; admin_token?: string } = {}) {
@@ -1240,7 +1267,7 @@ export const api = {
     session_id?: string;
     include_raw?: boolean;
   }) {
-    return request<{ job?: unknown; management_view?: DownloadManagementView; management_views?: DownloadManagementView[]; artifact_refs?: Array<{ artifact_id: string; title?: string; type?: string }>; available_actions?: string[]; auto_supported?: boolean; auto_started?: boolean; reason?: string; auto_tile_job?: unknown; scene_job?: unknown; deprecated_raw_job_api?: boolean }>('/api/downloads/submit', {
+    return request<DownloadSubmitResponse>('/api/downloads/submit', {
       method: 'POST',
       body: JSON.stringify(input)
     });
@@ -1278,7 +1305,7 @@ export const api = {
     if (user_id) sp.set('user_id', user_id);
     if (session_id) sp.set('session_id', session_id);
     const q = sp.toString() ? `?${sp.toString()}` : '';
-    return request<{ jobs?: DownloadJob[]; management_views?: DownloadManagementView[]; deprecated_raw_job_api?: boolean }>(`/api/downloads/jobs${q}`);
+    return request<DownloadManagementListResponse>(`/api/downloads/jobs${q}`);
   },
   async loginHealth(user_id: string, source_key = 'gscloud', account_mode: 'own' | 'platform' | 'auto' = 'platform') {
     const q = `?user_id=${encodeURIComponent(user_id)}&source_key=${encodeURIComponent(source_key)}&account_mode=${encodeURIComponent(account_mode)}`;
@@ -1306,7 +1333,7 @@ export const api = {
     });
   },
   async resumeDownloadJob(job_id: string) {
-    return request<{ job: DownloadJob; management_view?: DownloadManagementView; auto_supported?: boolean; auto_started?: boolean; reason?: string; action_required?: ChatActionRequired }>(`/api/download-jobs/${encodeURIComponent(job_id)}/resume`, {
+    return request<DownloadManagementActionResponse>(`/api/download-jobs/${encodeURIComponent(job_id)}/resume`, {
       method: 'POST',
       body: JSON.stringify({})
     });
@@ -1315,7 +1342,7 @@ export const api = {
     const sp = new URLSearchParams({ user_id, job_id });
     if (session_id) sp.set('session_id', session_id);
     const q = `?${sp.toString()}`;
-    return request<{ job?: DownloadJob; management_view?: DownloadManagementView; diagnostic_event_views?: { scene_jobs?: DiagnosticEventView[]; tile_jobs?: DiagnosticEventView[]; audit_events?: DiagnosticEventView[] }; scene_jobs?: Array<Record<string, unknown>>; tile_jobs?: Array<Record<string, unknown>>; audit_events?: Array<Record<string, unknown>>; deprecated_raw_job_api?: boolean }>(`/api/downloads/jobs/log${q}`);
+    return request<DownloadJobLogResponse>(`/api/downloads/jobs/log${q}`);
   },
   async downloadJobLogFile(user_id: string, job_id: string, session_id?: string) {
     const sp = new URLSearchParams({ user_id, job_id });
@@ -1324,19 +1351,19 @@ export const api = {
     return downloadWithAuth(`/api/downloads/jobs/log-download${q}`, `${job_id}_log.txt`);
   },
   async deleteDownloadJob(job_id: string, user_id?: string, session_id?: string) {
-    return request<{ ok: boolean; deleted_job_id: string; jobs?: DownloadJob[]; management_views?: DownloadManagementView[]; deprecated_raw_job_api?: boolean }>('/api/downloads/jobs/delete', {
+    return request<DownloadDeleteResponse>('/api/downloads/jobs/delete', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', job_id })
     });
   },
   async cancelDownloadJob(job_id: string, user_id?: string, reason?: string, session_id?: string) {
-    return request<DownloadJob & { jobs?: DownloadJob[]; management_view?: DownloadManagementView; management_views?: DownloadManagementView[]; deprecated_raw_job_api?: boolean }>('/api/downloads/jobs/cancel', {
+    return request<DownloadManagementActionResponse>('/api/downloads/jobs/cancel', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', job_id, reason: reason || '用户取消任务。' })
     });
   },
   async retryDownloadJob(job_id: string, user_id?: string, session_id?: string) {
-    return request<{ job?: DownloadJob; jobs?: DownloadJob[]; management_view?: DownloadManagementView; management_views?: DownloadManagementView[]; auto_supported?: boolean; auto_started?: boolean; reason?: string; deprecated_raw_job_api?: boolean }>('/api/downloads/jobs/retry', {
+    return request<DownloadManagementActionResponse>('/api/downloads/jobs/retry', {
       method: 'POST',
       body: JSON.stringify({ user_id: user_id || '', session_id: session_id || '', job_id })
     });

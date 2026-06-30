@@ -21,7 +21,7 @@ from api.routes.chat_state import create_chat_state_router
 from api.routes.data_sources import create_data_sources_router
 from api.routes.downloads import create_downloads_router
 from api.routes.downloads_main import create_downloads_main_router
-from api.routes.local_library import create_local_library_router
+from api.routes.local_library import _public_local_library_response, create_local_library_router
 from api.routes.map import create_map_router
 from api.routes.payments import create_payments_router
 from api.routes.system import create_system_router
@@ -56,7 +56,7 @@ from core.management_views import download_job_to_management_view
 from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
 from core.tool_contracts import download_job_to_tool_result
 from core.api_utils import api_guard, resolve_child_path
-from core.local_library import LocalFileLibrary
+from core.local_library import LocalFileLibrary, resolve_local_library_root
 from core.map_layers import read_vector_for_map
 from core.capability_config import CapabilityConfigStore
 from core.dataset_availability import DatasetAvailabilityStore
@@ -109,7 +109,7 @@ except Exception:  # pragma: no cover
 
 base_settings = load_settings()
 commercial_service = CommercialService(base_settings.workdir)
-local_library_root = Path(os.getenv("GIS_AGENT_LOCAL_LIBRARY_DIR", str(base_settings.workdir / "local_library"))).expanduser()
+local_library_root = resolve_local_library_root(base_settings.workdir)
 local_library = LocalFileLibrary(local_library_root)
 _workspace_services: dict[str, GISWorkspaceService] = {}
 MAX_UPLOAD_FILES = int(os.getenv("GIS_AGENT_MAX_UPLOAD_FILES", "30") or 30)
@@ -427,7 +427,7 @@ app.include_router(
         require_request_user_if_present=_require_request_user_if_present,
         decorate_dashboard=lambda service, user_id="": _decorate_dashboard(service, user_id=user_id),
         build_workspace_mentions=lambda datasets: _build_workspace_mentions(datasets),
-        local_library_items=lambda: local_library.list_items(),
+        local_library_items=lambda: _public_local_library_response(local_library.list_items()),
         artifact_download_url=artifact_download_url,
         public_artifact_or_error=lambda service, artifact_id, user_id="", session_id="": _public_artifact_or_error(service, artifact_id, user_id=user_id, session_id=session_id),
         audit=_audit,
@@ -588,6 +588,8 @@ app.include_router(
         require_request_user_if_present=lambda request, user_id: _require_request_user_if_present(request, user_id),
         scoped_workspace_service=lambda user_id, session_id="": _scoped_workspace_service(user_id, session_id),
         workflow_prompt=lambda: SHANDIAN_WORKFLOW_PROMPT,
+        attach_chat_state=lambda service, response: attach_chat_state(service, response),
+        attach_result_panel=lambda service, user_id, response: _attach_result_panel(service, user_id, response),
         guard=guard,
     )
 )
@@ -650,23 +652,133 @@ def _ensure_downloadable_artifact(service: GISWorkspaceService, item: dict, *, u
 def _decorate_dashboard(service: GISWorkspaceService, user_id: str = "") -> dict:
     data = service.dashboard()
     session_id = str(getattr(service, "current_session_id", "") or "")
-    for item in data.get("artifacts", []):
-        if not isinstance(item, dict) or not item.get("path"):
-            continue
-        item = _ensure_downloadable_artifact(service, item, user_id=user_id, session_id=session_id)
-        artifact_id = str(item.get("artifact_id") or "")
-        if artifact_id:
-            item["download_url"] = artifact_download_url(artifact_id, user_id=user_id, session_id=session_id)
-    for result in data.get("model_results", []):
-        if not isinstance(result, dict):
-            continue
-        for artifact in result.get("artifacts", []):
-            if not isinstance(artifact, dict) or not artifact.get("path"):
-                continue
+    private_dashboard_keys = {
+        "path",
+        "absolute_path",
+        "relative_path",
+        "display_path",
+        "source_path",
+        "raw_path",
+        "output_path",
+        "status_path",
+        "metrics_path",
+        "figure_path",
+        "owner_user_id",
+        "session_id",
+        "download_url",
+        "diagnostics",
+    }
+
+    def public_dashboard_artifact(item: dict) -> dict:
+        artifact = dict(item)
+        if artifact.get("path"):
             artifact = _ensure_downloadable_artifact(service, artifact, user_id=user_id, session_id=session_id)
-            artifact_id = str(artifact.get("artifact_id") or "")
-            if artifact_id:
-                artifact["download_url"] = artifact_download_url(artifact_id, user_id=user_id, session_id=session_id)
+        artifact_id = str(artifact.get("artifact_id") or "").strip()
+        if artifact_id and artifact.get("path"):
+            try:
+                public = public_artifact_payload(artifact, workdir=service.manager.workdir, user_id=user_id, session_id=session_id)
+            except Exception:
+                public = {}
+        else:
+            public = {}
+        filename = str(public.get("filename") or artifact.get("filename") or artifact.get("name") or artifact.get("title") or artifact_id or "artifact")
+        size_bytes = int(public.get("size_bytes") or artifact.get("size_bytes") or 0)
+        payload = {
+            "artifact_id": artifact_id,
+            "filename": filename,
+            "name": str(public.get("name") or filename),
+            "title": str(public.get("title") or artifact.get("title") or filename),
+            "type": str(public.get("type") or artifact.get("type") or artifact.get("category") or "artifact"),
+            "size": size_bytes,
+            "size_kb": public.get("size_kb", artifact.get("size_kb")),
+            "status": "available" if not artifact.get("is_deleted") else "deleted",
+            "download_url": public.get("download_url") or (artifact_download_url(artifact_id, user_id=user_id, session_id=session_id) if artifact_id else ""),
+            "updated_at": str(public.get("updated_at") or artifact.get("updated_at") or artifact.get("modified") or ""),
+        }
+        return {key: value for key, value in payload.items() if value not in ("", None)}
+
+    def public_dashboard_dataset(item: dict) -> dict:
+        meta = dict(item.get("meta") or {}) if isinstance(item.get("meta"), dict) else {}
+        for private_key in ("path", "absolute_path", "relative_path", "display_path", "owner_user_id", "session_id"):
+            meta.pop(private_key, None)
+        raw_path = str(item.get("path") or item.get("display_path") or "")
+        filename = str(item.get("filename") or meta.get("original_filename") or (Path(raw_path).name if raw_path else "") or item.get("name") or "dataset")
+        columns = meta.get("columns") if isinstance(meta.get("columns"), list) else []
+        row_count = item.get("row_count", meta.get("rows", meta.get("row_count")))
+        column_count = item.get("column_count", len(columns) if columns else meta.get("column_count"))
+        payload = {
+            "id": str(item.get("id") or item.get("name") or filename),
+            "name": str(item.get("name") or item.get("dataset_name") or filename),
+            "label": str(item.get("label") or item.get("name") or item.get("dataset_name") or filename),
+            "type": str(item.get("type") or item.get("data_type") or "file"),
+            "filename": safe_download_filename(filename),
+            "row_count": row_count if isinstance(row_count, int) else None,
+            "column_count": column_count if isinstance(column_count, int) else None,
+            "crs": str(item.get("crs") or meta.get("crs") or ""),
+            "description": str(item.get("description") or ""),
+            "meta": meta,
+        }
+        return {key: value for key, value in payload.items() if value not in ("", None)}
+
+    def public_dashboard_text(value: Any) -> str:
+        text = str(value or "")
+        if not text:
+            return ""
+
+        def replace_path(match: re.Match[str]) -> str:
+            return Path(match.group(0).replace("\\", "/")).name or "文件"
+
+        text = re.sub(r"[A-Za-z]:[\\/][^\s`'\"，。；;]+", replace_path, text)
+        text = re.sub(r"workspace[\\/](?:users|sessions)[^\s`'\"，。；;]+", replace_path, text, flags=re.IGNORECASE)
+        return text
+
+    def public_dashboard_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            clean: dict[str, Any] = {}
+            for key, child in value.items():
+                if str(key) in private_dashboard_keys:
+                    continue
+                clean[str(key)] = public_dashboard_value(child)
+            return clean
+        if isinstance(value, list):
+            return [public_dashboard_value(item) for item in value]
+        if isinstance(value, str):
+            return public_dashboard_text(value)
+        return value
+
+    def public_dashboard_model_result(result: dict) -> dict:
+        raw_artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), list) else []
+        safe = public_dashboard_value({key: value for key, value in result.items() if key != "artifacts"})
+        if raw_artifacts:
+            safe["artifacts"] = [public_dashboard_artifact(artifact) if isinstance(artifact, dict) else artifact for artifact in raw_artifacts]
+        return safe
+
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    if summary:
+        summary = dict(summary)
+        if summary.get("last_plot"):
+            summary["last_plot"] = public_dashboard_text(summary.get("last_plot"))
+        data["summary"] = summary
+    if isinstance(data.get("activity"), list):
+        activity = []
+        for item in data["activity"]:
+            if not isinstance(item, dict):
+                activity.append(item)
+                continue
+            patched = dict(item)
+            if "detail" in patched:
+                patched["detail"] = public_dashboard_text(patched.get("detail"))
+            activity.append(patched)
+        data["activity"] = activity
+
+    if isinstance(data.get("datasets"), list):
+        data["datasets"] = [public_dashboard_dataset(item) if isinstance(item, dict) else item for item in data["datasets"]]
+    if isinstance(data.get("artifacts"), list):
+        data["artifacts"] = [public_dashboard_artifact(item) if isinstance(item, dict) else item for item in data["artifacts"]]
+    if isinstance(data.get("model_results"), list):
+        data["model_results"] = [public_dashboard_model_result(result) if isinstance(result, dict) else result for result in data["model_results"]]
+    if isinstance(data.get("latest_pipeline"), dict):
+        data["latest_pipeline"] = public_dashboard_value(data["latest_pipeline"])
     latest = data.get("latest_pipeline") if isinstance(data.get("latest_pipeline"), dict) else {}
     summary = latest.get("summary") if isinstance(latest, dict) and isinstance(latest.get("summary"), dict) else {}
     reports = summary.get("reports") if isinstance(summary.get("reports"), dict) else {}
@@ -725,7 +837,6 @@ def _build_workspace_mentions(datasets: list[dict[str, Any]]) -> dict:
                 "mention": f"@{{{name}}}",
                 "type": str(item.get("type") or item.get("data_type") or "file"),
                 "filename": filename,
-                "path": path,
                 "row_count": row_count if isinstance(row_count, int) else None,
                 "column_count": column_count if isinstance(column_count, int) else None,
                 "crs": str(item.get("crs") or meta.get("crs") or ""),
@@ -738,36 +849,6 @@ def _build_workspace_mentions(datasets: list[dict[str, Any]]) -> dict:
 
 def _build_result_panel(response: dict, dashboard: dict) -> dict:
     return _api_build_result_panel(response, dashboard)
-    outcome = response.get("task_outcome") if isinstance(response.get("task_outcome"), dict) else {}
-    files: list[dict] = []
-    seen: set[str] = set()
-    sources: list[dict] = []
-    for result in dashboard.get("model_results", []) if isinstance(dashboard.get("model_results"), list) else []:
-        if isinstance(result, dict):
-            sources.extend([item for item in result.get("artifacts", []) if isinstance(item, dict)])
-    sources.extend([item for item in dashboard.get("artifacts", []) if isinstance(item, dict)] if isinstance(dashboard.get("artifacts"), list) else [])
-    for item in sources:
-        path = str(item.get("path") or item.get("display_path") or "")
-        url = str(item.get("download_url") or "")
-        key = url or path
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        files.append(
-            {
-                "label": str(item.get("label") or item.get("name") or Path(path).name or "result file"),
-                "path": path,
-                "download_url": url,
-                "kind": str(item.get("type") or item.get("category") or "artifact"),
-            }
-        )
-    return {
-        "has_results": bool(outcome.get("has_results") or files),
-        "title": str(outcome.get("summary") or "Processing results"),
-        "files": files[:12],
-        "result_paths": outcome.get("result_paths") if isinstance(outcome.get("result_paths"), list) else [],
-        "recommendations": outcome.get("recommendations") if isinstance(outcome.get("recommendations"), list) else [],
-    }
 
 
 def _decorate_response_artifacts(service: GISWorkspaceService, user_id: str, response: dict) -> dict:
@@ -797,7 +878,7 @@ def _decorate_response_artifacts(service: GISWorkspaceService, user_id: str, res
         if filename:
             artifact["filename"] = safe_download_filename(filename)
             artifact["name"] = artifact.get("name") or artifact["filename"]
-        if artifact_id and not artifact.get("download_url"):
+        if artifact_id:
             artifact["download_url"] = artifact_download_url(artifact_id, user_id=user_id, session_id=session_id)
         for private_key in ("path", "absolute_path", "relative_path", "display_path", "owner_user_id", "session_id"):
             artifact.pop(private_key, None)
@@ -1019,8 +1100,22 @@ def _stream_task_update(response: dict[str, Any]) -> dict[str, Any]:
         "presentation_result",
         "confirmed_pending_confirmation_id",
         "reason",
+        "response_mode",
     }
-    return {key: meta[key] for key in allowed if key in meta}
+    update = {key: meta[key] for key in allowed if key in meta}
+    mode = str(update.get("mode") or response.get("mode") or "").strip()
+    response_mode = str(update.get("response_mode") or response.get("response_mode") or "").strip()
+    if mode == "answer_only" or response_mode == "answer_only":
+        clean = {
+            "mode": "answer_only",
+            "response_mode": "answer_only",
+            "interaction_type": "chat_answer",
+        }
+        reason = str(update.get("reason") or response.get("reason") or "").strip()
+        if reason:
+            clean["reason"] = reason
+        return clean
+    return update
 
 
 def _extract_region_from_prompt(prompt: str) -> str:
@@ -1120,6 +1215,13 @@ def _is_commercial_download_status_prompt(prompt: str) -> bool:
     return bool(re.search(r"\bjob_[A-Za-z0-9_\-]+\b", text)) and any(word in text for word in ("查看", "查询", "状态", "进度"))
 
 
+def _safe_status_file_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
     match = re.search(r"\b(job_[A-Za-z0-9_\-]+)\b", str(prompt or ""))
     if not match:
@@ -1154,16 +1256,15 @@ def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
     if job.get("error_message"):
         lines.append(f"- 错误信息：{job.get('error_message')}")
     if job.get("output_path"):
-        lines.append(f"- 输出路径：{job.get('output_path')}")
+        lines.append(f"- 输出文件：{_safe_status_file_label(job.get('output_path'))}")
     if job.get("zip_path"):
-        lines.append(f"- 结果压缩包：{job.get('zip_path')}")
+        lines.append(f"- 压缩包文件：{_safe_status_file_label(job.get('zip_path'))}")
     if latest_tile:
         lines.extend([
             "",
             f"关联自动分幅任务：{latest_tile.get('tile_job_id')}",
             f"- 分幅状态：{latest_tile.get('state') or '--'}",
             f"- 分幅进度说明：{latest_tile.get('message') or '--'}",
-            f"- 状态文件：{latest_tile.get('status_path') or '--'}",
         ])
         if latest_tile.get("error"):
             lines.append(f"- 分幅错误：{latest_tile.get('error')}")
@@ -1180,7 +1281,6 @@ def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
             f"- 场景状态：{latest_scene.get('state') or '--'}",
             f"- 场景进度说明：{latest_scene.get('message') or '--'}",
             f"- 数据筛选：{scene_filter}",
-            f"- 状态文件：{latest_scene.get('status_path') or '--'}",
         ])
         if latest_scene.get("error"):
             lines.append(f"- 场景错误：{latest_scene.get('error')}")
@@ -1195,7 +1295,7 @@ def _format_commercial_download_status(prompt: str, user_id: str) -> dict:
         lines.append("任务仍在后台运行，可以稍后再次查询状态。")
     elif status == "completed":
         lines.append("")
-        lines.append("任务已完成，可以在结果路径或压缩包位置查看输出。")
+        lines.append("任务已完成，可以在结果卡片或下载入口查看输出。")
     elif status == "failed":
         lines.append("")
         lines.append("任务失败，请根据错误信息修复后重新提交或重新启动下载。")

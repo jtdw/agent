@@ -352,15 +352,18 @@ function bindResultQuery(map: MapLibreMap, layerId: string, layer: ResultMapLaye
   map.on('click', layerId, (event) => {
     const feature = event.features?.[0];
     const props = feature?.properties as Record<string, unknown> | undefined;
-    onChatContextChange?.({
-      active_dataset_id: String(layer.meta?.dataset_name || layer.name || layer.id || ''),
+    const datasetId = String(layer.dataset_name || layer.meta?.dataset_name || '').trim();
+    const selectedFeatureId = String(props?.id || props?.station_id || feature?.id || '').trim();
+    const contextPatch: Partial<ChatContextPayload> = {
       selected_layer_id: String(layer.id || layerId),
-      selected_feature_id: String(props?.id || props?.station_id || props?.name || feature?.id || ''),
       selected_feature_properties: sanitizeFeatureProperties(props || {}),
       selected_map_bounds: mapBoundsPayload(map),
       last_visible_panel: 'map',
       user_focus_hint: `selected map layer ${layer.name || layer.id}`
-    });
+    };
+    if (datasetId) contextPatch.active_dataset_id = datasetId;
+    if (selectedFeatureId) contextPatch.selected_feature_id = selectedFeatureId;
+    onChatContextChange?.(contextPatch);
     const rows = Object.entries(props || {}).filter(([name, value]) => value !== null && value !== undefined && name !== 'kind').slice(0, 6);
     const body = rows.length
       ? rows.map(([name, value]) => `<div class="text-xs text-slate-500 mt-1">${escapeHtml(name)}：${escapeHtml(String(value))}</div>`).join('')

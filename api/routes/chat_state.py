@@ -28,12 +28,46 @@ def create_chat_state_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/chat", tags=["chat-state"])
 
+    def _decorate_state(service: Any, user_id: str, response: dict[str, Any]) -> dict[str, Any]:
+        return decorate_response_artifacts(service, user_id, response)
+
+    def _public_model_state(value: dict[str, Any]) -> dict[str, Any]:
+        output: dict[str, Any] = {}
+        for key in ("session_id", "route_mode", "selected_model", "active_model"):
+            if value.get(key) not in (None, ""):
+                output[key] = value.get(key)
+        models = []
+        for item in value.get("models", []) if isinstance(value.get("models"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            model: dict[str, Any] = {}
+            for key in ("id", "capability", "label", "provider", "available"):
+                if item.get(key) not in (None, ""):
+                    model[key] = item.get(key)
+            if model.get("id"):
+                models.append(model)
+        if models:
+            output["models"] = models
+        available_models = []
+        for item in value.get("available_models", []) if isinstance(value.get("available_models"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            model = {}
+            for key in ("id", "label", "provider", "available"):
+                if item.get(key) not in (None, ""):
+                    model[key] = item.get(key)
+            if model.get("id"):
+                available_models.append(model)
+        if available_models:
+            output["available_models"] = available_models
+        return output
+
     @router.get("/messages")
     def messages(request: Request, user_id: str = Query(default="")):
         def run():
             authorized_user_id = require_request_user_if_present(request, user_id)
             service = scoped_workspace_service(authorized_user_id, "")
-            return decorate_response_artifacts(service, authorized_user_id, {"messages": service.current_messages()})
+            return _decorate_state(service, authorized_user_id, {"messages": service.current_messages()})
 
         return guard(run)
 
@@ -111,7 +145,7 @@ def create_chat_state_router(
             service = scoped_workspace_service(authorized_user_id, "")
             if not service.current_session_id:
                 service.set_request_context(authorized_user_id, create_if_missing=True)
-            return decorate_response_artifacts(
+            return _decorate_state(
                 service,
                 authorized_user_id,
                 {
@@ -126,36 +160,47 @@ def create_chat_state_router(
     @router.post("/sessions")
     def create_chat_session(body: ChatSessionIn, request: Request):
         def run():
-            service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), "")
+            user_id = require_request_user_if_present(request, body.user_id)
+            service = scoped_workspace_service(user_id, "")
             session_id = service.create_new_session(body.title or None)
-            return {
-                "session_id": session_id,
-                "sessions": service.list_sessions(),
-                "current_session_id": service.current_session_id,
-                "messages": service.current_messages(),
-            }
+            return _decorate_state(
+                service,
+                user_id,
+                {
+                    "session_id": session_id,
+                    "sessions": service.list_sessions(),
+                    "current_session_id": service.current_session_id,
+                    "messages": service.current_messages(),
+                },
+            )
 
         return guard(run)
 
     @router.post("/sessions/switch")
     def switch_chat_session(body: ChatSessionIn, request: Request):
         def run():
-            service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), body.session_id)
+            user_id = require_request_user_if_present(request, body.user_id)
+            service = scoped_workspace_service(user_id, body.session_id)
             service.switch_session(body.session_id)
-            return {
-                "sessions": service.list_sessions(),
-                "current_session_id": service.current_session_id,
-                "messages": service.current_messages(),
-            }
+            return _decorate_state(
+                service,
+                user_id,
+                {
+                    "sessions": service.list_sessions(),
+                    "current_session_id": service.current_session_id,
+                    "messages": service.current_messages(),
+                },
+            )
 
         return guard(run)
 
     @router.post("/sessions/rename")
     def rename_chat_session(body: ChatSessionIn, request: Request):
         def run():
-            service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), body.session_id)
+            user_id = require_request_user_if_present(request, body.user_id)
+            service = scoped_workspace_service(user_id, body.session_id)
             service.rename_session(body.session_id, body.title)
-            return {"sessions": service.list_sessions(), "current_session_id": service.current_session_id}
+            return _decorate_state(service, user_id, {"sessions": service.list_sessions(), "current_session_id": service.current_session_id})
 
         return guard(run)
 
@@ -163,54 +208,73 @@ def create_chat_state_router(
     def delete_chat_session(body: ChatSessionIn, request: Request):
         def run():
             user_id = require_request_user_if_present(request, body.user_id)
-            compat_usage_store().record_effective_request(source="POST /api/chat/ask", actor_type=compat_actor_type(request))
+            compat_usage_store().record_effective_request(source="POST /api/chat/sessions/delete", actor_type=compat_actor_type(request))
             service = scoped_workspace_service(user_id, body.session_id)
             cancelled_download_jobs = cancel_session_jobs(user_id, body.session_id, reason="Session deleted.")
             current = service.delete_session(body.session_id)
             hard_deleted_downloads = hard_delete_session_jobs(user_id, body.session_id)
-            return {
-                "current_session_id": current,
-                "sessions": service.list_sessions(),
-                "messages": service.current_messages(),
-                "cancelled_download_jobs": cancelled_download_jobs,
-                "hard_deleted_downloads": hard_deleted_downloads,
-            }
+            return _decorate_state(
+                service,
+                user_id,
+                {
+                    "current_session_id": current,
+                    "sessions": service.list_sessions(),
+                    "messages": service.current_messages(),
+                    "cancelled_download_jobs": cancelled_download_jobs,
+                    "hard_deleted_downloads": hard_deleted_downloads,
+                },
+            )
 
         return guard(run)
 
     @router.post("/sessions/mode")
     def set_chat_interaction_mode(body: ChatSessionIn, request: Request):
         def run():
-            service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), body.session_id)
+            user_id = require_request_user_if_present(request, body.user_id)
+            service = scoped_workspace_service(user_id, body.session_id)
             mode = service.set_interaction_mode(body.interaction_mode or "chat_only", body.session_id or service.current_session_id)
-            return {
-                "interaction_mode": mode,
-                "sessions": service.list_sessions(),
-                "current_session_id": service.current_session_id,
-                "messages": service.current_messages(),
-            }
+            return _decorate_state(
+                service,
+                user_id,
+                {
+                    "interaction_mode": mode,
+                    "sessions": service.list_sessions(),
+                    "current_session_id": service.current_session_id,
+                    "messages": service.current_messages(),
+                },
+            )
 
         return guard(run)
 
     @router.post("/sessions/clear")
     def clear_chat_session(body: ChatSessionIn, request: Request):
         def run():
-            service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), body.session_id)
+            user_id = require_request_user_if_present(request, body.user_id)
+            service = scoped_workspace_service(user_id, body.session_id)
             service.clear_current_chat()
-            return {
-                "current_session_id": service.current_session_id,
-                "sessions": service.list_sessions(),
-                "messages": service.current_messages(),
-            }
+            return _decorate_state(
+                service,
+                user_id,
+                {
+                    "current_session_id": service.current_session_id,
+                    "sessions": service.list_sessions(),
+                    "messages": service.current_messages(),
+                },
+            )
 
         return guard(run)
 
     @router.post("/retry")
     def retry_chat_message(body: ChatRetryIn, request: Request):
         def run():
-            service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), body.session_id)
+            user_id = require_request_user_if_present(request, body.user_id)
+            service = scoped_workspace_service(user_id, body.session_id)
             result = service.edit_user_message_and_retry(body.message_id, body.content)
-            return {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id}
+            return _decorate_state(
+                service,
+                user_id,
+                {**result, "messages": service.current_messages(), "sessions": service.list_sessions(), "current_session_id": service.current_session_id},
+            )
 
         return guard(run)
 
@@ -218,7 +282,7 @@ def create_chat_state_router(
     def chat_models(request: Request, user_id: str = Query(default=""), session_id: str = Query(default="")):
         def run():
             service = scoped_workspace_service(require_request_user_if_present(request, user_id), session_id)
-            return service.chat_model_state(session_id or service.current_session_id)
+            return _public_model_state(service.chat_model_state(session_id or service.current_session_id))
 
         return guard(run)
 
@@ -226,7 +290,7 @@ def create_chat_state_router(
     def select_chat_model(body: ChatModelIn, request: Request):
         def run():
             service = scoped_workspace_service(require_request_user_if_present(request, body.user_id), body.session_id)
-            return service.select_chat_model(body.model, body.session_id or service.current_session_id)
+            return _public_model_state(service.select_chat_model(body.model, body.session_id or service.current_session_id))
 
         return guard(run)
 

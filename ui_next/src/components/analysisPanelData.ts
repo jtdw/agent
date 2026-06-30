@@ -20,7 +20,6 @@ export type AnalysisMetricRow = {
 export type AnalysisDownload = {
   artifactId: string;
   label: string;
-  url: string;
   kind: 'report' | 'chart' | 'artifact';
 };
 
@@ -142,7 +141,7 @@ function downloadFromArtifact(item: Record<string, unknown>): AnalysisDownload |
   const name = String(filename || item.label || item.name || '成果文件');
   const lower = name.toLowerCase();
   const kind: AnalysisDownload['kind'] = lower.match(/\.(png|jpg|jpeg|webp|svg)$/) ? 'chart' : lower.match(/\.(md|txt|docx|pdf|csv|xlsx)$/) ? 'report' : 'artifact';
-  return { artifactId, label: name, url: '', kind };
+  return { artifactId, label: name, kind };
 }
 
 function downloads(dashboard: unknown, resultPanel?: ResultPanel | null): AnalysisDownload[] {

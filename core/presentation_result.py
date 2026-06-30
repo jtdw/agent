@@ -83,7 +83,22 @@ def _as_list(value: Any) -> list[Any]:
 
 def _clean_text(value: Any, limit: int = 180) -> str:
     text = str(value or "").strip()
-    for marker in ("workspace\\", "workspace/", ":\\", "/users/", "\\users\\", "session_", "user_id", "session_id", "Traceback"):
+    for marker in (
+        "workspace\\",
+        "workspace/",
+        ":\\",
+        "/tmp/",
+        "/home/",
+        "/var/",
+        "/etc/",
+        "/root/",
+        "/users/",
+        "\\users\\",
+        "session_",
+        "user_id",
+        "session_id",
+        "Traceback",
+    ):
         if marker in text:
             return ""
     return text[:limit]
@@ -92,6 +107,25 @@ def _clean_text(value: Any, limit: int = 180) -> str:
 def _path_lookup_key(value: Any) -> str:
     text = str(value or "").strip()
     return text.replace("\\", "/").lower()
+
+
+def _safe_ref_list(items: Any, *, id_key: str, label_keys: tuple[str, ...]) -> list[dict[str, str]]:
+    output: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in _as_list(items):
+        if not isinstance(item, dict):
+            continue
+        ref_id = _clean_text(item.get(id_key) or item.get("id"), 120)
+        if not ref_id or ref_id in seen:
+            continue
+        seen.add(ref_id)
+        ref: dict[str, str] = {id_key: ref_id}
+        for key in label_keys:
+            value = _clean_text(item.get(key), 120)
+            if value:
+                ref[key] = value
+        output.append(ref)
+    return output
 
 
 def _parse_llm_payload(raw: Any) -> dict[str, Any] | None:
@@ -553,8 +587,8 @@ def sanitize_normalized_results(normalized_results: list[Any]) -> list[dict[str,
                 "errors": [{"code": _clean_text(error.get("code"), 80), "message": _clean_text(error.get("message"), 180)} for error in _as_list(item.get("errors")) if isinstance(error, dict)],
                 "warnings": [_clean_text(value, 180) for value in _as_list(item.get("warnings")) if _clean_text(value, 180)],
                 "artifacts": artifacts,
-                "map_layers": _as_list(item.get("map_layers")),
-                "tables": _as_list(item.get("tables")),
+                "map_layers": _safe_ref_list(item.get("map_layers"), id_key="layer_id", label_keys=("name", "title", "type")),
+                "tables": _safe_ref_list(item.get("tables"), id_key="table_id", label_keys=("title", "name", "type")),
                 "images": images,
                 "outputs": outputs,
                 "diagnostics": diagnostics,

@@ -5,7 +5,6 @@ export type ChatContextPayload = {
   active_dataset_id?: string;
   selected_artifact_id?: string;
   selected_artifact_type?: string;
-  selected_artifact_path?: string;
   selected_layer_id?: string;
   selected_feature_id?: string;
   selected_feature_properties?: Record<string, string | number | boolean | null>;
@@ -21,7 +20,6 @@ const allowedKeys = new Set([
   'active_dataset_id',
   'selected_artifact_id',
   'selected_artifact_type',
-  'selected_artifact_path',
   'selected_layer_id',
   'selected_feature_id',
   'selected_feature_properties',

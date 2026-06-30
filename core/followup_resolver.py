@@ -63,13 +63,37 @@ def _first_artifact(state: dict[str, Any], dashboard: dict[str, Any]) -> dict[st
     return None
 
 
+def _artifact_id(item: dict[str, Any]) -> str:
+    return str(item.get("artifact_id") or item.get("id") or "").strip()
+
+
+def _artifact_label(item: dict[str, Any], fallback: str = "成果文件") -> str:
+    return str(
+        item.get("title")
+        or item.get("label")
+        or item.get("name")
+        or item.get("filename")
+        or item.get("original_filename")
+        or _artifact_id(item)
+        or fallback
+    )
+
+
+def _public_artifact_data(item: dict[str, Any]) -> dict[str, Any]:
+    private = {"path", "display_path", "download_url", "absolute_path", "relative_path", "url"}
+    return {key: value for key, value in item.items() if key not in private}
+
+
 def _object_from_artifact(item: dict[str, Any], fallback_type: str = "artifact") -> dict[str, Any]:
-    return {
+    artifact_id = _artifact_id(item)
+    referenced = {
         "type": fallback_type,
-        "label": str(item.get("label") or item.get("name") or item.get("display_path") or item.get("path") or "成果文件"),
-        "path": str(item.get("path") or item.get("display_path") or item.get("download_url") or ""),
-        "data": item,
+        "label": _artifact_label(item),
+        "data": _public_artifact_data(item),
     }
+    if artifact_id:
+        referenced["id"] = artifact_id
+    return referenced
 
 
 def _frontend_artifact_object(item: dict[str, Any], dashboard: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -78,25 +102,16 @@ def _frontend_artifact_object(item: dict[str, Any], dashboard: dict[str, Any] | 
     if matched:
         return {
             "type": "artifact",
-            "label": str(
-                matched.get("title")
-                or matched.get("label")
-                or matched.get("name")
-                or matched.get("display_path")
-                or matched.get("path")
-                or artifact_id
-            ),
+            "label": _artifact_label(matched, artifact_id or "selected artifact"),
             "id": artifact_id,
-            "path": str(matched.get("path") or matched.get("display_path") or matched.get("download_url") or item.get("path") or ""),
-            "data": matched,
+            "data": _public_artifact_data(matched),
             "source": "frontend_context",
         }
     return {
         "type": "artifact",
-        "label": str(item.get("id") or item.get("path") or "selected artifact"),
+        "label": _artifact_label(item, artifact_id or "selected artifact"),
         "id": artifact_id,
-        "path": str(item.get("path") or ""),
-        "data": item,
+        "data": _public_artifact_data(item),
         "source": "frontend_context",
     }
 

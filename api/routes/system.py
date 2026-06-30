@@ -36,7 +36,7 @@ def create_system_router(
                 "version": "1.4.0",
                 "profile": "Web-only / LangChain 交互式 GIS 智能体 / 土壤水分融合建模 / 本地文件库 / 天地图底图与数据服务 / 国内资源下载 / 商业化账号体系",
                 "desktop_removed": True,
-                "local_library": {"enabled": True, "root": str(local_library_root())},
+                "local_library": {"enabled": True},
                 "tianditu": {"enabled": bool(os.getenv("TIANDITU_TOKEN", "").strip())},
                 "llm_status": {
                     "status": llm_validation.get("status"),

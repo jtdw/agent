@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { type ChatArtifact, type ChatMessage, type PresentationResult, type UserFacingResult } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { ArtifactDownloadCard } from './ArtifactDownloadCard';
+import { messageIsToolTask } from './chat/chatWorkspaceModel';
 import { TaskStatusCard, ResultGroups, artifactKey, stableTextKey, statusLabel, technicalDetailsEnabled } from './chat/task-card';
 
 function useCopyToast() {
@@ -294,19 +295,8 @@ export function ChatMessageRenderer({
   const jobId = String(action?.job_id || '');
   const confirmationPrompt = String(action?.confirmation_prompt || '');
   const confirmedActionId = String(action?.confirmed_action_id || '');
-  const mode = String(message.meta?.mode || '');
-  const reason = String(message.meta?.reason || '');
   const streaming = Boolean(message.meta?.streaming);
-  const interactionType = String(message.meta?.interaction_type || '');
-  const hasTaskCard = !isUser && !isSystem && reason !== 'tool_mode_required' && (
-    interactionType === 'tool_task'
-    ||
-    Boolean(message.meta?.task_card)
-    || Boolean(message.meta?.management_view)
-    || Boolean(message.meta?.download_management_view)
-    || ['background_worker', 'validated_download_executor', 'coordinated_workflow', 'validated_workflow_executor', 'validated_tool_executor'].includes(mode)
-    || ['confirmation_required', 'login_required'].includes(String(action?.type || ''))
-  );
+  const hasTaskCard = !isUser && !isSystem && messageIsToolTask(message);
   const showConversationText = !hasTaskCard || (!presentationResult && !action);
 
   useEffect(() => {

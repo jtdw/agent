@@ -29,6 +29,8 @@ assert.match(api, /downloadArtifactById/, 'api.ts must expose artifact-id based 
 assert.match(api, /\/api\/artifacts\/\$\{encodeURIComponent\(artifact_id\)\}\/download/, 'artifact download must use the backend artifact resolver endpoint');
 assert.match(artifactCard, /api\.downloadArtifactById\(resolved\.artifact_id/, 'ArtifactDownloadCard must download by artifact_id');
 assert.doesNotMatch(artifactCard, /downloadNative\(resolvedDownloadUrl|downloadAuthenticated\(resolvedDownloadUrl/, 'ArtifactDownloadCard must not download from stale raw download_url');
+assert.doesNotMatch(artifactCard, /resolved\.download_url\s*\|\|/, 'ArtifactDownloadCard image previews must not use stale raw download_url before artifact metadata resolves');
+assert.match(artifactCard, /resolvedArtifact\?\.download_url/, 'ArtifactDownloadCard image previews must use resolver metadata URLs');
 assert.match(artifactCard, /文件已清理、无访问权限或下载链接已失效/, 'ArtifactDownloadCard must show a Chinese resolver failure message');
 
 console.log('p0ChatAndArtifactRegression.test.mjs passed');

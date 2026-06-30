@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
 
 from .conversation_state import ConversationState
 
@@ -13,7 +12,6 @@ ALLOWED_CONTEXT_KEYS = {
     "active_dataset_id",
     "selected_artifact_id",
     "selected_artifact_type",
-    "selected_artifact_path",
     "selected_layer_id",
     "selected_feature_id",
     "selected_feature_properties",
@@ -87,30 +85,6 @@ def _sanitize_bounds(value: Any) -> list[float] | None:
     return bounds
 
 
-def _sanitize_artifact_path(value: Any) -> str:
-    text = _clean_string(value, MAX_STRING_LENGTH)
-    if not text:
-        return ""
-    lowered = text.lower()
-    parsed = urlparse(text)
-    if parsed.scheme:
-        return ""
-    if lowered.startswith(("data:", "javascript:", "file:", "http:", "https:")):
-        return ""
-    if re.match(r"^[a-zA-Z]:[\\/]", text):
-        return ""
-    decoded = unquote(text).replace("\\", "/")
-    if decoded.startswith("/api/files/artifact?"):
-        query_path = parse_qs(urlparse(decoded).query).get("path", [""])[0]
-        return _sanitize_artifact_path(query_path)
-    if decoded.startswith("/"):
-        return ""
-    parts = [part for part in decoded.split("/") if part]
-    if any(part == ".." for part in parts):
-        return ""
-    return text
-
-
 def sanitize_frontend_context(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
@@ -129,10 +103,6 @@ def sanitize_frontend_context(payload: Any) -> dict[str, Any]:
             bounds = _sanitize_bounds(value)
             if bounds:
                 clean[key] = bounds
-        elif key == "selected_artifact_path":
-            artifact_path = _sanitize_artifact_path(value)
-            if artifact_path:
-                clean[key] = artifact_path
         else:
             if not _looks_sensitive_value(value):
                 clean[key] = _clean_string(value)
@@ -146,13 +116,11 @@ def sanitize_frontend_context(payload: Any) -> dict[str, Any]:
 
 def _selected_artifact(payload: dict[str, Any]) -> dict[str, Any] | None:
     artifact_id = str(payload.get("selected_artifact_id") or "")
-    path = str(payload.get("selected_artifact_path") or "")
-    if not artifact_id and not path:
+    if not artifact_id:
         return None
     return {
         "id": artifact_id,
         "type": str(payload.get("selected_artifact_type") or "artifact"),
-        "path": path,
         "source": "frontend_context",
     }
 
@@ -167,15 +135,19 @@ def apply_frontend_context_to_state(state: ConversationState, payload: Any) -> C
     artifact = _selected_artifact(context)
     if artifact:
         state.selected_artifact = artifact
-        state.referenced_object = {"type": "artifact", "label": artifact.get("id") or artifact.get("path"), "path": artifact.get("path"), "data": artifact, "source": "frontend_context"}
+        state.referenced_object = {
+            "type": "artifact",
+            "id": artifact["id"],
+            "label": artifact["id"],
+            "data": artifact,
+            "source": "frontend_context",
+        }
     if context.get("selected_layer_id"):
         state.selected_layer = {"id": context["selected_layer_id"], "source": "frontend_context"}
         if not state.referenced_object:
             state.referenced_object = {
-                "type": "dataset",
+                "type": "layer",
                 "id": context["selected_layer_id"],
-                "dataset_id": context["selected_layer_id"],
-                "name": context["selected_layer_id"],
                 "label": context["selected_layer_id"],
                 "source": "frontend_context",
             }

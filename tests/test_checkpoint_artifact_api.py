@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -100,7 +101,152 @@ class CheckpointArtifactApiTests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["file_deleted"])
+        self.assertNotIn("deleted_files", payload)
+        self.assertNotIn(str(self.service.manager.workdir), str(payload))
         self.assertFalse(path.exists())
+
+    def test_workspace_dashboard_does_not_expose_workdir(self) -> None:
+        response = self.client.get(f"/api/workspace/dashboard?user_id={self.user_id}&session_id={self.service.current_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertNotIn("workdir", payload)
+        self.assertNotIn("db_path", payload.get("database", {}))
+        self.assertNotIn("root", payload.get("local_library", {}))
+        self.assertNotIn("data_dir", payload.get("local_library", {}))
+        self.assertNotIn("manifest_path", payload.get("local_library", {}))
+        self.assertNotIn(str(self.service.manager.workdir), str(payload))
+
+    def test_workspace_dashboard_artifacts_use_public_projection(self) -> None:
+        path = self.service.manager.derived_dir / "dashboard_result.csv"
+        path.write_text("a,b\n1,2\n", encoding="utf-8")
+        self.service.manager.register_artifact(
+            artifact_id="artifact_dashboard_result",
+            path=str(path),
+            type="csv",
+            title="dashboard_result.csv",
+            meta={"owner_user_id": self.user_id, "session_id": self.service.current_session_id},
+        )
+
+        response = self.client.get(f"/api/workspace/dashboard?user_id={self.user_id}&session_id={self.service.current_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        artifact = next(item for item in payload["artifacts"] if item["artifact_id"] == "artifact_dashboard_result")
+        rendered = json.dumps(artifact, ensure_ascii=False)
+        self.assertEqual(artifact["filename"], "dashboard_result.csv")
+        self.assertIn("/api/artifacts/artifact_dashboard_result/download", artifact["download_url"])
+        for key in ("path", "absolute_path", "relative_path", "display_path", "owner_user_id", "session_id"):
+            self.assertNotIn(key, artifact)
+        self.assertNotIn("owner_user_id", artifact.get("meta", {}))
+        self.assertNotIn("session_id", artifact.get("meta", {}))
+        self.assertNotIn(str(self.service.manager.workdir), rendered)
+
+    def test_workspace_dashboard_datasets_do_not_expose_raw_paths_or_owner_metadata(self) -> None:
+        source = self.service.manager.upload_dir / "points.csv"
+        source.write_text("lon,lat\n1,2\n", encoding="utf-8")
+        self.service.manager.load_path(str(source), name="points")
+
+        response = self.client.get(f"/api/workspace/dashboard?user_id={self.user_id}&session_id={self.service.current_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        dataset = next(item for item in payload["datasets"] if item["name"] == "points")
+        rendered = json.dumps(dataset, ensure_ascii=False)
+        self.assertEqual(dataset["type"], "table")
+        self.assertEqual(dataset["filename"], "points.csv")
+        self.assertNotIn("path", dataset)
+        self.assertNotIn("owner_user_id", dataset.get("meta", {}))
+        self.assertNotIn("session_id", dataset.get("meta", {}))
+        self.assertNotIn(str(self.service.manager.workdir), rendered)
+
+    def test_workspace_dashboard_activity_and_summary_do_not_expose_internal_paths(self) -> None:
+        plot_path = self.service.manager.derived_dir / "plot.png"
+        plot_path.write_bytes(b"fake-png")
+        self.service.manager.last_plot_path = str(plot_path)
+        self.service.manager.log_operation("生成地图", f"结果保存到 {plot_path}", "plot")
+
+        response = self.client.get(f"/api/workspace/dashboard?user_id={self.user_id}&session_id={self.service.current_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        rendered = json.dumps({"summary": payload.get("summary"), "activity": payload.get("activity")}, ensure_ascii=False)
+        self.assertEqual(payload["summary"]["last_plot"], "plot.png")
+        self.assertIn("plot.png", payload["activity"][0]["detail"])
+        self.assertNotIn(str(self.service.manager.workdir), rendered)
+        self.assertNotIn("workspace/users", rendered.replace("\\", "/"))
+
+    def test_workspace_dashboard_latest_pipeline_uses_public_projection(self) -> None:
+        metrics = self.service.manager.derived_dir / "pipeline_metrics.csv"
+        figure = self.service.manager.derived_dir / "pipeline_figure.png"
+        metrics.write_text("RMSE,R\n0.1,0.9\n", encoding="utf-8")
+        figure.write_bytes(b"fake-png")
+        self.service.manager.start_pipeline_run(
+            "run_dashboard_private",
+            "legacy_pipeline",
+            "file",
+            str(metrics),
+            "legacy_out",
+            {"raw_path": str(metrics), "download_url": "/api/files/artifact?path=derived/pipeline_metrics.csv"},
+        )
+        self.service.manager.add_pipeline_step(
+            "run_dashboard_private",
+            1,
+            "legacy_step",
+            "succeeded",
+            input_summary=str(metrics),
+            output_summary=f"output={figure}",
+            detail={"output_path": str(figure), "download_url": "/api/files/artifact?path=derived/pipeline_figure.png"},
+        )
+        self.service.manager.finish_pipeline_run(
+            "run_dashboard_private",
+            "succeeded",
+            {"final_path": str(figure), "reports": {"metrics_dataset": "pipeline_metrics"}},
+        )
+
+        response = self.client.get(f"/api/workspace/dashboard?user_id={self.user_id}&session_id={self.service.current_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        pipeline = response.json()["latest_pipeline"]
+        rendered = json.dumps(pipeline, ensure_ascii=False)
+        self.assertEqual(pipeline["source_value"], "pipeline_metrics.csv")
+        self.assertEqual(pipeline["summary"]["final_path"], "pipeline_figure.png")
+        self.assertEqual(pipeline["steps"][0]["input_summary"], "pipeline_metrics.csv")
+        self.assertEqual(pipeline["steps"][0]["output_summary"], "output=pipeline_figure.png")
+        self.assertNotIn(str(self.service.manager.workdir), rendered)
+        self.assertNotIn("/api/files/artifact", rendered)
+        self.assertNotIn("output_path", rendered)
+        self.assertNotIn("download_url", rendered)
+
+    def test_workspace_dashboard_model_results_use_public_projection(self) -> None:
+        metrics = self.service.manager.derived_dir / "model_metrics.csv"
+        figure = self.service.manager.derived_dir / "model_figure.png"
+        metrics.write_text("RMSE,R\n0.1,0.9\n", encoding="utf-8")
+        figure.write_bytes(b"fake-png")
+        self.service.manager.register_model_result(
+            model_result_id="model_dashboard_private",
+            model_name="XGBoost",
+            output_prefix="legacy",
+            result_dataset="pred",
+            metrics_dataset="model_metrics",
+            metrics_path=str(metrics),
+            figure_path=str(figure),
+            artifacts=[{"artifact_id": "artifact_model_metrics", "path": str(metrics), "type": "csv", "title": "model_metrics.csv"}],
+            diagnostics={"output_path": str(figure), "download_url": "/api/files/artifact?path=derived/model_figure.png"},
+        )
+
+        response = self.client.get(f"/api/workspace/dashboard?user_id={self.user_id}&session_id={self.service.current_session_id}")
+
+        self.assertEqual(response.status_code, 200)
+        model = next(item for item in response.json()["model_results"] if item["model_result_id"] == "model_dashboard_private")
+        rendered = json.dumps(model, ensure_ascii=False)
+        self.assertEqual(model["model_name"], "XGBoost")
+        self.assertEqual(model["metrics_dataset"], "model_metrics")
+        self.assertIn("/api/artifacts/artifact_model_metrics/download", model["artifacts"][0]["download_url"])
+        for key in ("metrics_path", "figure_path", "owner_user_id", "session_id", "diagnostics"):
+            self.assertNotIn(key, model)
+        self.assertNotIn(str(self.service.manager.workdir), rendered)
+        self.assertNotIn("/api/files/artifact", rendered)
 
 
 if __name__ == "__main__":

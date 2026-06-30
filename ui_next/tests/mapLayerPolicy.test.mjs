@@ -50,6 +50,8 @@ assert.equal(policy.mergeResultLayerState([{ id: 'dem_b', kind: 'dem' }], {}, { 
 assert.equal(policy.mergeResultLayerState([{ id: 'soil_b', kind: 'soil' }], {}, { all: 'rainbow' }).soil_b.palette, 'rainbow');
 assert.equal(policy.mergeResultLayerState([{ id: 'dem_c', kind: 'dem' }], { dem_c: { visible: true, removed: false, palette: 'cyan' } }, { dem: 'magma' }).dem_c.palette, 'cyan');
 assert.equal(policy.isReferenceMapLayer({ id: 'local_library_shandianhe_basin_boundary', kind: 'boundary', meta: { source: 'local_library' } }), true);
+assert.equal(policy.isReferenceMapLayer({ id: 'dataset_shandianhe_basin_boundary', name: '闪电河流域边界', kind: 'boundary', meta: { source: 'local_library', item_id: 'lib_shandianhe_basin_boundary_full' } }), true);
 assert.equal(policy.isReferenceMapLayer({ id: 'dataset_user_dem', kind: 'dem', meta: { source: 'upload' } }), false);
+assert.doesNotMatch(source, /source_path/, 'Reference map layer policy must not depend on private backend path metadata');
 
 console.log('map layer policy tests passed');

@@ -39,7 +39,7 @@ assert.equal(view.bestModel?.name, 'XGBoost');
 assert.equal(view.bestModel?.modelResultId, 'model_result_xgb_001');
 assert.equal(view.downloads[0]?.label, '指标表');
 assert.equal(view.downloads[0]?.artifactId, 'artifact_soil_demo_xgb_metrics');
-assert.equal(view.downloads[0]?.url, '');
+assert.equal('url' in view.downloads[0], false);
 assert.match(view.recommendations.join('\n'), /GCP/);
 
 console.log('analysisModelResults.test.mjs passed');

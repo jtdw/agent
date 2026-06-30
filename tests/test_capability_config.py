@@ -46,6 +46,51 @@ class CapabilityConfigTests(unittest.TestCase):
             store.approve("knowledge", "soil_notes", actor="reviewer", summary="restore v1")
             self.assertIn("时间窗口", store.retrieve_knowledge("土壤水分", limit=1)[0]["content"])
 
+    def test_private_session_knowledge_requires_matching_owner_and_session(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            from core.capability_config import CapabilityConfigStore
+
+            store = CapabilityConfigStore(Path(tmp))
+            store.upsert_knowledge(
+                {
+                    "knowledge_id": "private_doc",
+                    "title": "Private note",
+                    "source": "user_upload",
+                    "language": "en",
+                    "tags": ["private"],
+                    "applicable_scope": "general",
+                    "reliability": "untrusted",
+                    "version": "v1",
+                    "status": "enabled",
+                    "content": "private session knowledge",
+                    "owner_user_id": "u1",
+                    "session_id": "s1",
+                    "scope": "private",
+                }
+            )
+            store.upsert_knowledge(
+                {
+                    "knowledge_id": "system_doc",
+                    "title": "System",
+                    "source": "admin",
+                    "language": "en",
+                    "tags": ["system"],
+                    "applicable_scope": "general",
+                    "reliability": "medium",
+                    "version": "v1",
+                    "status": "enabled",
+                    "content": "system knowledge",
+                    "scope": "system",
+                }
+            )
+
+            self.assertEqual(store.retrieve_knowledge("private", limit=3), [])
+            self.assertEqual(store.retrieve_knowledge("private", limit=3, owner_user_id="u2", session_id="s1"), [])
+            self.assertEqual(store.retrieve_knowledge("private", limit=3, owner_user_id="u1", session_id="s2"), [])
+            matched = store.retrieve_knowledge("private", limit=3, owner_user_id="u1", session_id="s1")
+            self.assertEqual(matched[0]["knowledge_id"], "private_doc")
+            self.assertEqual(store.retrieve_knowledge("system", limit=1)[0]["knowledge_id"], "system_doc")
+
     def test_configured_product_is_visible_to_catalog_and_validator(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             from core.capability_config import CapabilityConfigStore

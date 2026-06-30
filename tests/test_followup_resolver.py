@@ -19,7 +19,9 @@ class FollowupResolverFrontendContextTests(unittest.TestCase):
         self.assertEqual(resolved["reason"], "matched_frontend_selected_artifact")
         self.assertEqual(resolved["referenced_object"]["source"], "frontend_context")
         self.assertEqual(resolved["referenced_object"]["type"], "artifact")
-        self.assertIn("current_map.png", resolved["referenced_object"]["path"])
+        self.assertEqual(resolved["referenced_object"]["id"], "artifact_1")
+        self.assertEqual(resolved["referenced_object"]["label"], "artifact_1")
+        self.assertNotIn("path", resolved["referenced_object"])
 
     def test_selected_artifact_id_resolves_matching_dashboard_record(self) -> None:
         state = ConversationState(
@@ -37,8 +39,100 @@ class FollowupResolverFrontendContextTests(unittest.TestCase):
         self.assertTrue(resolved["resolved"])
         self.assertEqual(resolved["reason"], "matched_frontend_selected_artifact")
         self.assertEqual(resolved["referenced_object"]["id"], "artifact_current")
-        self.assertEqual(resolved["referenced_object"]["path"], "plots/current.png")
+        self.assertNotIn("path", resolved["referenced_object"])
+        self.assertEqual(resolved["referenced_object"]["label"], "Current map")
         self.assertEqual(resolved["referenced_object"]["data"]["title"], "Current map")
+
+    def test_selected_artifact_dashboard_match_does_not_label_from_path(self) -> None:
+        state = ConversationState(
+            selected_artifact={"id": "artifact_current", "type": "map", "path": "stale/path.png", "source": "frontend_context"},
+        ).to_dict()
+        dashboard = {
+            "artifacts": [
+                {"artifact_id": "artifact_current", "type": "map", "path": "plots/current.png", "display_path": "plots/current.png"},
+            ]
+        }
+
+        resolved = resolve_followup("这个结果说明什么", state, dashboard)
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["referenced_object"]["id"], "artifact_current")
+        self.assertEqual(resolved["referenced_object"]["label"], "artifact_current")
+        self.assertNotEqual(resolved["referenced_object"]["label"], "plots/current.png")
+
+    def test_selected_artifact_does_not_use_download_url_as_path(self) -> None:
+        state = ConversationState(
+            selected_artifact={"id": "artifact_current", "type": "map", "source": "frontend_context"},
+        ).to_dict()
+        dashboard = {
+            "artifacts": [
+                {
+                    "artifact_id": "artifact_current",
+                    "type": "map",
+                    "download_url": "/api/files/artifact?path=plots/current.png",
+                    "title": "Current map",
+                },
+            ]
+        }
+
+        resolved = resolve_followup("这个结果说明什么", state, dashboard)
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["referenced_object"]["id"], "artifact_current")
+        self.assertNotIn("path", resolved["referenced_object"])
+        self.assertNotIn("/api/files/artifact", str(resolved["referenced_object"]))
+
+    def test_legacy_selected_artifact_path_is_not_reused_as_path_without_dashboard_match(self) -> None:
+        state = ConversationState(
+            selected_artifact={
+                "id": "artifact_current",
+                "type": "map",
+                "path": "/api/files/artifact?path=plots/current.png",
+                "source": "frontend_context",
+            },
+        ).to_dict()
+
+        resolved = resolve_followup("这个结果说明什么", state, {})
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["referenced_object"]["id"], "artifact_current")
+        self.assertEqual(resolved["referenced_object"]["label"], "artifact_current")
+        self.assertNotIn("path", resolved["referenced_object"])
+        self.assertNotIn("/api/files/artifact", str(resolved["referenced_object"]))
+
+    def test_recent_artifact_does_not_use_download_url_as_path(self) -> None:
+        state = ConversationState(
+            active_artifacts=[
+                {
+                    "artifact_id": "artifact_recent",
+                    "name": "Recent map",
+                    "download_url": "/api/files/artifact?path=plots/recent.png",
+                }
+            ]
+        ).to_dict()
+
+        resolved = resolve_followup("下载刚才生成的结果", state, {})
+
+        self.assertTrue(resolved["resolved"])
+        self.assertNotIn("path", resolved["referenced_object"])
+        self.assertNotIn("/api/files/artifact", str(resolved["referenced_object"]))
+
+    def test_recent_artifact_label_does_not_fall_back_to_path(self) -> None:
+        state = ConversationState(
+            active_artifacts=[
+                {
+                    "artifact_id": "artifact_recent",
+                    "path": "plots/recent.png",
+                    "display_path": "plots/recent.png",
+                }
+            ]
+        ).to_dict()
+
+        resolved = resolve_followup("下载刚才生成的结果", state, {})
+
+        self.assertTrue(resolved["resolved"])
+        self.assertEqual(resolved["referenced_object"]["label"], "artifact_recent")
+        self.assertNotEqual(resolved["referenced_object"]["label"], "plots/recent.png")
 
     def test_selected_feature_takes_priority_for_place_followup(self) -> None:
         state = ConversationState(
@@ -112,7 +206,8 @@ class FollowupResolverFrontendContextTests(unittest.TestCase):
 
         self.assertTrue(resolved["resolved"])
         self.assertIn("artifact", resolved["referenced_object"]["type"])
-        self.assertIn("latest.png", resolved["referenced_object"]["path"])
+        self.assertEqual(resolved["referenced_object"]["label"], "latest.png")
+        self.assertNotIn("path", resolved["referenced_object"])
 
     def test_normal_chinese_recent_result_reference_resolves_artifact(self) -> None:
         state = ConversationState(active_artifacts=[{"name": "latest_dem.tif", "path": "outputs/latest_dem.tif"}]).to_dict()
@@ -121,7 +216,8 @@ class FollowupResolverFrontendContextTests(unittest.TestCase):
 
         self.assertTrue(resolved["resolved"])
         self.assertEqual(resolved["referenced_object"]["type"], "artifact")
-        self.assertIn("latest_dem.tif", resolved["referenced_object"]["path"])
+        self.assertEqual(resolved["referenced_object"]["label"], "latest_dem.tif")
+        self.assertNotIn("path", resolved["referenced_object"])
 
     def test_normal_chinese_current_layer_reference_resolves_selected_layer(self) -> None:
         state = ConversationState(selected_layer={"id": "layer_dem", "type": "raster"}).to_dict()

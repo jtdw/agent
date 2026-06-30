@@ -65,12 +65,11 @@ export function useChatDownloads({
       try {
         const result = await api.jobs(userId, sessionId);
         const view = result.management_views?.find((item) => item.task_id === jobId);
-        const job = (result.jobs || []).find((item) => item.job_id === jobId);
-        const status = view?.status || job?.status || '';
-        if (!job && !view) continue;
+        const status = view?.status || '';
+        if (!view) continue;
         if ((status === 'completed' || status === 'success' || status === 'succeeded') && !announcedDownloadJobsRef.current.has(jobId)) {
           announcedDownloadJobsRef.current.add(jobId);
-          const artifactRefs = view?.artifact_refs || job?.artifacts || [];
+          const artifactRefs = view.artifact_refs || [];
           const summary = view?.user_message || '下载完成。结果文件已注册，可以直接下载。';
           setMessages((current) => mergeTaskCardUpdate(current, (message) => messageMatchesJob(message, jobId), {
             role: 'assistant',
@@ -209,9 +208,9 @@ export function useChatDownloads({
     if (!jobId) return;
     try {
       const result = await api.retryDownloadJob(jobId, userId, sessionId);
-      const retryJobId = String(result.management_view?.task_id || result.job?.job_id || '');
+      const retryJobId = String(result.management_view?.task_id || '');
       const targetJobId = retryJobId || jobId;
-      const status = String(result.management_view?.status || result.job?.status || (result.auto_started ? 'running' : 'queued'));
+      const status = String(result.management_view?.status || (result.auto_started ? 'running' : 'queued'));
       const content = result.auto_started
         ? '已创建重试任务并开始后台下载。'
         : result.reason === 'login_required'

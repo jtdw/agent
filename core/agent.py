@@ -23,6 +23,7 @@ from .config import Settings
 from .agent_policy import load_global_agent_policy
 from .agent_runtime import AgentRuntimeConfig, AgentRuntimeContext, GISAgentRuntime
 from .llm_config import validate_llm_config
+from .tool_contracts import download_job_to_tool_result
 if TYPE_CHECKING:
     from .data_manager import DataManager
 try:
@@ -78,6 +79,209 @@ def _remove_default_agent_admin_tool_hints(prompt: str) -> str:
 
 
 SYSTEM_PROMPT = _remove_default_agent_admin_tool_hints(SYSTEM_PROMPT)
+
+
+_SUMMARY_PRIVATE_OUTPUT_KEYS = {"path", "display_path", "source_path", "output_path", "download_url", "url", "absolute_path", "relative_path"}
+_DIRECT_PRIVATE_KEYS = {
+    "path",
+    "display_path",
+    "source_path",
+    "absolute_path",
+    "relative_path",
+    "output_path",
+    "zip_path",
+    "package_path",
+    "downloaded_path",
+    "download_url",
+    "direct_url",
+    "local_file_path",
+    "request_text",
+    "result_json",
+    "failure_diagnostic_json",
+    "artifact_quality_json",
+    "status_path",
+    "log_path",
+    "storage_state_path",
+    "state_path",
+    "user_id",
+    "session_id",
+    "account_id",
+}
+_DIRECT_PUBLIC_DOWNLOAD_JOB_KEYS = (
+    "job_id",
+    "source_key",
+    "resource_type",
+    "region",
+    "start_date",
+    "end_date",
+    "account_mode",
+    "output_name",
+    "status",
+    "state",
+    "status_label",
+    "stage",
+    "message",
+    "progress",
+    "created_at",
+    "updated_at",
+    "finished_at",
+    "canceled_at",
+    "retried_from_job_id",
+)
+_DIRECT_PUBLIC_WORKER_JOB_KEYS = (
+    "login_job_id",
+    "capture_job_id",
+    "tile_job_id",
+    "scene_job_id",
+    "job_id",
+    "source_key",
+    "state",
+    "status",
+    "stage",
+    "message",
+    "progress",
+    "region",
+    "region_dataset",
+    "dataset_id",
+    "product_key",
+    "pages_scanned",
+    "candidate_count",
+    "selected_count",
+    "downloaded_count",
+    "failed_count",
+    "max_downloads",
+    "max_tiles",
+    "timeout_seconds",
+    "headless",
+    "auto_load",
+    "process_id",
+    "close_requested",
+    "close_reason",
+    "created_at",
+    "updated_at",
+    "finished_at",
+)
+_DIRECT_PRIVATE_TEXT_MARKERS = (
+    "cookie",
+    "token",
+    "authorization",
+    "storage_state",
+    "traceback",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "direct_url",
+    "local_file_path",
+    "status_path",
+    "log_path",
+    "state_path",
+    ".env",
+    "/api/files/artifact",
+    "/api/downloads/artifact",
+)
+_DIRECT_PRIVATE_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s`'\"，。；;]+|workspace[\\/](?:users|sessions)[^\s`'\"，。；;]*)",
+    re.IGNORECASE,
+)
+_DIRECT_LEGACY_ARTIFACT_URL_RE = re.compile(
+    r"/api/(?:files/artifact|downloads/artifact)\?[^\s`'\"，。；;]+",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_path_or_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("http://", "https://", "/api/files/artifact", "/api/downloads/artifact")):
+        return True
+    if ":\\" in text or "\\workspace\\" in text or "/workspace/" in text:
+        return True
+    return False
+
+
+def _direct_public_text(value: Any, limit: int = 500) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if not text:
+        return ""
+    if any(marker in lowered for marker in _DIRECT_PRIVATE_TEXT_MARKERS):
+        return ""
+    if _looks_like_path_or_url(text) or re.search(r"[A-Za-z]:[\\/]", text):
+        return ""
+    return text[:limit]
+
+
+def _redact_direct_summary_text(value: Any, limit: int = 500) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = _DIRECT_LEGACY_ARTIFACT_URL_RE.sub("[已隐藏旧版下载链接]", text)
+    text = re.sub(
+        r"(?:保存路径|输出路径|结果路径)\s*[:：]?\s*" + _DIRECT_PRIVATE_PATH_RE.pattern,
+        "结果已注册为 artifact",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = _DIRECT_PRIVATE_PATH_RE.sub("[已隐藏内部路径]", text)
+    lowered = text.lower()
+    if any(marker in lowered for marker in ("cookie", "token", "authorization", "storage_state", ".env")):
+        return ""
+    return text[:limit]
+
+
+def _direct_public_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        public: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _DIRECT_PRIVATE_KEYS:
+                continue
+            public[key_text] = _direct_public_value(item)
+        return public
+    if isinstance(value, list):
+        return [_direct_public_value(item) for item in value]
+    if isinstance(value, str):
+        return _direct_public_text(value)
+    return value
+
+
+def _direct_public_download_job(job: dict[str, Any] | None) -> dict[str, Any]:
+    raw = job if isinstance(job, dict) else {}
+    public: dict[str, Any] = {}
+    for key in _DIRECT_PUBLIC_DOWNLOAD_JOB_KEYS:
+        if key not in raw:
+            continue
+        value = raw.get(key)
+        public[key] = _direct_public_text(value, 120) if isinstance(value, str) else value
+    return public
+
+
+def _direct_public_worker_job(job: dict[str, Any] | None) -> dict[str, Any]:
+    raw = job if isinstance(job, dict) else {}
+    public: dict[str, Any] = {}
+    for key in _DIRECT_PUBLIC_WORKER_JOB_KEYS:
+        if key not in raw:
+            continue
+        value = raw.get(key)
+        public[key] = _direct_public_text(value, 120) if isinstance(value, str) else value
+    return public or {"state": _direct_public_text(raw.get("state") or raw.get("status") or "UNKNOWN", 80)}
+
+
+def _direct_download_job_payload(job: dict[str, Any] | None) -> dict[str, Any]:
+    raw = job if isinstance(job, dict) else {}
+    tool_result = _direct_public_value(download_job_to_tool_result(raw))
+    if not isinstance(tool_result, dict):
+        tool_result = {}
+    public_job = _direct_public_download_job(raw)
+    return {
+        "job": public_job,
+        "tool_result": tool_result,
+        "status": str(tool_result.get("status") or public_job.get("status") or ""),
+        "ok": bool(tool_result.get("ok")),
+        "error_message": str(tool_result.get("user_message") or ""),
+    }
 
 
 class GISAgent:
@@ -192,18 +396,21 @@ class GISAgent:
                     f"工具：{payload.get('tool_name')}",
                     f"状态：成功",
                 ]
-                if payload.get("summary"):
-                    lines.append(f"摘要：{payload.get('summary')}")
+                summary = _redact_direct_summary_text(payload.get("summary"))
+                if summary:
+                    lines.append(f"摘要：{summary}")
                 outputs = payload.get("outputs") if isinstance(payload.get("outputs"), dict) else {}
                 for key, value in list(outputs.items())[:6]:
+                    if key in _SUMMARY_PRIVATE_OUTPUT_KEYS or _looks_like_path_or_url(value):
+                        continue
                     if value not in ("", None):
                         lines.append(f"{key}={value}")
                 artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), list) else []
                 for item in artifacts[:4]:
                     if isinstance(item, dict):
                         label = item.get("title") or item.get("type") or "输出文件"
-                        path = item.get("path") or item.get("display_path") or ""
-                        lines.append(f"{label}: {path}" if path else str(label))
+                        artifact_id = str(item.get("artifact_id") or "").strip()
+                        lines.append(f"{label}（{artifact_id}）" if artifact_id else str(label))
                 next_actions = payload.get("next_actions") if isinstance(payload.get("next_actions"), list) else []
                 if next_actions:
                     lines.append("建议：" + "；".join(str(item) for item in next_actions[:3]))
@@ -432,7 +639,7 @@ class GISAgent:
                         "direct_command": "open_gscloud_platform_login_window",
                         "non_blocking": True,
                         "account_id": account_id,
-                        "login_job": login_job,
+                        "login_job": _direct_public_worker_job(login_job),
                         "next_step": "浏览器已在后台打开。本次对话不会阻塞；请在浏览器中完成登录，等待时间结束后会自动保存 Cookie。之后可提交/运行地理空间数据云 DEM 捕获下载任务。",
                     },
                     ensure_ascii=False,
@@ -498,7 +705,7 @@ class GISAgent:
                         "direct_command": "open_gscloud_customer_login_window",
                         "non_blocking": True,
                         "user_id": user["user_id"],
-                        "login_job": login_job,
+                        "login_job": _direct_public_worker_job(login_job),
                         "next_step": "浏览器已在后台打开。本次对话不会阻塞；请在浏览器中完成登录，等待时间结束后会自动保存 Cookie。之后可用该用户自己的账号运行下载任务。",
                     },
                     ensure_ascii=False,
@@ -563,7 +770,7 @@ class GISAgent:
                     "tile_count": plan.get("tile_count"),
                     "tile_ids_preview": preview,
                     "tile_ids_text": plan.get("tile_ids_text"),
-                    "derived_files": plan.get("derived_files"),
+                    "derived_files": _direct_public_value(plan.get("derived_files")),
                     "next_step": "如果要自动下载这些分幅，可先提交 gscloud DEM 商业任务，再调用 run_gscloud_dem_region_auto_tiles_job；若自动点击失败，可按生成的 CSV/TXT 清单在页面中筛选数据标识并手动点击下载。",
                 },
                 ensure_ascii=False,
@@ -716,7 +923,7 @@ class GISAgent:
                     "direct_command": "start_gscloud_dem_capture_job",
                     "non_blocking": True,
                     "job_id": job_id,
-                    "capture_job": capture_job,
+                    "capture_job": _direct_public_worker_job(capture_job),
                     "next_step": "浏览器应已在独立进程中打开。请在 ASTER GDEM 30M 页面点击下载按钮；下载完成后后台会自动解压、入库、打包，并更新该商业任务状态。你可以继续对话。",
                     "check_status": f"查看商业下载任务 {job_id} 的状态，或列出地理空间数据云 DEM 捕获下载后台任务状态。",
                 },
@@ -832,9 +1039,9 @@ class GISAgent:
                 commercial._update_job(job["job_id"], status="waiting_login", progress=5, stage="needs_gscloud_login_state")
                 return json.dumps(
                     {
+                        **_direct_download_job_payload(commercial.get_job(job["job_id"])),
                         "ok": True,
                         "direct_command": "submit_gscloud_dem_job_auto_tiles",
-                        "job": commercial.get_job(job["job_id"]),
                         "auto_started": False,
                         "reason": "未找到可用地理空间数据云登录态，所以没有启动自动下载。",
                         "next_step": "请先为平台账号或用户自己的账号打开地理空间数据云登录窗口并完成登录。登录成功后等 5-10 秒，让 Cookie 文件写入磁盘；无需等登录窗口倒计时结束。随后输入：启动这个任务的自动分幅下载。",
@@ -858,11 +1065,11 @@ class GISAgent:
             )
             return json.dumps(
                 {
+                    **_direct_download_job_payload(commercial.get_job(job["job_id"])),
                     "ok": True,
                     "direct_command": "submit_gscloud_dem_job_auto_tiles",
-                    "job": commercial.get_job(job["job_id"]),
                     "auto_started": True,
-                    "auto_tile_job": tile_job,
+                    "auto_tile_job": _direct_public_worker_job(tile_job),
                     "message": "已创建商业任务，并在后台启动四川省 ASTER GDEM 自动分幅下载。该流程会扫描地理空间数据云访问数据页全部分页，仅下载目标分幅；不会打开网页让用户自行选择。下载文件会经过分幅校验，错误分幅不会被标记为完成。",
                     "status_queries": [
                         f"查看商业下载任务 {job['job_id']} 的状态。",
@@ -920,7 +1127,7 @@ class GISAgent:
                 {
                     "ok": True,
                     "direct_command": "list_gscloud_auto_tile_jobs",
-                    "jobs": jobs,
+                    "jobs": [_direct_public_worker_job(job) for job in jobs],
                     "message": "已列出地理空间数据云 DEM 自动分幅下载后台任务状态。",
                 },
                 ensure_ascii=False,
@@ -997,7 +1204,7 @@ class GISAgent:
                 "ok": True,
                 "direct_command": "start_gscloud_dem_auto_tile_job",
                 "job_id": job_id,
-                "auto_tile_job": tile_job,
+                "auto_tile_job": _direct_public_worker_job(tile_job),
                 "next_step": "后台会自动计算区域分幅，扫描访问数据页全部分页并下载目标分幅，不会打开网站让用户自己选择。下载后会校验文件名中的 ASTGTM 分幅编号，错误或缺失分幅不会被标记为完整成功。",
             }, ensure_ascii=False, indent=2, default=str)
         except Exception as exc:

@@ -13,7 +13,10 @@ CANONICAL_STATUSES = {"succeeded", "failed", "running", "awaiting_confirmation",
 TOOL_RESULT_SCHEMA_VERSION = "tool-result/v1"
 SUCCESS_STATUSES = {"succeeded"}
 NON_TERMINAL_STATUSES = {"running", "awaiting_confirmation"}
-PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/][^\s`'\"<>]+|workspace[\\/][^\s`'\"<>]+)", re.IGNORECASE)
+PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s`'\"<>]+|/(?:tmp|home|var|etc|root|Users)/[^\s`'\"<>]+|workspace[\\/][^\s`'\"<>]+)",
+    re.IGNORECASE,
+)
 SENSITIVE_TOKENS = ("storage_state", "cookie", "password", "secret", "token")
 
 

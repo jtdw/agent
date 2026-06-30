@@ -14,7 +14,7 @@ import { ChatConversationHeader } from './chat/ChatConversationHeader';
 import { ChatSessionSidebar } from './chat/ChatSessionSidebar';
 import { ChatMessageList } from './chat/ChatMessageList';
 import { ChatComposerFooter } from './chat/ChatComposerFooter';
-import { mergeRealtimeEventMeta } from './chat/chatRealtimeEventModel';
+import { mergeRealtimeEventMeta, shouldUseRealtimeEventContent } from './chat/chatRealtimeEventModel';
 import { hashString, messageIsToolTask, messageKey } from './chat/chatWorkspaceModel';
 import { useChatStreamLifecycle } from './chat/useChatStreamLifecycle';
 import { useChatModels } from './chat/useChatModels';
@@ -382,6 +382,13 @@ export function ChatWorkspace({
     setError,
     onSessionDeleted: handleSessionDeleted,
   });
+  const handleWorkflowComplete = useCallback((response: Awaited<ReturnType<typeof api.runSoilMoistureWorkflow>>) => {
+    if (response.sessions) setSessions(response.sessions);
+    if (response.result_panel) onResultPanel?.(response.result_panel);
+    const nextSessionId = response.current_session_id || currentSessionId;
+    setCurrentSessionId(nextSessionId);
+    onSessionChange?.(nextSessionId);
+  }, [currentSessionId, onResultPanel, onSessionChange, setCurrentSessionId, setSessions]);
   const { runThesisWorkflow } = useChatThesisWorkflow({
     thinking,
     userId,
@@ -390,6 +397,7 @@ export function ChatWorkspace({
     setError,
     setMessages,
     setLastFailedPrompt,
+    onWorkflowComplete: handleWorkflowComplete,
   });
 
   const mergeRealtimeEvent = useCallback((event: RealtimeChatEvent, syncState: 'connecting' | 'live' | 'polling') => {
@@ -422,9 +430,10 @@ export function ChatWorkspace({
         const existing = next[index];
         if (!messageMatchesRealtimeEvent(existing, event)) continue;
         const mergedMeta = mergeRealtimeEventMeta(existing.meta || {}, meta, event);
+        const nextContent = shouldUseRealtimeEventContent(existing.meta || {}, meta, event) ? content : '';
         next[index] = {
           ...existing,
-          content: event.kind === 'model_token' ? `${existing.content || ''}${content}` : (content || existing.content),
+          content: event.kind === 'model_token' ? `${existing.content || ''}${nextContent}` : (nextContent || existing.content),
           meta: { ...mergedMeta, streaming: event.kind === 'model_token' },
         };
         return next;
@@ -488,6 +497,7 @@ export function ChatWorkspace({
   const { streamPrompt } = useChatPromptStreamAction({
     userId,
     currentSessionId,
+    currentInteractionMode,
     chatContext,
     realtimeSyncState,
     streamLifecycle,

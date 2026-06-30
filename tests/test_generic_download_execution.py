@@ -6,12 +6,15 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import rasterio
+from rasterio.transform import from_origin
 
 from core.config import Settings
 from core.area_resolver import resolve_area_candidates
 from core.commercial.service import CommercialService
 from core.data_manager import DataManager
 from core.download_request_executor import _start_real_adapter, execute_download_requests
+from core.map_layers import MapLayerService
 from core.management_views import download_job_to_management_view
 from core.service import GISWorkspaceService
 from core.task_plan_schema import validate_llm_task_plan
@@ -19,6 +22,25 @@ from core.tool_context import ToolRuntimeContext
 
 
 pytestmark = pytest.mark.slow
+
+
+def _write_test_raster(path: Path) -> None:
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = np.array([[100, 101], [102, 103]], dtype="float32")
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=data.shape[0],
+        width=data.shape[1],
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=from_origin(104.0, 31.0, 0.01, 0.01),
+    ) as dst:
+        dst.write(data, 1)
 
 
 def _request(product_id: str, status: str, *, time_range: dict | None = None) -> dict:
@@ -247,7 +269,7 @@ class GenericDownloadExecutionTests(unittest.TestCase):
             zip_path = external_dir / "chengdu_dem.zip"
             tif_path = external_dir / "chengdu_dem.tif"
             zip_path.write_bytes(b"PK\x03\x04registered zip fixture")
-            tif_path.write_bytes(b"II*\x00registered tif fixture")
+            _write_test_raster(tif_path)
             context = {
                 "response_language": "zh-CN",
                 "candidate_tool_cards": [{"tool_name": "submit_commercial_download_job"}],
@@ -309,6 +331,13 @@ class GenericDownloadExecutionTests(unittest.TestCase):
                 self.assertTrue(Path(registered["path"]).exists())
             view = tool_result["diagnostics"]["management_view"]
             self.assertTrue(view["artifact_refs"])
+            self.assertTrue(tool_result["map_layers"])
+            self.assertTrue(view["map_layer_refs"])
+            self.assertIn("add_to_map", view["available_actions"])
+            self.assertTrue(any(item.get("type") == "raster" for item in manager.list_datasets()))
+            raster_artifact_id = next(item["artifact_id"] for item in view["artifact_refs"] if item.get("type") == "raster")
+            workspace_layers = MapLayerService(mock.Mock(manager=manager)).workspace_layers("u_download", "s_download")["layers"]
+            self.assertTrue(any(layer.get("artifact_id") == raster_artifact_id for layer in workspace_layers))
             self.assertTrue(all(str(item["artifact_id"]).startswith("artifact_") for item in view["artifact_refs"]))
             self.assertEqual(second["tool_results"][0]["status"], "succeeded")
             first_job_id = str(tool_result["outputs"]["job"]["job_id"])

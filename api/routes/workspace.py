@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Callable, Protocol
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
@@ -9,6 +10,19 @@ from fastapi.responses import FileResponse
 from api.schemas.workspace import ArtifactDeleteIn, ExportIn
 from core.artifacts import assert_artifact_path_allowed, content_disposition_attachment, safe_download_filename, shapefile_zip_path
 from core.task_outcome_advisor import build_task_outcome, format_task_outcome_markdown
+
+
+_PRIVATE_MESSAGE_TEXT_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s`'\"，。；;]+|/(?:tmp|home|var|etc|root|Users)/[^\s`'\"，。；;]+|workspace[\\/](?:users|sessions)[^\s`'\"，。；;]*|/api/(?:files/artifact|downloads/artifact)\?[^\s`'\"，。；;]+)",
+    re.IGNORECASE,
+)
+
+
+def _public_user_message_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return _PRIVATE_MESSAGE_TEXT_RE.sub("[已隐藏内部路径]", text)
 
 
 class WorkspaceManager(Protocol):
@@ -105,7 +119,7 @@ def create_workspace_router(
             if not payload:
                 raise HTTPException(status_code=400, detail="没有读取到有效上传文件。")
             try:
-                messages = service.upload_saved_files_batch(payload)
+                messages = [_public_user_message_text(item) for item in service.upload_saved_files_batch(payload)]
             except Exception:
                 for path, _ in payload:
                     try:
@@ -152,9 +166,15 @@ def create_workspace_router(
             user_id = require_request_user_if_present(request, body.user_id)
             service = scoped_workspace_service(user_id, body.session_id)
             result = service.export_results(mode=body.mode)
-            result["download_url"] = artifact_download_url(str(result.get("artifact_id") or ""), user_id=user_id, session_id=service.current_session_id)
+            artifact_id = str(result.get("artifact_id") or "")
+            public_result = {
+                "artifact_id": artifact_id,
+                "download_url": artifact_download_url(artifact_id, user_id=user_id, session_id=service.current_session_id),
+                "file_count": int(result.get("file_count") or 0),
+                "mode": str(result.get("mode") or body.mode),
+            }
             audit(request, user_id=user_id, action="workspace.export", resource_type="artifact", resource_id=str(result.get("zip_path") or ""), detail={"mode": body.mode, "file_count": result.get("file_count")})
-            return result
+            return public_result
 
         return guard(run)
 
@@ -163,17 +183,31 @@ def create_workspace_router(
         def run():
             user_id = require_request_user_if_present(request, body.user_id)
             service = scoped_workspace_service(user_id, body.session_id)
-            result = service.manager.delete_result_file(artifact_id=body.artifact_id, path=body.path)
-            result["dashboard"] = decorate_dashboard(service, user_id=user_id)
+            artifact_id = str(body.artifact_id or "").strip()
+            if not artifact_id:
+                raise HTTPException(status_code=400, detail="artifact_id is required for workspace artifact deletion.")
+            service.manager.assert_artifact_access(user_id, body.session_id or service.current_session_id, artifact_id)
+            result = service.manager.delete_result_file(artifact_id=artifact_id, path="")
             audit(
                 request,
                 user_id=user_id,
                 action="artifact.delete",
                 resource_type="artifact",
-                resource_id=body.artifact_id or body.path,
+                resource_id=artifact_id,
                 detail={k: result.get(k) for k in ("path", "deleted_files", "deleted_artifacts", "deleted_datasets")},
             )
-            return result
+            deleted_artifacts = result.get("deleted_artifacts", [])
+            deleted_datasets = result.get("deleted_datasets", [])
+            status = "deleted" if result.get("deleted_files") or deleted_artifacts or deleted_datasets else "not_found"
+            return {
+                "ok": status == "deleted",
+                "artifact_id": artifact_id,
+                "status": status,
+                "file_deleted": bool(result.get("deleted_files")),
+                "deleted_artifacts": deleted_artifacts,
+                "deleted_datasets": deleted_datasets,
+                "dashboard": decorate_dashboard(service, user_id=user_id),
+            }
 
         return guard(run)
 
@@ -207,7 +241,6 @@ def create_workspace_router(
                 "artifact_id": artifact_id,
                 "status": status,
                 "file_deleted": bool(result.get("deleted_files")),
-                "deleted_files": result.get("deleted_files", []),
                 "deleted_artifacts": result.get("deleted_artifacts", []),
                 "deleted_datasets": result.get("deleted_datasets", []),
             }
@@ -239,7 +272,7 @@ def create_workspace_router(
         return guard(run)
 
     @router.get("/api/files/artifact")
-    def artifact(request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), path: str = Query(...)):
+    def artifact(request: Request, user_id: str = Query(default=""), session_id: str = Query(default=""), path: str = Query(default="")):
         raise HTTPException(
             status_code=410,
             detail="Deprecated artifact path downloads are disabled. Use /api/artifacts/{artifact_id}/download.",

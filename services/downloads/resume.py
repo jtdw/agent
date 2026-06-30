@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from core.commercial.service import CommercialService
+from core.management_views import download_job_to_management_view
 from domain.chat.actions import clarification_action, login_required_action
 from services.data_sources.gscloud_accounts import GSCloudAccountService
 
@@ -26,6 +27,16 @@ class DownloadResumeService:
         self.accounts = accounts
         self.start_download = start_download
 
+    def _public_resume_payload(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        current = self.commercial.get_job(job_id)
+        management_view = download_job_to_management_view(current)
+        return {
+            **payload,
+            "management_view": management_view,
+            "available_actions": management_view.get("available_actions") if isinstance(management_view.get("available_actions"), list) else [],
+            "deprecated_raw_job_api": False,
+        }
+
     def resume(self, user_id: str, job_id: str) -> dict[str, Any]:
         job = self.commercial.get_job(job_id)
         if str(job.get("user_id") or "") != str(user_id or ""):
@@ -36,8 +47,7 @@ class DownloadResumeService:
         region = str(job.get("region") or "").strip()
         if not region:
             self.commercial._update_job(job_id, status="waiting_parameters", stage="needs_region")
-            return {
-                "job": self.commercial.get_job(job_id),
+            return self._public_resume_payload(job_id, {
                 "auto_supported": True,
                 "auto_started": False,
                 "reason": "clarification_required",
@@ -45,19 +55,18 @@ class DownloadResumeService:
                     ["region"],
                     recommended_defaults={"resolution": "30m", "format": "GeoTIFF", "clip_to_region": True},
                 ),
-            }
+            })
 
         account_mode = str(job.get("account_mode") or "").lower()
         needs_customer_login = account_mode in {"own", "user", "user_account", "manual_cookie"}
         if needs_customer_login and not self.accounts.status(user_id).get("logged_in"):
             self.commercial._update_job(job_id, status="waiting_login", stage="needs_gscloud_login_state")
-            return {
-                "job": self.commercial.get_job(job_id),
+            return self._public_resume_payload(job_id, {
                 "auto_supported": True,
                 "auto_started": False,
                 "reason": "login_required",
                 "action_required": login_required_action(provider="gscloud", job_id=job_id),
-            }
+            })
 
         auto = self.start_download(job, region=region)
-        return {"job": self.commercial.get_job(job_id), **auto}
+        return self._public_resume_payload(job_id, dict(auto))

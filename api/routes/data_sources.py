@@ -1,11 +1,64 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from fastapi import APIRouter, Request
 
 from api.schemas.data_sources import GSCloudLoginCompleteIn, GSCloudLoginStartIn
 from services.data_sources.gscloud_accounts import GSCloudAccountService
+
+
+_PRIVATE_DATA_SOURCE_KEYS = {
+    "path",
+    "state_path",
+    "storage_state_path",
+    "status_path",
+    "log_path",
+    "absolute_path",
+    "relative_path",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "url",
+    "cookie",
+    "cookies",
+    "token",
+    "password",
+}
+_PRIVATE_DATA_SOURCE_TEXT_RE = re.compile(
+    r"(?:/(?:tmp|home|var|etc|root|Users)/|workspace[\\/](?:users|sessions))",
+    re.IGNORECASE,
+)
+
+
+def _public_data_source_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _PRIVATE_DATA_SOURCE_KEYS:
+                continue
+            cleaned = _public_data_source_payload(item)
+            if cleaned in ({}, [], ""):
+                continue
+            output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        output = [_public_data_source_payload(item) for item in value]
+        return [item for item in output if item not in ({}, [], "")]
+    if isinstance(value, str):
+        lowered = value.lower()
+        if (
+            ":/" in value
+            or ":\\" in value
+            or "storage_state" in lowered
+            or "/api/downloads/artifact" in lowered
+            or "/api/files/artifact" in lowered
+            or _PRIVATE_DATA_SOURCE_TEXT_RE.search(value)
+        ):
+            return ""
+    return value
 
 
 def create_data_sources_router(
@@ -19,7 +72,7 @@ def create_data_sources_router(
 
     @router.get("/gscloud/status")
     def gscloud_account_status(request: Request):
-        return guard(lambda: account_service().status(authenticated_user(request)))
+        return guard(lambda: _public_data_source_payload(account_service().status(authenticated_user(request))))
 
     @router.post("/gscloud/login/start")
     def gscloud_login_start(body: GSCloudLoginStartIn, request: Request):
@@ -27,7 +80,7 @@ def create_data_sources_router(
             user_id = authenticated_user(request)
             result = account_service().start_login(user_id, timeout_seconds=body.timeout_seconds)
             audit(request, user_id=user_id, action="data_source.login_start", resource_type="data_source", resource_id="gscloud")
-            return result
+            return _public_data_source_payload(result)
 
         return guard(run)
 
@@ -38,7 +91,7 @@ def create_data_sources_router(
             result = account_service().complete_login(user_id, body.login_session_id)
             if result.get("logged_in"):
                 audit(request, user_id=user_id, action="data_source.login_complete", resource_type="data_source", resource_id="gscloud")
-            return result
+            return _public_data_source_payload(result)
 
         return guard(run)
 
@@ -48,7 +101,7 @@ def create_data_sources_router(
             user_id = authenticated_user(request)
             result = account_service().logout(user_id)
             audit(request, user_id=user_id, action="data_source.logout", resource_type="data_source", resource_id="gscloud")
-            return result
+            return _public_data_source_payload(result)
 
         return guard(run)
 

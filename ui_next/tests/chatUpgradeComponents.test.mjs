@@ -51,7 +51,14 @@ assert.doesNotMatch(chatPanel, /api\.uploadFiles|setUploading/, 'ChatPanel shoul
 assert.match(chatUploadsHook, /export function useChatUploads/, 'useChatUploads hook should be exported');
 assert.match(chatUploadsHook, /api\.uploadFiles\(files, userId, sessionId\)/, 'useChatUploads should preserve session-scoped upload API calls');
 assert.match(chatUploadsHook, /normalizeWorkspaceMentions/, 'useChatUploads should refresh workspace mentions from upload dashboard datasets');
-assert.match(chatUploadsHook, /upload_summaries/, 'useChatUploads should preserve upload summaries for UploadResultCard');
+assert.match(chatUploadsHook, /sanitizeUploadSummaries/, 'useChatUploads should sanitize legacy upload summaries before storing message meta');
+assert.doesNotMatch(chatUploadsHook, /upload_summaries: r\.upload_summaries \|\| \[\]/, 'useChatUploads must not persist raw upload summaries from legacy responses');
+assert.doesNotMatch(chatUploadsHook, /safeBasename\(raw\.path\)/, 'useChatUploads must not derive visible upload names from legacy raw paths');
+assert.doesNotMatch(api.match(/export type UploadSummary[\s\S]*?};/)?.[0] || '', /\n\s*path\?: string;/, 'UploadSummary must not expose raw upload paths to chat message meta');
+const chatArtifactType = api.match(/export type ChatArtifact = \{[\s\S]*?\n\};/)?.[0] || '';
+assert.ok(chatArtifactType, 'api.ts must define the ChatArtifact contract');
+assert.doesNotMatch(chatArtifactType, /\bpath\?: string;/, 'ChatArtifact must not expose raw artifact paths to chat message meta');
+assert.doesNotMatch(chatArtifactType, /\bdownload_url\?: string;/, 'ChatArtifact must not expose raw download URLs to chat message meta');
 assert.match(chatPanel, /<ChatSessionSidebar/, 'ChatPanel must render session/data partition area through ChatSessionSidebar');
 assert.match(sessionSidebar, /data-testid="chat-session-list"/, 'ChatSessionSidebar must preserve the session/data partition area');
 assert.ok(/AbortController/.test(promptStreamActionHook) && /AbortController/.test(confirmationActionHook), 'Prompt and confirmation hooks must support cooperative stop');

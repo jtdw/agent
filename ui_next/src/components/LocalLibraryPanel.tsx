@@ -38,6 +38,7 @@ function LibraryItemCard({
   onToggle: () => void;
   onImport: () => void;
 }) {
+  const fileLabel = item.filename || item.name;
   return (
     <motion.div
       layout
@@ -79,7 +80,7 @@ function LibraryItemCard({
         </div>
       </div>
       <div className="mt-3 flex items-center justify-between gap-3">
-        <div className="truncate text-[11px] text-slate-400" title={item.path}>{item.size_mb ? `${item.size_mb} MB · ` : ''}{item.path}</div>
+        <div className="truncate text-[11px] text-slate-400" title={fileLabel}>{item.size_mb ? `${item.size_mb} MB · ` : ''}{fileLabel}</div>
         <button onClick={onImport} disabled={busy || !item.exists} className="rounded-2xl bg-gradient-to-r from-ocean to-cyan-glow px-3 py-1.5 text-xs font-black text-white shadow-glow transition hover:scale-[1.02] disabled:cursor-not-allowed disabled:opacity-50">
           载入
         </button>
@@ -88,7 +89,7 @@ function LibraryItemCard({
   );
 }
 
-export function LocalLibraryPanel({ userId, onImported }: { userId?: string; onImported?: () => void }) {
+export function LocalLibraryPanel({ userId, sessionId, onImported }: { userId?: string; sessionId?: string; onImported?: () => void }) {
   const [library, setLibrary] = useState<LocalLibraryResponse | null>(null);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
@@ -137,7 +138,7 @@ export function LocalLibraryPanel({ userId, onImported }: { userId?: string; onI
     }
     setBusy(true);
     try {
-      const r = await api.importLocalLibrary(ids, userId || '');
+      const r = await api.importLocalLibrary(ids, userId || '', sessionId || '');
       setNotice(r.messages.join('；'));
       setSelected([]);
       onImported?.();
@@ -178,7 +179,7 @@ export function LocalLibraryPanel({ userId, onImported }: { userId?: string; onI
 
       <div className="mt-3 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
         <span><FolderSearch size={13} strokeWidth={1.5} className="mr-1 inline" /> {library ? `${items.length}/${library.total} 条` : '读取中'}</span>
-        <span className="truncate" title={library?.data_dir}>{library?.data_dir ? '目录：local_library/data' : ''}</span>
+        <span className="truncate">目录：local_library/data</span>
       </div>
 
       <div className="mt-3 max-h-[360px] space-y-2 overflow-y-auto pr-1">

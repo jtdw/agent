@@ -19,31 +19,53 @@ def _dataset_label(context: dict[str, Any] | None) -> str:
     return str(dataset.get("name") or ctx.get("active_dataset") or "当前数据集")
 
 
+PRIVATE_STEP_KEYS = {
+    "path",
+    "source_path",
+    "output_path",
+    "absolute_path",
+    "relative_path",
+    "download_url",
+    "url",
+}
+
+
+def _public_step_mapping(value: dict[str, Any]) -> dict[str, Any]:
+    public: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        lowered = key_text.lower()
+        if lowered in PRIVATE_STEP_KEYS or lowered.endswith("_path") or lowered.endswith("_url"):
+            continue
+        public[key_text] = item
+    return public
+
+
 def _step_result(step: dict[str, Any]) -> dict[str, Any]:
     return _as_dict(step.get("tool_result"))
 
 
 def _outputs_text(outputs: dict[str, Any]) -> str:
-    if not outputs:
+    public_outputs = _public_step_mapping(outputs)
+    if not public_outputs:
         return "无结构化输出"
     pairs: list[str] = []
     for key in (
+        "dataset_name",
         "result_dataset",
         "feature_count",
         "fields_added",
         "field_name",
-        "path",
         "column",
         "model_result_id",
         "metrics_dataset",
         "prediction_column",
         "format",
         "source_dataset",
-        "source_path",
     ):
-        if outputs.get(key) not in (None, ""):
-            pairs.append(f"{key}={outputs[key]}")
-    return "; ".join(pairs) if pairs else str(outputs)
+        if public_outputs.get(key) not in (None, ""):
+            pairs.append(f"{key}={public_outputs[key]}")
+    return "; ".join(pairs) if pairs else str(public_outputs)
 
 
 def _diagnostics_text(diagnostics: dict[str, Any]) -> str:
@@ -69,9 +91,8 @@ def _artifact_lines(artifacts: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for item in artifacts:
         title = str(item.get("title") or item.get("name") or item.get("type") or "artifact")
-        path = str(item.get("path") or item.get("display_path") or "")
         artifact_type = str(item.get("type") or "file")
-        lines.append(f"- {artifact_type}: {title}" + (f" -> {path}" if path else ""))
+        lines.append(f"- {artifact_type}: {title}")
     return lines
 
 
@@ -110,6 +131,8 @@ def _step_explanation(step: dict[str, Any]) -> dict[str, Any]:
     args = _as_dict(step.get("validated_tool_args"))
     result = _step_result(step)
     outputs = _as_dict(result.get("outputs"))
+    public_args = _public_step_mapping(args)
+    public_outputs = _public_step_mapping(outputs)
     diagnostics = _as_dict(result.get("diagnostics"))
     diagnostics_note = _diagnostics_text(diagnostics)
     warnings = [str(item) for item in _as_list(result.get("warnings")) if str(item).strip()]
@@ -120,8 +143,8 @@ def _step_explanation(step: dict[str, Any]) -> dict[str, Any]:
     return {
         "step_name": step_name,
         "action": _action_for_tool(tool_name),
-        "input": args,
-        "output": outputs,
+        "input": public_args,
+        "output": public_outputs,
         "status": status,
         "explanation": f"{_why_for_tool(tool_name)} 输出：{_outputs_text(outputs)}" + (f"；diagnostics：{diagnostics_note}" if diagnostics_note else "") + "。",
         "warnings": warnings,
@@ -177,7 +200,14 @@ def _summary(workflow_result: dict[str, Any], context: dict[str, Any] | None) ->
         "completed": bool(workflow_result.get("success", workflow_result.get("ok"))),
         "workflow_id": str(workflow_result.get("workflow_id") or ""),
         "used_data": used_datasets,
-        "final_results": [{"type": item.get("type"), "title": item.get("title") or item.get("name"), "path": item.get("path")} for item in artifacts],
+        "final_results": [
+            {
+                "type": item.get("type"),
+                "title": item.get("title") or item.get("name") or item.get("artifact_id") or item.get("id"),
+                "artifact_id": item.get("artifact_id") or item.get("id") or "",
+            }
+            for item in artifacts
+        ],
         "summary": str(workflow_result.get("final_summary") or ("Workflow completed." if workflow_result.get("success", workflow_result.get("ok")) else "Workflow failed.")),
     }
 
@@ -207,7 +237,7 @@ def _markdown(summary: dict[str, Any], steps: list[dict[str, Any]], final_interp
         f"- 使用数据: {', '.join(summary['used_data'])}",
         "- 最终结果:",
     ]
-    result_lines = [f"  - {item.get('type')}: {item.get('title') or ''} -> {item.get('path') or ''}" for item in summary["final_results"]]
+    result_lines = [f"  - {item.get('type')}: {item.get('title') or item.get('artifact_id') or ''}" for item in summary["final_results"]]
     lines.extend(result_lines or ["  - 无最终 artifact"])
 
     if workflow_result.get("failed_step"):

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Callable
 
 from .vector_rag import local_vector_rag_diagnostics
 
 
 CHAIN_NAMES = ("answer_only_context", "retrieval_context", "result_summary_context")
+PRIVATE_PATH_RE = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s`'\"，。；;]+|/(?:tmp|home|var|etc|root|Users)/[^\s`'\"，。；;]+|workspace[\\/](?:users|sessions)[^\s`'\"，。；;]*)",
+    re.IGNORECASE,
+)
+LEGACY_ARTIFACT_URL_RE = re.compile(r"/api/(?:files/artifact|downloads/artifact)\?[^\s`'\"，。；;]+", re.IGNORECASE)
 
 
 def _load_runnable_lambda() -> Any | None:
@@ -26,7 +32,12 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _clean_text(value: Any, limit: int = 600) -> str:
-    return str(value or "").strip()[:limit]
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = LEGACY_ARTIFACT_URL_RE.sub("[hidden legacy artifact link]", text)
+    text = PRIVATE_PATH_RE.sub("[hidden internal path]", text)
+    return text[:limit]
 
 
 def _snippet(item: Any) -> dict[str, str]:

@@ -4,10 +4,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
-
-from domain.artifacts.models import artifact_download_url
-
+from urllib.parse import unquote, urlencode, urlparse
 
 SESSION_COOKIE_ID = "gis_agent_session_id"
 SESSION_COOKIE_TOKEN = "gis_agent_session_token"
@@ -70,6 +67,38 @@ def relative_shared_download_url(base_workdir: str | Path, file_path: str | Path
     return f"/api/downloads/artifact?{urlencode(params)}"
 
 
+def _looks_like_path_or_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    parsed = urlparse(text)
+    lowered = text.lower()
+    if parsed.scheme or lowered.startswith(("data:", "javascript:", "file:", "http:", "https:")):
+        return True
+    if re.match(r"^[a-zA-Z]:[\\/]", text):
+        return True
+    normalized = unquote(text).replace("\\", "/")
+    if normalized.startswith(("/api/files/artifact?", "/api/artifacts/", "/api/downloads/artifact?", "/")):
+        return True
+    if "workspace/users/" in normalized or "workspace/sessions/" in normalized:
+        return True
+    parts = [part for part in normalized.split("/") if part]
+    if any(part == ".." for part in parts):
+        return True
+    return "/" in normalized
+
+
+def _safe_result_refs(values: Any, limit: int = 20) -> list[str]:
+    refs: list[str] = []
+    for item in values if isinstance(values, list) else []:
+        text = str(item or "").strip()
+        if text and not _looks_like_path_or_url(text):
+            refs.append(text)
+        if len(refs) >= limit:
+            break
+    return list(dict.fromkeys(refs))
+
+
 def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> dict[str, Any]:
     outcome = response.get("task_outcome") if isinstance(response.get("task_outcome"), dict) else {}
     files: list[dict[str, str]] = []
@@ -78,11 +107,10 @@ def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> d
 
     def append_file(item: dict[str, Any]) -> None:
         artifact_id = str(item.get("artifact_id") or item.get("id") or "")
-        url = artifact_download_url(artifact_id) if artifact_id else str(item.get("download_url") or "")
-        if not artifact_id and url.startswith("/api/files/artifact?"):
+        if not artifact_id:
             return
         label = str(item.get("title") or item.get("label") or item.get("filename") or item.get("name") or "result file")
-        key = artifact_id or url or label
+        key = artifact_id or label
         if not key or key in seen:
             return
         seen.add(key)
@@ -90,8 +118,6 @@ def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> d
             {
                 "artifact_id": artifact_id,
                 "label": label,
-                "path": str(item.get("filename") or label),
-                "download_url": url,
                 "kind": str(item.get("artifact_type") or item.get("kind") or item.get("type") or "artifact"),
             }
         )
@@ -131,7 +157,7 @@ def build_result_panel(response: dict[str, Any], dashboard: dict[str, Any]) -> d
         "has_results": bool(outcome.get("has_results") or files),
         "title": str(outcome.get("summary") or "Processing results"),
         "files": files[:20],
-        "result_paths": outcome.get("result_paths") if isinstance(outcome.get("result_paths"), list) else [],
+        "result_paths": _safe_result_refs(outcome.get("result_paths")),
         "recommendations": outcome.get("recommendations") if isinstance(outcome.get("recommendations"), list) else [],
     }
 

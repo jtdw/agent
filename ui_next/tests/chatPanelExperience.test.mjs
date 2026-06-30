@@ -22,6 +22,9 @@ const conversationHeaderSource = await readFile('src/components/chat/ChatConvers
 const sessionSidebarSource = await readFile('src/components/chat/ChatSessionSidebar.tsx', 'utf8');
 const messageListSource = await readFile('src/components/chat/ChatMessageList.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
+const localLibraryPanelSource = await readFile('src/components/LocalLibraryPanel.tsx', 'utf8');
+const productConsoleSource = await readFile('src/components/ProductConsole.tsx', 'utf8');
+const apiSource = await readFile('src/lib/api.ts', 'utf8');
 
 assert.equal(source.includes('PROMPT_GROUPS'), true);
 assert.match(source, /useChatWorkspaceMentions/, 'ChatPanel should delegate workspace mentions to a focused hook');
@@ -29,6 +32,8 @@ assert.doesNotMatch(source, /api\.workspaceMentions/, 'ChatPanel should not own 
 assert.match(workspaceMentionsHookSource, /export function useChatWorkspaceMentions/, 'useChatWorkspaceMentions hook should be exported');
 assert.match(workspaceMentionsHookSource, /export function normalizeWorkspaceMentions/, 'workspace mention normalization should move with the hook');
 assert.match(workspaceMentionsHookSource, /api\.workspaceMentions/, 'workspace mention hook should own API loading');
+assert.doesNotMatch(workspaceMentionsHookSource, /raw\.path/, 'workspace mention normalization must not derive public labels from raw paths');
+assert.doesNotMatch(apiSource.match(/export type WorkspaceMention[\s\S]*?};/)?.[0] || '', /\n\s*path\?: string;/, 'WorkspaceMention must not expose raw paths to chat context');
 assert.match(source, /useChatPanelResize/, 'ChatPanel should delegate floating panel resize behavior to a focused hook');
 assert.doesNotMatch(source, /const dragHandle = useMemo/, 'ChatPanel should not own pointer resize handlers inline');
 assert.match(resizeHookSource, /export function useChatPanelResize/, 'useChatPanelResize hook should be exported');
@@ -61,6 +66,10 @@ assert.doesNotMatch(source, /const runThesisWorkflow = async/, 'ChatPanel should
 assert.match(thesisWorkflowHookSource, /export function useChatThesisWorkflow/, 'useChatThesisWorkflow hook should be exported');
 assert.match(thesisWorkflowHookSource, /THESIS_WORKFLOW_PROMPT/, 'thesis workflow hook should preserve the shared workflow prompt');
 assert.match(thesisWorkflowHookSource, /api\.runSoilMoistureWorkflow\(userId, currentSessionId\)/, 'thesis workflow hook should preserve the session-scoped workflow API call');
+assert.match(thesisWorkflowHookSource, /response\.messages/, 'thesis workflow hook should consume canonical server messages when workflow API returns chat state');
+assert.match(thesisWorkflowHookSource, /normalizeChatMessages\(response\.messages\)/, 'thesis workflow hook should normalize workflow chat messages instead of appending a duplicate assistant');
+assert.match(thesisWorkflowHookSource, /onWorkflowComplete\(response\)/, 'thesis workflow hook should hand workflow responses back for session and result-panel reconciliation');
+assert.match(source, /onWorkflowComplete: handleWorkflowComplete/, 'ChatPanel should reconcile workflow sessions and result panel through a completion callback');
 assert.match(thesisWorkflowHookSource, /assistantReplyContent\(response\.reply\)/, 'thesis workflow hook should preserve assistant reply normalization');
 assert.match(thesisWorkflowHookSource, /assistantErrorContent\(error\)/, 'thesis workflow hook should preserve assistant error normalization');
 assert.match(thesisWorkflowHookSource, /setLastFailedPrompt\(prompt\)/, 'thesis workflow hook should preserve retry prompt on failure');
@@ -106,7 +115,8 @@ assert.match(promptPreparationHookSource, /setInput\(''\)/, 'prompt preparation 
 assert.match(source, /useChatPromptStreamAction/, 'ChatPanel should delegate prompt streaming to a focused hook');
 assert.doesNotMatch(sendPromptSource, /await api\.streamChat/, 'sendPrompt should not call the streaming chat API directly after hook extraction');
 assert.match(promptStreamActionHookSource, /export function useChatPromptStreamAction/, 'useChatPromptStreamAction hook should be exported');
-assert.match(promptStreamActionHookSource, /buildSendPromptDraft\(\{ text, realtimeSyncState \}\)/, 'prompt stream hook should preserve optimistic draft creation');
+assert.match(promptStreamActionHookSource, /buildSendPromptDraft\(\{ text, realtimeSyncState, interactionMode: currentInteractionMode \}\)/, 'prompt stream hook should preserve optimistic draft creation');
+assert.match(source, /currentInteractionMode,\s*\n\s*chatContext,/, 'ChatPanel should pass interaction mode into prompt streaming');
 assert.match(promptStreamActionHookSource, /await api\.streamChat/, 'prompt stream hook should own the streaming chat API call');
 assert.match(promptStreamActionHookSource, /mergeTaskCardUpdate/, 'prompt stream hook should preserve failed task-card updates');
 assert.match(promptStreamActionHookSource, /streamLifecycle\.finishTask\(taskId, controller\)/, 'prompt stream hook should finish the stream lifecycle');
@@ -167,5 +177,12 @@ assert.equal(layerPanelSource.includes('error_message'), false, 'LayerPanel shou
 assert.equal(layerPanelSource.includes('jobView(job)?.user_message'), true, 'LayerPanel should render safe management_view.user_message');
 assert.equal(layerPanelSource.includes('job.download_url'), false, 'LayerPanel main download management path must not consume raw job.download_url');
 assert.match(layerPanelSource, /api\.artifactMetadata/, 'LayerPanel download actions must resolve artifact_id through the artifact resolver');
+assert.match(apiSource, /async importLocalLibrary\(item_ids: string\[\], user_id\?: string, session_id\?: string\)/, 'local library import API helper must accept the current session id');
+assert.match(apiSource, /body: JSON\.stringify\(\{ user_id: user_id \|\| '', session_id: session_id \|\| '', item_ids \}\)/, 'local library import API helper must send the current session id');
+assert.match(localLibraryPanelSource, /sessionId\?: string/, 'LocalLibraryPanel must accept the current chat session id');
+assert.match(localLibraryPanelSource, /api\.importLocalLibrary\(ids, userId \|\| '', sessionId \|\| ''\)/, 'LocalLibraryPanel imports must be scoped to the current session');
+assert.doesNotMatch(localLibraryPanelSource, /title=\{item\.path\}|\{item\.path\}/, 'LocalLibraryPanel must not render raw local filesystem paths');
+assert.match(layerPanelSource, /<LocalLibraryPanel userId=\{userId\} sessionId=\{sessionId\}/, 'LayerPanel local library imports must stay in the selected session');
+assert.match(productConsoleSource, /<LocalLibraryPanel userId=\{userId\} sessionId=\{sessionId \|\| chatContext\?\.session_id\}/, 'ProductConsole local library imports must use the active chat session');
 
 console.log('chat panel experience tests passed');

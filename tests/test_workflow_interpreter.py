@@ -87,7 +87,11 @@ class WorkflowInterpreterTests(unittest.TestCase):
         self.assertEqual([step["step_name"] for step in explanation["step_explanations"]], ["check_dataset", "clip_vector", "generate_map"])
         self.assertIn("空间分布", explanation["final_interpretation"])
         self.assertIn("generate_map", explanation["markdown_reply"])
-        self.assertIn("plots/points_clipped_map.png", explanation["markdown_reply"])
+        self.assertIn("Population density map", explanation["markdown_reply"])
+        self.assertNotIn("plots/points_clipped_map.png", explanation["markdown_reply"])
+        self.assertNotIn("derived/points_clipped.geojson", explanation["markdown_reply"])
+        self.assertNotIn("path", explanation["step_explanations"][2]["output"])
+        self.assertNotIn("path", explanation["workflow_summary"]["final_results"][0])
 
     def test_clip_failure_explains_completed_failed_and_skipped_steps(self) -> None:
         workflow = self.successful_clip_map_workflow()
@@ -130,8 +134,10 @@ class WorkflowInterpreterTests(unittest.TestCase):
     def test_multiple_artifacts_are_listed(self) -> None:
         explanation = interpret_workflow_result(self.successful_clip_map_workflow())
 
-        self.assertIn("derived/points_clipped.geojson", explanation["markdown_reply"])
-        self.assertIn("plots/points_clipped_map.png", explanation["markdown_reply"])
+        self.assertIn("points_clipped", explanation["markdown_reply"])
+        self.assertIn("Population density map", explanation["markdown_reply"])
+        self.assertNotIn("derived/points_clipped.geojson", explanation["markdown_reply"])
+        self.assertNotIn("plots/points_clipped_map.png", explanation["markdown_reply"])
 
     def test_result_interpreter_delegates_workflow_results(self) -> None:
         workflow = self.successful_clip_map_workflow()
@@ -226,7 +232,9 @@ class WorkflowInterpreterTests(unittest.TestCase):
 
         self.assertIn("format=zip", reply)
         self.assertIn("source_dataset=county_dem", reply)
-        self.assertIn("exports/county_dem.zip", reply)
+        self.assertIn("county_dem.zip", reply)
+        self.assertNotIn("exports/county_dem.zip", reply)
+        self.assertNotIn("output_path", reply)
 
 
 if __name__ == "__main__":

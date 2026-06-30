@@ -213,6 +213,9 @@ def test_chat_stream_api_forwards_model_deltas_and_completion() -> None:
         assert '"delta":"你好"' in body
         assert '"kind":"model_complete"' in body
         assert '"delta":"你好，GIS"' in body
+        assert '"mode":"answer_only"' in body
+        assert '"response_mode":"answer_only"' in body
+        assert '"interaction_type":"chat_answer"' in body
         assert '"user_id"' not in body
         assert '"session_id"' not in body
 
@@ -274,6 +277,41 @@ def test_answer_only_chat_stream_does_not_replay_generic_planning_event() -> Non
             and event["status"] == "planning"
             and event["message"] == "Preparing response or task plan."
         ]
+
+
+def test_answer_only_stream_task_update_strips_stale_task_card_fields() -> None:
+    from api_server import _stream_task_update
+
+    response = {
+        "mode": "answer_only",
+        "response_mode": "answer_only",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "Plain answer",
+                "meta": {
+                    "mode": "answer_only",
+                    "response_mode": "answer_only",
+                    "interaction_type": "chat_answer",
+                    "reason": "chat_only_direct_answer",
+                    "status": "planning",
+                    "task_card": {"task_id": "chat-a", "status": "planning"},
+                    "management_view": {"task_id": "chat-a"},
+                    "download_management_view": {"task_id": "chat-a"},
+                    "action_required": {"type": "confirmation_required"},
+                },
+            }
+        ],
+    }
+
+    update = _stream_task_update(response)
+
+    assert update == {
+        "mode": "answer_only",
+        "response_mode": "answer_only",
+        "interaction_type": "chat_answer",
+        "reason": "chat_only_direct_answer",
+    }
 
 
 def test_transient_model_tokens_are_scoped_and_not_persisted() -> None:

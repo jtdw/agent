@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 from langchain.tools import tool
@@ -42,9 +43,187 @@ def _json(data: dict | list) -> str:
 
 
 def _download_job_payload(job: dict, **extra) -> dict:
-    payload = {"job": job, "tool_result": download_job_to_tool_result(job)}
+    tool_result = _public_tool_result(download_job_to_tool_result(job))
+    public_job = _public_download_job(job)
+    payload = {
+        "job": public_job,
+        "tool_result": tool_result,
+        "status": str(tool_result.get("status") or public_job.get("status") or ""),
+        "ok": bool(tool_result.get("ok")),
+        "error_message": str(tool_result.get("user_message") or ""),
+    }
     payload.update(extra)
     return payload
+
+
+_PUBLIC_WORKER_JOB_KEYS = (
+    "login_job_id",
+    "capture_job_id",
+    "tile_job_id",
+    "scene_job_id",
+    "job_id",
+    "source_key",
+    "state",
+    "status",
+    "stage",
+    "message",
+    "progress",
+    "region",
+    "region_dataset",
+    "dataset_id",
+    "product_key",
+    "pages_scanned",
+    "candidate_count",
+    "selected_count",
+    "downloaded_count",
+    "failed_count",
+    "max_downloads",
+    "max_tiles",
+    "timeout_seconds",
+    "headless",
+    "auto_load",
+    "process_id",
+    "close_requested",
+    "close_reason",
+    "created_at",
+    "updated_at",
+    "finished_at",
+)
+
+_PUBLIC_WORKER_ID_KEYS = {"login_job_id", "capture_job_id", "tile_job_id", "scene_job_id", "job_id", "state", "status", "source_key"}
+_PRIVATE_WORKER_TEXT_MARKERS = (
+    "cookie",
+    "token",
+    "authorization",
+    "storage_state",
+    "traceback",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "direct_url",
+    "local_file_path",
+    "status_path",
+    "log_path",
+    "state_path",
+    ".env",
+    "workspace/",
+    "workspace\\",
+    "/users/",
+    "\\users\\",
+)
+
+
+def _public_worker_text(value: object, limit: int = 500) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if any(marker in lowered for marker in _PRIVATE_WORKER_TEXT_MARKERS):
+        return ""
+    if re.search(r"[A-Za-z]:[\\/]", text):
+        return ""
+    if text.startswith(("/api/files/artifact", "/api/downloads/artifact", "file:", "http:", "https:")):
+        return ""
+    return text[:limit]
+
+
+def _public_worker_job(job: dict | None) -> dict:
+    raw = job if isinstance(job, dict) else {}
+    public: dict[str, object] = {}
+    for key in _PUBLIC_WORKER_JOB_KEYS:
+        if key not in raw:
+            continue
+        value = raw.get(key)
+        if isinstance(value, str):
+            public[key] = value[:120] if key in _PUBLIC_WORKER_ID_KEYS else _public_worker_text(value)
+        else:
+            public[key] = value
+    return public or {"state": _public_worker_text(raw.get("state") or raw.get("status") or "UNKNOWN", 80)}
+
+
+def _public_worker_jobs(jobs: list[dict]) -> list[dict]:
+    return [_public_worker_job(job) for job in jobs if isinstance(job, dict)]
+
+
+_PUBLIC_DOWNLOAD_JOB_KEYS = (
+    "job_id",
+    "source_key",
+    "resource_type",
+    "region",
+    "start_date",
+    "end_date",
+    "account_mode",
+    "output_name",
+    "status",
+    "state",
+    "status_label",
+    "stage",
+    "message",
+    "progress",
+    "created_at",
+    "updated_at",
+    "finished_at",
+    "canceled_at",
+    "retried_from_job_id",
+)
+
+_PRIVATE_TOOL_RESULT_KEYS = {
+    "path",
+    "display_path",
+    "source_path",
+    "absolute_path",
+    "relative_path",
+    "output_path",
+    "zip_path",
+    "package_path",
+    "downloaded_path",
+    "download_url",
+    "direct_url",
+    "local_file_path",
+    "request_text",
+    "status_path",
+    "log_path",
+    "storage_state_path",
+    "state_path",
+    "user_id",
+    "session_id",
+    "account_id",
+}
+
+
+def _public_download_job(job: dict | None) -> dict:
+    raw = job if isinstance(job, dict) else {}
+    public: dict[str, object] = {}
+    for key in _PUBLIC_DOWNLOAD_JOB_KEYS:
+        if key not in raw:
+            continue
+        value = raw.get(key)
+        if isinstance(value, str):
+            public[key] = value[:120] if key in {"job_id", "source_key", "resource_type", "status", "state", "account_mode"} else _public_worker_text(value)
+        else:
+            public[key] = value
+    return public
+
+
+def _public_tool_value(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(k): _public_tool_value(v) for k, v in value.items() if str(k) not in _PRIVATE_TOOL_RESULT_KEYS}
+    if isinstance(value, list):
+        return [_public_tool_value(item) for item in value]
+    if isinstance(value, str):
+        return _public_worker_text(value)
+    return value
+
+
+def _public_tool_result(result: dict) -> dict:
+    public = _public_tool_value(result)
+    return public if isinstance(public, dict) else {}
+
+
+def _public_download_jobs(jobs: list[dict]) -> list[dict]:
+    return [_public_download_job(job) for job in jobs if isinstance(job, dict)]
+
+
+def _public_download_tool_results(jobs: list[dict]) -> list[dict]:
+    return [_public_tool_result(download_job_to_tool_result(job)) for job in jobs if isinstance(job, dict)]
 
 
 def _confirmation_id(action: str, **params) -> str:
@@ -143,7 +322,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
         return _json({
             "ok": True,
             "non_blocking": True,
-            "login_job": login_job,
+            "login_job": _public_worker_job(login_job),
             "message": "浏览器已在独立后台进程打开。本次对话不会被阻塞；请在浏览器中完成登录，系统会自动保存 Cookie。",
         })
 
@@ -167,39 +346,39 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
         return _json({
             "ok": True,
             "non_blocking": True,
-            "login_job": login_job,
+            "login_job": _public_worker_job(login_job),
             "message": "浏览器已在独立后台进程打开。本次对话不会被阻塞；请在浏览器中完成登录，系统会自动保存 Cookie。",
         })
 
     @tool
     def list_gscloud_login_window_jobs(limit: int = 20) -> str:
         """列出地理空间数据云登录窗口后台任务状态，用于查看是否已保存 Cookie 或是否失败。"""
-        return _json({"jobs": list_gscloud_login_jobs(manager.workdir, limit=limit)})
+        return _json({"jobs": _public_worker_jobs(list_gscloud_login_jobs(manager.workdir, limit=limit))})
 
     @tool
     def get_gscloud_login_window_job(login_job_id: str) -> str:
         """查看某个地理空间数据云登录窗口后台任务状态。"""
-        return _json(read_gscloud_login_job(manager.workdir, login_job_id))
+        return _json(_public_worker_job(read_gscloud_login_job(manager.workdir, login_job_id)))
 
     @tool
     def list_gscloud_capture_window_jobs(limit: int = 20) -> str:
         """列出地理空间数据云 DEM 捕获下载后台任务状态。"""
-        return _json({"jobs": list_gscloud_capture_jobs(manager.workdir, limit=limit)})
+        return _json({"jobs": _public_worker_jobs(list_gscloud_capture_jobs(manager.workdir, limit=limit))})
 
     @tool
     def get_gscloud_capture_window_job(capture_job_id: str) -> str:
         """查看一个地理空间数据云 DEM 捕获下载后台任务状态。"""
-        return _json(read_gscloud_capture_job(manager.workdir, capture_job_id))
+        return _json(_public_worker_job(read_gscloud_capture_job(manager.workdir, capture_job_id)))
 
     @tool
     def list_gscloud_auto_tile_jobs(limit: int = 20) -> str:
         """列出地理空间数据云 DEM 自动分幅下载后台任务。"""
-        return _json({"jobs": list_gscloud_tile_jobs(commercial.workdir, limit=limit)})
+        return _json({"jobs": _public_worker_jobs(list_gscloud_tile_jobs(commercial.workdir, limit=limit))})
 
     @tool
     def get_gscloud_auto_tile_job(tile_job_id: str) -> str:
         """查看一个地理空间数据云 DEM 自动分幅下载后台任务状态。"""
-        return _json(read_gscloud_tile_job(commercial.workdir, tile_job_id))
+        return _json(_public_worker_job(read_gscloud_tile_job(commercial.workdir, tile_job_id)))
 
     @tool
     def start_gscloud_dem_region_auto_tiles_job(
@@ -250,7 +429,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             return _json({
                 "ok": True,
                 "job_id": job_id,
-                "auto_tile_job": tile_job,
+                "auto_tile_job": _public_worker_job(tile_job),
                 "next_step": "系统已在后台自动计算并下载分幅，不需要用户自己判断四川对应哪些分幅。可查询商业任务状态或自动分幅下载后台任务状态。",
             })
         except Exception as exc:
@@ -300,11 +479,11 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                 "ok": True,
                 "non_blocking": True,
                 "job_id": job_id,
-                "capture_job": capture_job,
+                "capture_job": _public_worker_job(capture_job),
                 "next_step": "浏览器会自动打开到 ASTER GDEM 30M 页面。请在页面中点击下载按钮；下载完成后后台会自动入库、打包并更新任务状态。",
             })
         except Exception as exc:
-            return _json(commercial.fail_job(job_id, str(exc)))
+            return _json(_download_job_payload(commercial.fail_job(job_id, str(exc))))
 
     @tool
     def submit_commercial_download_job(
@@ -339,7 +518,8 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             output_name=output_name,
         )
         return _json({
-            "job": job,
+            "job": _public_download_job(job),
+            "tool_result": _public_tool_result(download_job_to_tool_result(job)),
             "next_step": "如果 direct_url/local_file_path 已填写，可调用 run_commercial_download_job；地理空间数据云 DEM 推荐调用 run_gscloud_dem_capture_job。",
         })
 
@@ -362,7 +542,7 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                     auto_load=auto_load,
                 ).to_dict()
                 done = commercial.run_job_with_result(job_id, result)
-                return _json(done)
+                return _json(_download_job_payload(done))
 
             url = direct_url or job.get("direct_url") or ""
             if url:
@@ -377,15 +557,16 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                     timeout_seconds=900,
                 ).to_dict()
                 done = commercial.run_job_with_result(job_id, result)
-                return _json(done)
+                return _json(_download_job_payload(done))
 
             commercial._update_job(job_id, status="waiting_manual", progress=10, stage="needs_site_adapter_or_browser_capture")
             return _json({
-                "job": commercial.get_job(job_id),
+                "job": _public_download_job(commercial.get_job(job_id)),
+                "tool_result": _public_tool_result(download_job_to_tool_result(commercial.get_job(job_id))),
                 "message": "该任务已创建，但没有 direct_url 或 local_file_path。地理空间数据云 DEM 请调用 run_gscloud_dem_capture_job。",
             })
         except Exception as exc:
-            return _json(commercial.fail_job(job_id, str(exc)))
+            return _json(_download_job_payload(commercial.fail_job(job_id, str(exc))))
 
     @tool
     def run_gscloud_dem_capture_job(
@@ -433,9 +614,9 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             )
             commercial._update_job(job_id, status="running", progress=85, stage="packaging_result")
             done = commercial.run_job_with_result(job_id, result)
-            return _json(done)
+            return _json(_download_job_payload(done))
         except Exception as exc:
-            return _json(commercial.fail_job(job_id, str(exc)))
+            return _json(_download_job_payload(commercial.fail_job(job_id, str(exc))))
 
     @tool
     def run_gscloud_dem_auto_tiles_job(
@@ -485,9 +666,9 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
                 auto_load=auto_load,
             )
             done = commercial.run_job_with_result(job_id, result)
-            return _json(done)
+            return _json(_download_job_payload(done))
         except Exception as exc:
-            return _json(commercial.fail_job(job_id, str(exc)))
+            return _json(_download_job_payload(commercial.fail_job(job_id, str(exc))))
 
 
     @tool
@@ -643,19 +824,20 @@ def build_commercial_tools(manager: DataManager, *, include_admin_tools: bool = 
             )
             result["tile_plan"] = {k: v for k, v in plan.items() if k != "records"}
             done = commercial.run_job_with_result(job_id, result)
-            return _json(done)
+            return _json(_download_job_payload(done))
         except Exception as exc:
-            return _json(commercial.fail_job(job_id, str(exc)))
+            return _json(_download_job_payload(commercial.fail_job(job_id, str(exc))))
 
     @tool
     def get_commercial_download_job(job_id: str) -> str:
         """查看一个商业下载任务的状态与结果。"""
-        return _json(commercial.get_job(job_id))
+        return _json(_download_job_payload(commercial.get_job(job_id)))
 
     @tool
     def list_commercial_download_jobs(user_id: str = "", limit: int = 20) -> str:
         """列出商业下载任务。可按 user_id 过滤。"""
-        return _json(commercial.list_jobs(user_id=user_id, limit=limit))
+        jobs = commercial.list_jobs(user_id=user_id, limit=limit)
+        return _json({"jobs": _public_download_jobs(jobs), "tool_results": _public_download_tool_results(jobs)})
 
 
     @tool

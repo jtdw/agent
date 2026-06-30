@@ -65,6 +65,9 @@ class AdminPlatformAccountTests(unittest.TestCase):
             self.assertEqual(account_id, listed_account["account_id"])
             self.assertFalse(listed_account["login_health"]["ok"])
             self.assertNotIn("path", listed_account["login_health"])
+            self.assertNotIn("storage_state_path", listed_account["login_health"])
+            self.assertNotIn("status_path", listed_account["login_health"])
+            self.assertNotIn("log_path", listed_account["login_health"])
 
             with mock.patch.object(api_server, "start_gscloud_login_process", return_value={
                 "login_job_id": "login_test",
@@ -82,6 +85,16 @@ class AdminPlatformAccountTests(unittest.TestCase):
             self.assertEqual("login_test", login_job["login_job_id"])
             self.assertNotIn("status_path", login_job)
             self.assertNotIn("log_path", login_job)
+            self.assertNotIn("path", login.json()["account"]["login_health"])
+
+            health = self.client.get(f"/api/admin/platform-accounts/{account_id}/health", headers=headers)
+            self.assertEqual(200, health.status_code, health.text)
+            health_payload = health.json()["login_health"]
+            self.assertFalse(health_payload["ok"])
+            self.assertNotIn("path", health_payload)
+            self.assertNotIn("storage_state_path", health_payload)
+            self.assertNotIn("status_path", health_payload)
+            self.assertNotIn("log_path", health_payload)
 
             disabled = self.client.post(f"/api/admin/platform-accounts/{account_id}/status", headers=headers, json={"status": "disabled"})
             self.assertEqual(200, disabled.status_code, disabled.text)

@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from core.area_resolver import area_by_asset_id
@@ -314,6 +315,36 @@ def _attach_registered_download_artifacts(manager: Any, result: dict[str, Any], 
     diagnostics = result.setdefault("diagnostics", {})
     diagnostics["registered_artifact_ids"] = [item["artifact_id"] for item in artifacts if item.get("artifact_id")]
     diagnostics["artifact_registration_source"] = "download_job_outputs"
+    map_layers: list[dict[str, Any]] = []
+    map_layer_errors: list[dict[str, str]] = []
+    try:
+        from core.map_layers import MapLayerService
+
+        layer_service = MapLayerService(SimpleNamespace(manager=manager))
+        user_id = str(getattr(manager, "current_user_id", "") or job.get("user_id") or "")
+        session_id = str(getattr(manager, "current_session_id", "") or job.get("session_id") or "")
+        for artifact_ref in artifacts:
+            if str(artifact_ref.get("type") or "") == "download_package":
+                continue
+            artifact_id = str(artifact_ref.get("artifact_id") or "")
+            artifact = manager.get_artifact(artifact_id) if artifact_id and callable(getattr(manager, "get_artifact", None)) else None
+            if not artifact:
+                artifact = artifact_ref
+            try:
+                layer = layer_service.artifact_spatial_layer(artifact, user_id=user_id, session_id=session_id)
+            except Exception as exc:
+                map_layer_errors.append({"artifact_id": artifact_id, "reason": str(exc)[:180]})
+                continue
+            if layer:
+                map_layers.append(layer)
+    except Exception as exc:
+        map_layer_errors.append({"artifact_id": "", "reason": str(exc)[:180]})
+    if map_layers:
+        result["map_layers"] = map_layers
+        result.setdefault("outputs", {})["map_layers"] = map_layers
+        diagnostics["registered_map_layer_ids"] = [str(item.get("id") or item.get("layer_id") or "") for item in map_layers if item.get("id") or item.get("layer_id")]
+    if map_layer_errors:
+        diagnostics["map_layer_registration_errors"] = map_layer_errors
     return result
 
 

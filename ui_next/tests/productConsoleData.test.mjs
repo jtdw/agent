@@ -18,6 +18,7 @@ const data = await loadTs('src/components/productConsoleData.ts');
 const consoleSource = await readFile('src/components/ProductConsole.tsx', 'utf8');
 const layerPanelSource = await readFile('src/components/LayerPanel.tsx', 'utf8');
 const appSource = await readFile('src/App.tsx', 'utf8');
+const apiSource = await readFile('src/lib/api.ts', 'utf8');
 
 assert.match(consoleSource, /openMap/, 'ProductConsole sidebar nav must expose a map workbench action');
 assert.match(consoleSource, /地理空间数据云登录/, 'ProductConsole settings must expose the GSCloud login module');
@@ -29,9 +30,20 @@ assert.match(consoleSource, /deleteWorkspaceArtifact/, 'ProductConsole must be a
 assert.match(consoleSource, /console-artifact-image-preview/, 'ProductConsole must show visual artifact thumbnails');
 assert.match(consoleSource, /artifact\.kind === 'visual'/, 'ProductConsole must preview visual artifacts without changing downloads');
 assert.match(consoleSource, /api\.artifactMetadata/, 'ProductConsole download actions must resolve artifact_id through the artifact resolver');
+assert.match(consoleSource, /key=\{artifact\.artifactId\}/, 'ProductConsole artifact rows must be keyed only by backend artifact_id');
+assert.doesNotMatch(consoleSource, /artifact\.artifactId \|\| artifact\.path \|\| artifact\.url/, 'ProductConsole artifact rows must not use stale path/url as identity fallback');
+assert.doesNotMatch(consoleSource, /api\.downloadAuthenticated\(metadata\.download_url/, 'ProductConsole job artifact downloads must not reuse metadata download_url directly');
+assert.doesNotMatch(consoleSource, /downloadUrl\(metadata\.download_url/, 'ProductConsole job artifact downloads must not pass metadata download_url to a raw-url helper');
+assert.doesNotMatch(layerPanelSource, /api\.downloadAuthenticated\(metadata\.download_url/, 'LayerPanel job artifact downloads must not reuse metadata download_url directly');
+assert.doesNotMatch(layerPanelSource, /downloadUrl\(metadata\.download_url/, 'LayerPanel job artifact downloads must not pass metadata download_url to a raw-url helper');
+const loginHealthType = apiSource.match(/export type LoginHealthResponse = \{[\s\S]*?\n\};/)?.[0] || '';
+assert.ok(loginHealthType, 'api.ts must define the LoginHealthResponse contract');
+assert.doesNotMatch(loginHealthType, /\bpath\?: string;/, 'LoginHealthResponse must not expose local login state file paths');
 assert.doesNotMatch(consoleSource, /job\.download_url/, 'ProductConsole main download management path must not consume raw job.download_url');
 assert.doesNotMatch(consoleSource, /if \(error\) return <StateMessage/, 'ProductConsole must not replace the whole page with a dashboard error banner');
 assert.match(consoleSource, /\{error && <StateMessage tone="error">\{error\}<\/StateMessage>\}/, 'ProductConsole should show dashboard errors inline while preserving page content');
+assert.doesNotMatch(consoleSource, /dashboard\?\.workdir/, 'ProductConsole settings must not render the backend workspace path');
+assert.doesNotMatch(apiSource, /\bworkdir\?: string;/, 'WorkspaceDashboard must not expose backend workspace paths');
 assert.doesNotMatch(layerPanelSource, /api\.dashboard\(userId,\s*sessionId\)\.then\(setDashboard\)\.catch\(\(\) => setDashboard\(null\)\)/, 'LayerPanel must keep previous dashboard results when a refresh fails');
 assert.doesNotMatch(layerPanelSource, /\.catch\(\(\) => setJobs\(\[\]\)\)/, 'LayerPanel must keep previous jobs when a refresh fails');
 const openChatWorkspaceSource = consoleSource.match(/const openChatWorkspace = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
@@ -75,12 +87,21 @@ const artifacts = [
 ];
 
 assert.deepEqual(
-  data.groupArtifacts(artifacts).map((item) => [item.artifactId, item.label, item.path, item.kind, item.url]),
+  data.groupArtifacts(artifacts).map((item) => [item.artifactId, item.label, item.kind, 'path' in item, 'url' in item]),
   [
-    ['artifact_metrics', 'model_metrics.csv', 'derived/model_metrics.csv', 'report', ''],
-    ['artifact_map', 'soil_map.png', 'plots/soil_map.png', 'visual', ''],
-    ['artifact_zip', 'workspace.zip', 'exports/workspace.zip', 'archive', '']
+    ['artifact_metrics', 'model_metrics.csv', 'report', false, false],
+    ['artifact_map', 'soil_map.png', 'visual', false, false],
+    ['artifact_zip', 'workspace.zip', 'archive', false, false]
   ]
+);
+
+const pathOnlyArtifacts = [
+  { artifact_id: 'artifact_path_only', path: 'workspace/users/u1/sessions/s1/derived/internal.csv', download_url: '/api/files/artifact?path=derived/internal.csv' }
+];
+assert.deepEqual(
+  data.groupArtifacts(pathOnlyArtifacts),
+  [{ artifactId: 'artifact_path_only', label: 'artifact_path_only', kind: 'artifact' }],
+  'ProductConsole must not derive public labels or model fields from internal artifact paths'
 );
 
 console.log('product console data tests passed');

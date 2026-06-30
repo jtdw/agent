@@ -16,6 +16,22 @@ from core.tool_cards import candidate_tool_cards
 
 MAX_CONTEXT_OBJECTS = 12
 TRUE_VALUES = {"1", "true", "yes", "on"}
+PRIVATE_CONTEXT_KEYS = {
+    "path",
+    "display_path",
+    "source_path",
+    "absolute_path",
+    "relative_path",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "status_path",
+    "log_path",
+    "metrics_path",
+    "recent_map_path",
+    "last_map_path",
+    "last_plot",
+}
 HISTORY_REFERENCE_TERMS = (
     "上次",
     "刚才",
@@ -336,6 +352,7 @@ def build_conversation_context(
         "recent_tool_results": _as_list(state_dict.get("last_tool_results"))[:3] if explicit_history_reference else [],
         "recent_error": state_dict.get("last_error") if explicit_history_reference and isinstance(state_dict.get("last_error"), dict) else None,
         "user_goal": str(state_dict.get("last_user_goal") or ""),
+        "active_task": state_dict.get("active_task") if isinstance(state_dict.get("active_task"), dict) else None,
         "referenced_object": state_dict.get("referenced_object") if explicit_history_reference and isinstance(state_dict.get("referenced_object"), dict) else None,
         "followup": followup or {},
         "context_sources": {
@@ -397,6 +414,17 @@ def build_conversation_context(
 
 
 def format_context_for_agent(context: dict[str, Any]) -> str:
+    def _strip_private_context_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                str(key): _strip_private_context_fields(item)
+                for key, item in value.items()
+                if str(key) not in PRIVATE_CONTEXT_KEYS
+            }
+        if isinstance(value, list):
+            return [_strip_private_context_fields(item) for item in value]
+        return value
+
     def _limit_text(value: Any, limit: int = 360) -> str:
         text = str(value or "")
         return text if len(text) <= limit else text[:limit].rstrip() + "..."
@@ -487,6 +515,7 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         "recent_tool_results": context.get("recent_tool_results"),
         "recent_error": context.get("recent_error"),
         "user_goal": context.get("user_goal"),
+        "active_task": context.get("active_task"),
         "referenced_object": context.get("referenced_object"),
         "available_fields": context.get("available_fields"),
         "numeric_fields": context.get("numeric_fields"),
@@ -507,4 +536,4 @@ def format_context_for_agent(context: dict[str, Any]) -> str:
         payload["vector_knowledge_snippets"] = _compact_knowledge_snippets(context.get("vector_knowledge_snippets"))
     if "rag_trace" in context:
         payload["rag_trace"] = context.get("rag_trace")
-    return json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    return json.dumps(_strip_private_context_fields(payload), ensure_ascii=False, indent=2, default=str)

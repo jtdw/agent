@@ -15,4 +15,3 @@ class ArtifactDeleteIn(BaseModel):
     user_id: str = ""
     session_id: str = ""
     artifact_id: str = ""
-    path: str = ""

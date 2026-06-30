@@ -10,6 +10,7 @@ type StreamLifecycle = ReturnType<typeof useChatStreamLifecycle>;
 type UseChatPromptStreamActionArgs = {
   userId: string;
   currentSessionId: string;
+  currentInteractionMode: 'chat_only' | 'tool_enabled';
   chatContext: ChatContextPayload;
   realtimeSyncState: RealtimeSyncState;
   streamLifecycle: StreamLifecycle;
@@ -29,6 +30,7 @@ type UseChatPromptStreamActionArgs = {
 export function useChatPromptStreamAction({
   userId,
   currentSessionId,
+  currentInteractionMode,
   chatContext,
   realtimeSyncState,
   streamLifecycle,
@@ -41,7 +43,7 @@ export function useChatPromptStreamAction({
   mergeTaskCardUpdate,
 }: UseChatPromptStreamActionArgs) {
   const streamPrompt = async (text: string) => {
-    const draft = buildSendPromptDraft({ text, realtimeSyncState });
+    const draft = buildSendPromptDraft({ text, realtimeSyncState, interactionMode: currentInteractionMode });
     const controller = new AbortController();
     const { taskId, optimisticUserMessage, streamingAssistantMessage } = draft;
     setMessages((messages) => [...messages, optimisticUserMessage, streamingAssistantMessage]);

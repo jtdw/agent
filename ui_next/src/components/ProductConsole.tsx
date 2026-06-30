@@ -76,16 +76,12 @@ type DownloadProduct = {
 };
 
 type JobLogData = {
-  job?: DownloadJob;
   management_view?: DownloadManagementView;
   diagnostic_event_views?: {
     scene_jobs?: DiagnosticEventView[];
     tile_jobs?: DiagnosticEventView[];
     audit_events?: DiagnosticEventView[];
   };
-  scene_jobs?: Array<Record<string, unknown>>;
-  tile_jobs?: Array<Record<string, unknown>>;
-  audit_events?: Array<Record<string, unknown>>;
 };
 
 const navItems: ConsoleNavItem[] = [
@@ -355,7 +351,7 @@ export function ProductConsole({
         api.dashboard(userId, sessionId),
         api.jobs(userId, sessionId)
       ]);
-      const nextJobs = attachManagementViews(jobsData.jobs || [], jobsData.management_views || []);
+      const nextJobs = attachManagementViews([], jobsData.management_views || []);
       setDashboard(dashboardData);
       setJobs(nextJobs);
       if (!selectedJobId && nextJobs[0]?.job_id) setSelectedJobId(nextJobs[0].job_id);
@@ -376,6 +372,8 @@ export function ProductConsole({
   const summary = useMemo(() => summarizeJobs(jobs), [jobs]);
   const counts = dashboard?.dataset_type_counts || {};
   const artifacts = useMemo(() => groupArtifacts(dashboard?.artifacts || []), [dashboard]);
+  const workspaceSessionLabel = dashboard?.current_session_id || sessionId || chatContext?.session_id || '';
+  const workspaceDisplayName = workspaceSessionLabel ? `会话 ${workspaceSessionLabel.slice(0, 12)}` : '默认工作区';
   const selectedJob = useMemo(() => jobs.find((job) => job.job_id === selectedJobId) || jobs[0], [jobs, selectedJobId]);
   const filteredJobs = useMemo(() => {
     const keyword = query.trim().toLowerCase();
@@ -456,12 +454,9 @@ export function ProductConsole({
         output_name: outputName.trim() || defaultOutputName,
         session_id: sessionId || chatContext?.session_id
       });
-      const created = result.job as DownloadJob | undefined;
-      if (created && result.management_view) created.management_view = result.management_view;
       setNotice(result.auto_started ? '任务已启动，系统正在后台执行。' : `任务已创建：${result.reason || '等待处理'}`);
       await refresh();
       if (result.management_view?.task_id) setSelectedJobId(result.management_view.task_id);
-      else if (created?.job_id) setSelectedJobId(created.job_id);
       setActiveTab('tasks');
     } catch (e) {
       setPreflightOk(false);
@@ -511,7 +506,7 @@ export function ProductConsole({
     setBusyJobId(job.job_id);
     try {
       const result = await api.cancelDownloadJob(job.job_id, userId, '用户在控制台取消任务。', sessionId);
-      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setJobs(attachManagementViews([], result.management_views || []));
       setNotice(`已取消任务：${getJobName(job)}`);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '取消任务失败');
@@ -524,12 +519,9 @@ export function ProductConsole({
     setBusyJobId(job.job_id);
     try {
       const result = await api.retryDownloadJob(job.job_id, userId, sessionId);
-      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setJobs(attachManagementViews([], result.management_views || []));
       setNotice(result.auto_started ? '已创建重试任务并开始后台执行。' : `已创建重试任务：${result.reason || '等待处理'}`);
-      const newJob = result.job as DownloadJob | undefined;
-      if (newJob && result.management_view) newJob.management_view = result.management_view;
       if (result.management_view?.task_id) setSelectedJobId(result.management_view.task_id);
-      else if (newJob?.job_id) setSelectedJobId(newJob.job_id);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '重试任务失败');
     } finally {
@@ -541,7 +533,7 @@ export function ProductConsole({
     setBusyJobId(job.job_id);
     try {
       const result = await api.deleteDownloadJob(job.job_id, userId, sessionId);
-      const nextJobs = attachManagementViews(result.jobs || [], result.management_views || []);
+      const nextJobs = attachManagementViews([], result.management_views || []);
       setJobs(nextJobs);
       setNotice(`已删除任务记录：${getJobName(job)}`);
       if (selectedJobId === job.job_id) setSelectedJobId(nextJobs[0]?.job_id || '');
@@ -559,19 +551,11 @@ export function ProductConsole({
       const result = await api.exportWorkspace(userId, sessionId, 'all');
       setNotice(`已打包 ${result.file_count} 个成果文件。`);
       await refresh();
-      if (result.download_url) await downloadUrl(result.download_url, 'workspace-export.zip');
+      if (result.artifact_id) await api.downloadArtifactById(result.artifact_id, 'workspace-export.zip', userId, sessionId);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '导出失败');
     } finally {
       setExporting(false);
-    }
-  };
-
-  const downloadUrl = async (url: string, name: string) => {
-    try {
-      await api.downloadAuthenticated(url, name);
-    } catch (e) {
-      setNotice(e instanceof Error ? e.message : '下载失败');
     }
   };
 
@@ -594,8 +578,7 @@ export function ProductConsole({
       const result = await api.deleteWorkspaceArtifact({
         user_id: userId,
         session_id: sessionId,
-        artifact_id: artifact.artifactId,
-        path: artifact.path
+        artifact_id: artifact.artifactId
       });
       setDashboard(result.dashboard);
       setNotice(`已删除结果文件：${artifact.label}`);
@@ -935,7 +918,7 @@ export function ProductConsole({
               <InfoItem label="审计事件" value={logData.diagnostic_event_views?.audit_events?.length || 0} />
             </div>
             <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4 font-mono text-xs leading-6 text-slate-100 shadow-inner dark:border-slate-700">
-              <div>任务编号：{logData.management_view?.task_id || logData.job?.job_id || '--'}</div>
+              <div>任务编号：{logData.management_view?.task_id || '--'}</div>
               <div>任务状态：{logData.management_view?.status || '--'}</div>
               <div>执行阶段：{logData.management_view?.action_state?.stage || '--'}</div>
               <div>完成进度：{formatPercent(logData.management_view?.progress ?? 0)}%</div>
@@ -996,7 +979,7 @@ export function ProductConsole({
                 <div className="space-y-2">
                   {panelFiles.map((file) => (
                     <button key={file.artifact_id || file.label} onClick={() => downloadArtifact(file.artifact_id || '', file.label || 'result')} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
-                      <span className="min-w-0 truncate font-semibold">{file.label || file.path || '结果文件'}</span>
+                      <span className="min-w-0 truncate font-semibold">{file.label || file.title || file.name || file.filename || file.artifact_id || '结果文件'}</span>
                       <Download className="shrink-0 text-slate-400" size={16} />
                     </button>
                   ))}
@@ -1020,7 +1003,7 @@ export function ProductConsole({
           <MetricCard label="文档" value={counts.document || 0} hint="说明、报告和 Markdown。" icon={Archive} />
         </div>
       </Panel>
-      <LocalLibraryPanel userId={userId} onImported={refresh} />
+      <LocalLibraryPanel userId={userId} sessionId={sessionId || chatContext?.session_id} onImported={refresh} />
     </div>
   );
 
@@ -1031,7 +1014,7 @@ export function ProductConsole({
         <InfoItem label="账号状态" value={user ? user.email : '未登录'} />
         <InfoItem label="当前套餐" value={user?.plan || '--'} />
         <InfoItem label="平台额度" value={user ? `${Number(user.platform_monthly_used || 0)} / ${Number(user.platform_monthly_quota || 0)}` : '--'} />
-        <InfoItem label="工作区" value={dashboard?.workdir || '默认工作区'} />
+        <InfoItem label="工作区" value={workspaceDisplayName} />
       </div>
       <div className="mt-5 flex flex-wrap gap-3">
         <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}><Map size={15} /> 打开原地图工作台</button>
@@ -1048,7 +1031,7 @@ export function ProductConsole({
           <InfoItem label="账号状态" value={user ? user.email : '未登录'} />
           <InfoItem label="当前套餐" value={user?.plan || '--'} />
           <InfoItem label="平台额度" value={user ? `${Number(user.platform_monthly_used || 0)} / ${Number(user.platform_monthly_quota || 0)}` : '--'} />
-          <InfoItem label="工作区" value={dashboard?.workdir || '默认工作区'} />
+          <InfoItem label="工作区" value={workspaceDisplayName} />
         </div>
         <div className="mt-5 flex flex-wrap gap-3">
           <button data-testid="open-map-workspace" className="console-secondary-button" onClick={onOpenMap}><Map size={15} /> 打开原地图工作台</button>
@@ -1255,10 +1238,10 @@ function ArtifactList({ artifacts, onDownload, onDelete }: { artifacts: ConsoleA
       {artifacts.map((artifact) => {
         const Icon = artifactIcon(artifact.kind);
         return (
-          <div key={artifact.artifactId || artifact.path || artifact.url} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
+          <div key={artifact.artifactId} className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200/90 bg-white/86 px-4 py-3 text-left text-sm shadow-sm transition hover:-translate-y-0.5 hover:border-cyan-300 hover:bg-cyan-50/60 hover:shadow-md dark:border-slate-800 dark:bg-slate-900/78 dark:hover:border-cyan-800 dark:hover:bg-cyan-950/25">
             <span className="flex min-w-0 items-center gap-3">
-              {artifact.kind === 'visual' && artifact.url ? (
-                <img data-testid="console-artifact-image-preview" src={artifact.url} alt={artifact.label} loading="lazy" className="h-12 w-16 shrink-0 rounded-lg border border-slate-200 bg-slate-50 object-cover dark:border-slate-800 dark:bg-slate-950" />
+              {artifact.kind === 'visual' && artifact.previewUrl ? (
+                <img data-testid="console-artifact-image-preview" src={artifact.previewUrl} alt={artifact.label} loading="lazy" className="h-12 w-16 shrink-0 rounded-lg border border-slate-200 bg-slate-50 object-cover dark:border-slate-800 dark:bg-slate-950" />
               ) : (
                 <Icon className="shrink-0 text-slate-400" size={17} />
               )}

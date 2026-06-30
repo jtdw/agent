@@ -12,6 +12,10 @@ assert.match(apiSource, /\/api\/admin\/system-reset/, 'system reset must call th
 assert.match(apiSource, /storageCleanupScan/, 'api client must expose storage cleanup scan');
 assert.match(apiSource, /storageCleanupDelete/, 'api client must expose storage cleanup delete');
 assert.match(apiSource, /\/api\/admin\/storage-cleanup\/scan/, 'storage cleanup scan must use admin endpoint');
+assert.match(apiSource, /label\?: string/, 'storage cleanup candidates must expose a safe display label');
+assert.doesNotMatch(apiSource.match(/export type StorageCleanupCandidate[\s\S]*?};/)?.[0] || '', /\n\s*path\?: string;/, 'storage cleanup candidates must not expose legacy raw paths');
+assert.doesNotMatch(apiSource, /root: string;/, 'storage cleanup scan response must not expose workspace root');
+assert.doesNotMatch(apiSource, /deleted: Array<\{ candidate_id: string; path: string/, 'storage cleanup delete response must not expose deleted local paths');
 assert.match(apiSource, /adminPlatformAccounts/, 'api client must expose platform account listing');
 assert.match(apiSource, /upsertAdminPlatformAccount/, 'api client must expose platform account upsert');
 assert.match(apiSource, /startAdminPlatformAccountLogin/, 'api client must expose platform account login refresh');
@@ -35,6 +39,10 @@ assert.match(panelSource, /full_reset/, 'capability panel must expose full reset
 assert.match(panelSource, /scanStorageCleanup/, 'capability panel must expose historical storage scan');
 assert.match(panelSource, /runStorageCleanup/, 'capability panel must expose historical storage cleanup action');
 assert.match(panelSource, /删除历史缓存/, 'historical storage cleanup must require explicit Chinese confirmation text');
+assert.match(panelSource, /cleanupCandidateLabel/, 'historical storage cleanup must derive safe display labels');
+assert.match(panelSource, /item\.label/, 'historical storage cleanup must prefer backend-provided safe labels');
+assert.doesNotMatch(panelSource, /item\.path/, 'historical storage cleanup must not fall back to legacy raw paths');
+assert.doesNotMatch(panelSource, /\{item\.path\}/, 'historical storage cleanup must not render raw local paths directly');
 assert.match(panelSource, /平台账号管理/, 'capability panel must render platform account management card');
 assert.match(panelSource, /addPlatformAccount/, 'platform account card must support adding accounts');
 assert.match(panelSource, /startPlatformLogin/, 'platform account card must support login state refresh');

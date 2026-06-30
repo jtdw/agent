@@ -180,7 +180,7 @@ export function LayerPanel({
     const requestedScope = `${userId}|${sessionId || ''}`;
     api.jobs(userId, sessionId)
       .then((r) => {
-        const nextJobs = attachManagementViews(r.jobs || [], r.management_views || []);
+        const nextJobs = attachManagementViews([], r.management_views || []);
         jobsScopeRef.current = requestedScope;
         setJobs(nextJobs);
         if (!jobsInitializedRef.current) {
@@ -289,9 +289,9 @@ export function LayerPanel({
     setBusy(true);
     try {
       const r = await api.exportWorkspace(userId, sessionId, 'all');
-      setNotice(`已打包 ${r.file_count} 个成果文件。${r.download_url ? '可在最近成果中下载。' : ''}`);
+      setNotice(`已打包 ${r.file_count} 个成果文件。${r.artifact_id ? '可在最近成果中下载。' : ''}`);
       refreshDashboard();
-      if (r.download_url) await downloadUrl(r.download_url, 'workspace-export.zip');
+      if (r.artifact_id) await api.downloadArtifactById(r.artifact_id, 'workspace-export.zip', userId, sessionId);
     } catch (e) {
       setNotice(e instanceof Error ? e.message : '导出失败');
     } finally {
@@ -299,20 +299,11 @@ export function LayerPanel({
     }
   };
 
-  const downloadUrl = async (url: string | undefined, fallbackName: string) => {
-    if (!url) return;
-    try {
-      await api.downloadAuthenticated(url, fallbackName);
-    } catch (e) {
-      setNotice(e instanceof Error ? e.message : '下载失败');
-    }
-  };
-
   const downloadJobArtifact = async (job: DownloadJob) => {
     const ref = jobView(job)?.artifact_refs?.[0];
     if (ref?.artifact_id) {
       const metadata = await api.artifactMetadata(ref.artifact_id, userId, sessionId);
-      await downloadUrl(metadata.download_url, metadata.filename || metadata.title || ref.title || jobTitle(job));
+      await api.downloadArtifactById(ref.artifact_id, metadata.filename || metadata.title || ref.title || jobTitle(job), userId, sessionId);
       return;
     }
     setNotice('该任务没有可解析的 artifact_id，暂不能提供下载入口。');
@@ -335,7 +326,7 @@ export function LayerPanel({
     setBusy(true);
     try {
       const result = await api.deleteDownloadJob(job.job_id, userId, sessionId);
-      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setJobs(attachManagementViews([], result.management_views || []));
       setNotice(`已删除下载任务记录：${jobTitle(job)}`);
       refreshDashboard();
     } catch (e) {
@@ -351,8 +342,7 @@ export function LayerPanel({
       const result = await api.deleteWorkspaceArtifact({
         user_id: userId,
         session_id: sessionId,
-        artifact_id: artifact.artifact_id || '',
-        path: artifact.path || ''
+        artifact_id: artifact.artifact_id || ''
       });
       setDashboard(result.dashboard);
       setNotice(`已删除结果文件：${artifact.filename || artifact.name || artifact.title || artifact.artifact_id || '成果文件'}`);
@@ -367,7 +357,7 @@ export function LayerPanel({
     setBusy(true);
     try {
       const result = await api.cancelDownloadJob(job.job_id, userId, '用户在前端取消任务。', sessionId);
-      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setJobs(attachManagementViews([], result.management_views || []));
       setNotice(`已取消下载任务：${jobTitle(job)}`);
       refreshDashboard();
     } catch (e) {
@@ -381,7 +371,7 @@ export function LayerPanel({
     setBusy(true);
     try {
       const result = await api.retryDownloadJob(job.job_id, userId, sessionId);
-      setJobs(attachManagementViews(result.jobs || [], result.management_views || []));
+      setJobs(attachManagementViews([], result.management_views || []));
       setNotice(result.auto_started ? '已创建重试任务并开始后台下载。' : `已创建重试任务：${result.reason || '等待处理'}`);
       refreshDashboard();
     } catch (e) {
@@ -577,7 +567,7 @@ export function LayerPanel({
 
           <ResearchWorkflowPanel onRunAction={onRunWorkflowAction} />
 
-          <LocalLibraryPanel userId={userId} onImported={refreshDashboard} />
+          <LocalLibraryPanel userId={userId} sessionId={sessionId} onImported={refreshDashboard} />
 
           <div className="mt-4 rounded-[18px] border border-white/45 bg-white/58 p-3 shadow-sm dark:border-white/10 dark:bg-slate-950/30">
             <div className="mb-2 flex items-center justify-between gap-2">

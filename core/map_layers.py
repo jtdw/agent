@@ -11,6 +11,7 @@ from zipfile import ZipFile
 from core.archive_utils import safe_extract_zip
 from core.service import GISWorkspaceService
 from core.workflow_cache import WorkflowCache
+from domain.artifacts.models import artifact_download_url
 
 VECTOR_EXTS = {".shp", ".geojson", ".gpkg", ".json", ".kml", ".zip"}
 RASTER_EXTS = {".tif", ".tiff", ".img"}
@@ -458,7 +459,7 @@ class MapLayerService:
             }
         return None
 
-    def artifact_image_layer(self, artifact: dict[str, Any]) -> dict[str, Any] | None:
+    def artifact_image_layer(self, artifact: dict[str, Any], user_id: str = "", session_id: str = "") -> dict[str, Any] | None:
         path = Path(str(artifact.get("path") or ""))
         if path.suffix.lower() not in SPATIAL_IMAGE_EXTS:
             return None
@@ -476,7 +477,7 @@ class MapLayerService:
             "type": "raster",
             "kind": str(meta.get("layer_kind") or "image"),
             "bounds": [float(v) for v in bounds],
-            "preview_url": str(artifact.get("download_url") or ""),
+            "preview_url": artifact_download_url(artifact_id, user_id=user_id, session_id=session_id),
             "map_ready": True,
             "meta": _merge_meta(meta, {"artifact_id": artifact_id, "map_ready": True}),
         }
@@ -582,7 +583,7 @@ class MapLayerService:
                     layers.append(spatial_layer)
                     dataset_layer_ids.add(spatial_layer.get("id"))
                 continue
-            image_layer = self.artifact_image_layer(artifact)
+            image_layer = self.artifact_image_layer(artifact, user_id=user_id, session_id=session_id)
             if image_layer:
                 layers.append(image_layer)
 

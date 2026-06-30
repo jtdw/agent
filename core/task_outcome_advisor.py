@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from urllib.parse import unquote, urlparse
 from typing import Any
 
 
@@ -18,18 +20,67 @@ def _first_model_result(dashboard: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _looks_like_path_or_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    parsed = urlparse(text)
+    if parsed.scheme or lowered.startswith(("data:", "javascript:", "file:", "http:", "https:")):
+        return True
+    if re.match(r"^[a-zA-Z]:[\\/]", text):
+        return True
+    normalized = unquote(text).replace("\\", "/")
+    if normalized.startswith(("/api/files/artifact?", "/api/artifacts/", "/api/downloads/artifact?", "/")):
+        return True
+    if "workspace/users/" in normalized or "workspace/sessions/" in normalized:
+        return True
+    parts = [part for part in normalized.split("/") if part]
+    if any(part == ".." for part in parts):
+        return True
+    if "/" in normalized:
+        return True
+    return False
+
+
+def _artifact_ref(item: dict[str, Any]) -> str:
+    for key in ("title", "label", "name", "filename", "original_filename", "artifact_id", "id"):
+        value = str(item.get(key) or "").strip()
+        if value and not _looks_like_path_or_url(value):
+            return value
+    return ""
+
+
 def _artifact_paths(artifacts: list[Any], limit: int = 6) -> list[str]:
-    paths: list[str] = []
+    refs: list[str] = []
     for item in artifacts:
         if not isinstance(item, dict):
             continue
-        label = str(item.get("label") or item.get("name") or "成果文件")
-        path = str(item.get("display_path") or item.get("path") or item.get("download_url") or "")
-        if path:
-            paths.append(f"{label}: {path}")
-        if len(paths) >= limit:
+        if not str(item.get("artifact_id") or item.get("id") or "").strip():
+            continue
+        ref = _artifact_ref(item)
+        if ref:
+            refs.append(ref)
+        if len(refs) >= limit:
             break
-    return paths
+    return refs
+
+
+def _safe_result_refs(values: Any, limit: int = 6) -> list[str]:
+    refs: list[str] = []
+    for item in _as_list(values):
+        text = str(item or "").strip()
+        if text and not _looks_like_path_or_url(text):
+            refs.append(text)
+        if len(refs) >= limit:
+            break
+    return list(dict.fromkeys(refs))
+
+
+def _display_path(value: Any) -> str:
+    if _looks_like_path_or_url(value):
+        return ""
+    return str(value or "").strip()
 
 
 def _metric_summary(metrics: dict[str, Any]) -> str:
@@ -105,7 +156,7 @@ def build_task_outcome(task_type: str, result: dict[str, Any] | None = None, *, 
                 status=str(presentation.get("status") or "completed"),
                 has_results=bool(refs or presentation.get("concise_summary") or presentation.get("result_highlights")),
                 summary=str(presentation.get("concise_summary") or result.get("reply") or "分析已完成。"),
-                result_paths=list(dict.fromkeys(refs)),
+                result_paths=_safe_result_refs(refs),
                 metrics={},
                 recommendations=[str(item) for item in _as_list(presentation.get("next_action_suggestions")) if str(item).strip()],
             )
@@ -216,9 +267,9 @@ def format_task_outcome_markdown(outcome: dict[str, Any]) -> str:
     if not outcome or not outcome.get("has_results"):
         return ""
     lines = ["", "任务结果分析：", str(outcome.get("summary") or "").strip()]
-    paths = [str(item) for item in _as_list(outcome.get("result_paths")) if str(item).strip()]
+    paths = _safe_result_refs(outcome.get("result_paths"))
     if paths:
-        lines.extend(["", "结果位置：", *[f"- {item}" for item in paths[:6]]])
+        lines.extend(["", "结果引用：", *[f"- {item}" for item in paths[:6]]])
     recommendations = [str(item) for item in _as_list(outcome.get("recommendations")) if str(item).strip()]
     if recommendations:
         lines.extend(["", "推荐下一步：", *[f"- {item}" for item in recommendations[:5]]])

@@ -1,5 +1,5 @@
 import { api, type ChatMessage } from '@/lib/api';
-import { assistantErrorContent, assistantReplyContent } from '../chatMessageContent';
+import { assistantErrorContent, assistantReplyContent, normalizeChatMessages } from '../chatMessageContent';
 import { THESIS_WORKFLOW_PROMPT } from './chatActionModel';
 
 type ChatThesisWorkflowLifecycle = {
@@ -15,6 +15,7 @@ type UseChatThesisWorkflowArgs = {
   setError: (message: string) => void;
   setMessages: (updater: (current: ChatMessage[]) => ChatMessage[]) => void;
   setLastFailedPrompt: (prompt: string) => void;
+  onWorkflowComplete: (response: Awaited<ReturnType<typeof api.runSoilMoistureWorkflow>>) => void;
 };
 
 export function useChatThesisWorkflow({
@@ -25,6 +26,7 @@ export function useChatThesisWorkflow({
   setError,
   setMessages,
   setLastFailedPrompt,
+  onWorkflowComplete,
 }: UseChatThesisWorkflowArgs) {
   const runThesisWorkflow = async () => {
     if (thinking) return;
@@ -38,14 +40,19 @@ export function useChatThesisWorkflow({
     setMessages((messages) => [...messages, { role: 'user', content: prompt }]);
     try {
       const response = await api.runSoilMoistureWorkflow(userId, currentSessionId);
-      setMessages((messages) => [
-        ...messages,
-        {
-          role: 'assistant',
-          content: assistantReplyContent(response.reply),
-          meta: { model: response.model, reason: response.reason },
-        },
-      ]);
+      if (response.messages) {
+        setMessages(() => normalizeChatMessages(response.messages));
+      } else {
+        setMessages((messages) => [
+          ...messages,
+          {
+            role: 'assistant',
+            content: assistantReplyContent(response.reply),
+            meta: { model: response.model, reason: response.reason },
+          },
+        ]);
+      }
+      onWorkflowComplete(response);
       setLastFailedPrompt('');
     } catch (error) {
       const content = assistantErrorContent(error);

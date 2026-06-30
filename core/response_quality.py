@@ -10,6 +10,11 @@ PRIVATE_KEYS = {
     "absolute_path",
     "relative_path",
     "display_path",
+    "source_path",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "url",
     "owner_user_id",
     "session_id",
     "user_id",
@@ -38,7 +43,11 @@ RAW_DEBUG_KEYS = {
 }
 MOJIBAKE_MARKERS = ("\ufffd", "\u951f\u65a4\u62f7", "\u00c3", "\u00e5", "\u00e6", "\u00e4")
 WORKSPACE_PATH_RE = re.compile(
-    r"(?:[A-Za-z]:[\\/][^\s`'\"，。；;]+|workspace[\\/](?:users|sessions)[^\s`'\"，。；;]*)",
+    r"(?:[A-Za-z]:[\\/][^\s`'\"，。；;]+|/(?:tmp|home|var|etc|root|Users)/[^\s`'\"，。；;]+|workspace[\\/](?:users|sessions)[^\s`'\"，。；;]*)",
+    re.IGNORECASE,
+)
+LEGACY_ARTIFACT_URL_RE = re.compile(
+    r"/api/(?:files/artifact|downloads/artifact)\?[^\s`'\"，。；;]+",
     re.IGNORECASE,
 )
 
@@ -53,12 +62,23 @@ def _as_list(value: Any) -> list[Any]:
 
 def _redact_text(value: str, warnings: list[str]) -> str:
     text = str(value or "")
+    if LEGACY_ARTIFACT_URL_RE.search(text):
+        warnings.append("已隐藏旧版路径下载链接。")
+        text = LEGACY_ARTIFACT_URL_RE.sub("[已隐藏旧版下载链接]", text)
     if WORKSPACE_PATH_RE.search(text):
         warnings.append("已隐藏内部 workspace 路径。")
         text = WORKSPACE_PATH_RE.sub("[已隐藏内部路径]", text)
     if any(marker in text for marker in MOJIBAKE_MARKERS):
         warnings.append("检测到疑似乱码，已建议进行编码复核。")
     return text
+
+
+def _is_canonical_artifact_download_url(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text.startswith("/api/artifacts/"):
+        return False
+    path = text.split("?", 1)[0]
+    return path.endswith("/download")
 
 
 def _safe_filename_from_item(item: dict[str, Any]) -> str:
@@ -89,6 +109,12 @@ def _sanitize(value: Any, warnings: list[str], *, inside_user_facing: bool = Fal
     output: dict[str, Any] = {}
     for key, item in value.items():
         key_text = str(key)
+        if key_text == "download_url":
+            if _is_canonical_artifact_download_url(item):
+                output[key_text] = _redact_text(str(item), warnings)
+            else:
+                warnings.append("已隐藏旧版路径下载链接。")
+            continue
         if key_text == "normalized_results" and isinstance(item, list):
             output[key_text] = [
                 _sanitize_normalized_result(entry, warnings) if isinstance(entry, dict) else entry
@@ -150,6 +176,24 @@ def _sanitize_normalized_results(container: dict[str, Any], warnings: list[str])
         ]
 
 
+def _sanitize_chat_sessions(value: Any, warnings: list[str]) -> list[dict[str, Any]]:
+    sessions: list[dict[str, Any]] = []
+    allowed = {"session_id", "title", "interaction_mode", "message_count", "created_at", "updated_at"}
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        session: dict[str, Any] = {}
+        for key in allowed:
+            if key not in item:
+                continue
+            cleaned = _redact_text(str(item.get(key) or ""), warnings) if key != "message_count" else item.get(key)
+            if cleaned not in ("", None):
+                session[key] = cleaned
+        if session.get("session_id"):
+            sessions.append(session)
+    return sessions
+
+
 def _sanitize_artifact_lists(container: dict[str, Any], warnings: list[str]) -> None:
     for key in ("artifacts", "files", "primary_artifacts", "secondary_artifacts", "preview_artifacts"):
         if isinstance(container.get(key), list):
@@ -205,10 +249,17 @@ def validate_workflow_result(result: dict[str, Any]) -> dict[str, Any]:
 def validate_response_before_send(response: dict[str, Any], *, user_id: str = "", session_id: str = "") -> dict[str, Any]:
     del user_id, session_id
     warnings: list[str] = []
-    cleaned = _sanitize(dict(response or {}), warnings)
+    raw_response = dict(response or {})
+    cleaned = _sanitize(raw_response, warnings)
     if not isinstance(cleaned, dict):
         return {}
 
+    if isinstance(raw_response.get("sessions"), list):
+        cleaned["sessions"] = _sanitize_chat_sessions(raw_response.get("sessions"), warnings)
+    if "session_id" in raw_response and ("sessions" in raw_response or "current_session_id" in raw_response):
+        clean_session_id = _redact_text(str(raw_response.get("session_id") or ""), warnings)
+        if clean_session_id:
+            cleaned["session_id"] = clean_session_id
     _sanitize_artifact_lists(cleaned, warnings)
     _sanitize_normalized_results(cleaned, warnings)
     user_result = cleaned.get("user_facing_result")

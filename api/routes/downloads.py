@@ -21,6 +21,8 @@ def create_downloads_router(
         def run():
             user_id = authenticated_user(request)
             result = resume_service().resume(user_id, job_id)
+            public_result = dict(result)
+            public_result.pop("job", None)
             audit(
                 request,
                 user_id=user_id,
@@ -29,7 +31,7 @@ def create_downloads_router(
                 resource_id=job_id,
                 detail={"auto_started": result.get("auto_started")},
             )
-            return result
+            return public_result
 
         return guard(run)
 

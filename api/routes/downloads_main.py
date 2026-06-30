@@ -1,12 +1,69 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from api.schemas.downloads import DownloadActionIn, DownloadDeleteIn, DownloadIn, DownloadPreflightIn
+
+
+_PRIVATE_RESPONSE_KEYS = {
+    "path",
+    "source_path",
+    "display_path",
+    "absolute_path",
+    "relative_path",
+    "output_path",
+    "zip_path",
+    "download_url",
+    "url",
+    "direct_url",
+    "preview_path",
+    "status_path",
+    "log_path",
+    "metrics_path",
+    "storage_state_path",
+    "state_path",
+    "local_file_path",
+}
+
+
+def _looks_private_response_text(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("file:", "/api/files/artifact", "/api/downloads/artifact")):
+        return True
+    if re.search(r"[A-Za-z]:[\\/]", text):
+        return True
+    normalized = text.replace("\\", "/").lower()
+    if "workspace/users/" in normalized or "workspace/sessions/" in normalized:
+        return True
+    return bool(re.search(r"/(?:tmp|home|var|etc|root|users)/", normalized))
+
+
+def _public_download_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _PRIVATE_RESPONSE_KEYS:
+                continue
+            cleaned = _public_download_payload(item)
+            if cleaned in ({}, [], ""):
+                continue
+            output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        output = [_public_download_payload(item) for item in value]
+        return [item for item in output if item not in ({}, [], "")]
+    if isinstance(value, str):
+        return "" if _looks_private_response_text(value) else value
+    return value
 
 
 def _available_actions(views: list[dict[str, Any]]) -> list[str]:
@@ -104,11 +161,11 @@ def create_downloads_main_router(
                 scoped_workspace_service(user_id, body.session_id)
             scoped_body = body.model_copy(update={"user_id": user_id})
             result = preflight_service().preflight(scoped_body)
-            return {
+            return _public_download_payload({
                 **result,
                 "user_id": user_id,
                 "session_id": body.session_id,
-            }
+            })
 
         return guard(run)
 
@@ -118,7 +175,7 @@ def create_downloads_main_router(
             authorized_user_id = require_request_user(request, user_id)
             result = preflight_service().login_health(authorized_user_id, source_key, account_mode)
             audit(request, user_id=authorized_user_id, action="download.login_health", resource_type="storage_state", detail={"source_key": result["source_key"], "account_mode": result["account_mode"], "ok": result["login_health"].get("ok")})
-            return result
+            return _public_download_payload(result)
 
         return guard(run)
 

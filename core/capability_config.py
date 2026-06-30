@@ -398,10 +398,26 @@ class CapabilityConfigStore:
                     continue
         return removed
 
-    def retrieve_knowledge(self, query: str, *, limit: int = 5, language: str = "", scope: str = "") -> list[dict[str, Any]]:
+    def _knowledge_visible_to_request(self, doc: dict[str, Any], *, owner_user_id: str = "", session_id: str = "") -> bool:
+        doc_scope = str(doc.get("scope") or doc.get("permission") or "").strip().lower()
+        doc_owner = str(doc.get("owner_user_id") or "").strip()
+        doc_session = str(doc.get("session_id") or "").strip()
+        if doc_scope not in {"private", "session", "user"} and not doc_owner and not doc_session:
+            return True
+        request_owner = str(owner_user_id or "").strip()
+        request_session = str(session_id or "").strip()
+        if doc_owner and doc_owner != request_owner:
+            return False
+        if doc_session and doc_session != request_session:
+            return False
+        return bool((not doc_owner or request_owner) and (not doc_session or request_session))
+
+    def retrieve_knowledge(self, query: str, *, limit: int = 5, language: str = "", scope: str = "", owner_user_id: str = "", session_id: str = "") -> list[dict[str, Any]]:
         query_tokens = _tokens(query)
         scored: list[tuple[int, dict[str, Any]]] = []
         for doc in self.list_resources("knowledge"):
+            if not self._knowledge_visible_to_request(doc, owner_user_id=owner_user_id, session_id=session_id):
+                continue
             if language and doc.get("language") and str(doc.get("language")) != language:
                 continue
             if scope and doc.get("applicable_scope") not in {scope, "general", ""}:
@@ -441,8 +457,8 @@ def default_store() -> CapabilityConfigStore:
     return CapabilityConfigStore()
 
 
-def configured_knowledge(query: str, *, limit: int = 5, language: str = "", scope: str = "") -> list[dict[str, Any]]:
-    return default_store().retrieve_knowledge(query, limit=limit, language=language, scope=scope)
+def configured_knowledge(query: str, *, limit: int = 5, language: str = "", scope: str = "", owner_user_id: str = "", session_id: str = "") -> list[dict[str, Any]]:
+    return default_store().retrieve_knowledge(query, limit=limit, language=language, scope=scope, owner_user_id=owner_user_id, session_id=session_id)
 
 
 def configured_tool_cards() -> list[dict[str, Any]]:

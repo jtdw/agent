@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -102,13 +103,55 @@ class ChatResponseContractTests(unittest.TestCase):
                 self.assertNotIn("owner_user_id", payload)
                 self.assertNotIn("session_id", payload)
 
+    def test_api_artifact_decoration_replaces_legacy_download_urls(self) -> None:
+        from api_server import _decorate_response_artifacts
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.manager.set_runtime_scope(user_id="u_1", session_id="s_1")
+            service.current_session_id = "s_1"
+            artifact_path = service.manager.derived_dir / "legacy_metrics.csv"
+            artifact_path.write_text("metric,value\nRMSE,0.1\n", encoding="utf-8")
+            artifact = service.manager.register_artifact(
+                artifact_id="artifact_legacy_metrics",
+                path=str(artifact_path),
+                type="metrics",
+                title="legacy_metrics.csv",
+            )
+            raw = {
+                **artifact,
+                "download_url": "/api/files/artifact?path=derived/legacy_metrics.csv",
+            }
+
+            decorated = _decorate_response_artifacts(
+                service,
+                "u_1",
+                {
+                    "artifacts": [raw],
+                    "user_facing_result": {"primary_artifacts": [raw]},
+                    "messages": [{"role": "assistant", "content": "ok", "meta": {"artifacts": [raw]}}],
+                },
+            )
+
+            payloads = [
+                decorated["artifacts"][0],
+                decorated["user_facing_result"]["primary_artifacts"][0],
+                decorated["messages"][0]["meta"]["artifacts"][0],
+            ]
+            for payload in payloads:
+                self.assertEqual(
+                    payload["download_url"],
+                    "/api/artifacts/artifact_legacy_metrics/download?user_id=u_1&session_id=s_1",
+                )
+                self.assertNotIn("/api/files/artifact", payload["download_url"])
+
     def test_response_quality_gate_sanitizes_public_debug_leaks(self) -> None:
         from core.response_quality import validate_response_before_send
 
         raw = {
-            "reply": "已完成。\nworkspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv",
+            "reply": "已完成。\nworkspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv\n/tmp/secret/runtime.log",
             "user_facing_result": {
-                "summary": "已完成",
+                "summary": "已完成，诊断文件 /home/app/secret/runtime.log",
                 "primary_artifacts": [],
                 "technical_details": {"path": "workspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv"},
                 "debug": {"raw_workflow_result": {"steps": [{"input": {"path": "secret"}}]}},
@@ -119,12 +162,13 @@ class ChatResponseContractTests(unittest.TestCase):
                     "path": "workspace\\users\\u_1\\sessions\\s_1\\derived\\x.csv",
                     "owner_user_id": "u_1",
                     "session_id": "s_1",
+                    "log_note": "/var/log/gis-agent/private.log",
                 }
             ],
             "messages": [
                 {
                     "role": "assistant",
-                    "content": "output: {'path': 'workspace/users/u_1/x.csv'}",
+                    "content": "output: {'path': 'workspace/users/u_1/x.csv'}; see /root/private/debug.json",
                     "meta": {"plan": {"input": "raw"}, "diagnostics": {"x": 1}},
                 }
             ],
@@ -135,10 +179,181 @@ class ChatResponseContractTests(unittest.TestCase):
 
         self.assertNotIn("workspace\\users", cleaned["reply"])
         self.assertNotIn("workspace/users", rendered)
+        self.assertNotIn("/tmp/secret", rendered)
+        self.assertNotIn("/home/app/secret", rendered)
+        self.assertNotIn("/var/log/gis-agent", rendered)
+        self.assertNotIn("/root/private", rendered)
         self.assertNotIn("owner_user_id", rendered)
         self.assertNotIn("session_id", rendered)
         self.assertNotIn("'input': 'raw'", rendered)
         self.assertIn("quality_warnings", cleaned["user_facing_result"])
+
+    def test_response_quality_preserves_chat_session_ids_without_private_fields(self) -> None:
+        from core.response_quality import validate_response_before_send
+
+        raw = {
+            "sessions": [
+                {
+                    "session_id": "s_1",
+                    "title": "Analysis",
+                    "updated_at": "2099-01-01",
+                    "path": "workspace/users/u_1/sessions/s_1/private.json",
+                    "user_id": "u_1",
+                    "storage_state_path": "E:/secret/state.json",
+                }
+            ],
+            "session_id": "s_1",
+            "current_session_id": "s_1",
+            "messages": [],
+        }
+
+        cleaned = validate_response_before_send(raw, user_id="u_1", session_id="s_1")
+        rendered = str(cleaned)
+
+        self.assertEqual(cleaned["sessions"][0]["session_id"], "s_1")
+        self.assertEqual(cleaned["session_id"], "s_1")
+        self.assertEqual(cleaned["current_session_id"], "s_1")
+        self.assertEqual(cleaned["sessions"][0]["title"], "Analysis")
+        self.assertNotIn("path", cleaned["sessions"][0])
+        self.assertNotIn("user_id", cleaned["sessions"][0])
+        self.assertNotIn("storage_state_path", rendered)
+        self.assertNotIn("workspace/users", rendered)
+        self.assertNotIn("E:/secret", rendered)
+
+    def test_response_quality_removes_legacy_url_fields_and_links(self) -> None:
+        from core.response_quality import validate_response_before_send
+
+        raw = {
+            "reply": "下载：/api/files/artifact?path=derived/legacy.csv，也可看 /api/downloads/artifact?job_id=job_1&path=downloads/job_1/out.zip",
+            "artifacts": [
+                {
+                    "artifact_id": "artifact_legacy",
+                    "name": "legacy.csv",
+                    "url": "/api/files/artifact?path=derived/legacy.csv",
+                    "download_url": "/api/files/artifact?path=derived/legacy.csv",
+                }
+            ],
+            "user_facing_result": {
+                "summary": "结果见 /api/files/artifact?path=derived/legacy.csv",
+                "primary_artifacts": [
+                    {
+                        "artifact_id": "artifact_legacy",
+                        "filename": "legacy.csv",
+                        "url": "/api/downloads/artifact?job_id=job_1&path=downloads/job_1/out.zip",
+                    }
+                ],
+            },
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "legacy link: /api/files/artifact?path=derived/legacy.csv",
+                    "meta": {
+                        "artifacts": [
+                            {
+                                "artifact_id": "artifact_legacy",
+                                "filename": "legacy.csv",
+                                "url": "/api/files/artifact?path=derived/legacy.csv",
+                            }
+                        ]
+                    },
+                }
+            ],
+        }
+
+        cleaned = validate_response_before_send(raw, user_id="u_1", session_id="s_1")
+        rendered = str(cleaned)
+
+        self.assertIn("artifact_legacy", rendered)
+        self.assertIn("legacy.csv", rendered)
+        self.assertNotIn("/api/files/artifact", rendered)
+        self.assertNotIn("/api/downloads/artifact", rendered)
+        self.assertNotIn("'url'", rendered)
+        self.assertNotIn("download_url", rendered)
+
+    def test_latest_model_result_context_uses_artifact_refs_not_paths(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.discover_model_results = lambda: [  # type: ignore[method-assign]
+                {
+                    "model": "XGBoost",
+                    "output_prefix": "soil_xgb",
+                    "metrics": {"RMSE": 0.12},
+                    "artifacts": [
+                        {
+                            "artifact_id": "artifact_xgb_metrics",
+                            "label": "指标表",
+                            "display_path": "derived/soil_xgb_metrics.csv",
+                            "path": "workspace/users/u1/sessions/s1/derived/soil_xgb_metrics.csv",
+                        }
+                    ],
+                    "recommendations": ["检查残差空间分布"],
+                }
+            ]
+
+            reply = service._format_latest_model_result_context()
+
+        self.assertIn("结果引用：", reply)
+        self.assertIn("指标表", reply)
+        self.assertIn("artifact_xgb_metrics", reply)
+        self.assertNotIn("处理后的数据位置：", reply)
+        self.assertNotIn("derived/soil_xgb_metrics.csv", reply)
+        self.assertNotIn("workspace/users", reply)
+
+    def test_referenced_object_reply_does_not_expose_object_path(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            service.set_interaction_mode("tool_enabled")
+            intent = {"intent": "result_analysis", "needs_followup_resolution": True}
+            referenced = {
+                "type": "artifact",
+                "id": "artifact_current",
+                "label": "当前结果",
+                "path": "workspace/users/u1/sessions/s1/derived/current.csv",
+            }
+            plan = {
+                "primary_goal": "解释当前结果",
+                "intent": "result_analysis",
+                "operation": "explain_result",
+                "execution_required": True,
+                "response_mode": "",
+                "input_assets": [],
+                "asset_roles": {},
+                "requested_downloads": [],
+                "download_requests": [],
+                "study_area": "",
+                "time_range": {},
+                "spatial_resolution": "",
+                "candidate_tools": [],
+                "selected_tools": [],
+                "workflow_steps": [],
+                "workflow_plan": [],
+                "tool_plan": [],
+                "expected_outputs": ["explanation"],
+                "requires_confirmation": False,
+                "clarification_question": "",
+                "confidence": 0.9,
+                "source_attribution": {},
+                "explicit_history_references": [],
+                "response_language": "zh-CN",
+            }
+
+            with mock.patch("core.service.classify_user_intent", return_value=intent):
+                with mock.patch("core.service.resolve_followup", return_value={"referenced_object": referenced}):
+                    with mock.patch("core.service.build_task_plan", return_value=plan):
+                        with mock.patch.object(service, "_build_active_task_plan", return_value={"status": "ready", "plan": plan}):
+                            with mock.patch.object(service, "_build_shadow_task_plan", return_value={"status": "disabled"}):
+                                with mock.patch("core.service.validate_task_plan_before_execution", return_value={"ok": True, "status": "valid_tool_plan", "execution_plan": plan}):
+                                    with mock.patch("core.service._plan_requests_tool_execution", return_value=True):
+                                        with mock.patch("core.service.run_coordinated_execution", return_value={"executed": False, "blocked_reason": "NO_EXECUTABLE_STEPS"}):
+                                            with mock.patch("core.service.execute_workflow_plan", return_value={"executed": False}):
+                                                with mock.patch("core.service.execute_validated_tool_plan", return_value={"executed": False}):
+                                                    with mock.patch("core.service.interpret_result", side_effect=lambda _prompt, _intent, _plan, raw, _context, _dashboard: raw):
+                                                        result = service.ask("这个结果怎么看？")
+
+        self.assertEqual(result["mode"], "deterministic_context")
+        self.assertIn("对象 ID：artifact_current", result["reply"])
+        self.assertNotIn("对象路径：", result["reply"])
+        self.assertNotIn("workspace/users", result["reply"])
 
     def test_response_quality_preserves_sanitized_presentation_fields(self) -> None:
         from core.response_quality import validate_response_before_send
@@ -334,6 +549,10 @@ class ChatResponseContractTests(unittest.TestCase):
                 "- \u53ef\u4ee5\u76f4\u63a5\u52a0\u8f7d\u5230\u5730\u56fe\u68c0\u67e5",
                 "\u4e0b\u4e00\u6b65\u5efa\u8bae\uff1a",
                 "- \u53ef\u4ee5\u76f4\u63a5\u52a0\u8f7d\u5230\u5730\u56fe\u68c0\u67e5",
+                "\u7ed3\u679c\u5f15\u7528\uff1a",
+                "- artifact_dem",
+                "\u7ed3\u679c\u5f15\u7528\uff1a",
+                "- artifact_dem",
             ]
         )
 
@@ -341,7 +560,9 @@ class ChatResponseContractTests(unittest.TestCase):
 
         self.assertEqual(cleaned.count("\u8f93\u51fa\u6587\u4ef6\uff1a"), 1)
         self.assertEqual(cleaned.count("\u4e0b\u4e00\u6b65\u5efa\u8bae\uff1a"), 1)
+        self.assertEqual(cleaned.count("\u7ed3\u679c\u5f15\u7528\uff1a"), 1)
         self.assertEqual(cleaned.count("derived/county_dem.tif"), 1)
+        self.assertEqual(cleaned.count("artifact_dem"), 1)
 
     def test_build_chat_response_returns_and_persists_cleaned_reply(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -371,6 +592,41 @@ class ChatResponseContractTests(unittest.TestCase):
             self.assertEqual(messages[0]["content"].count("\u4e0b\u4e00\u6b65\u5efa\u8bae\uff1a"), 1)
             self.assertEqual(messages[0]["content"].count("\u68c0\u67e5\u5730\u56fe"), 1)
             self.assertEqual(repair_mojibake_text("\u6b63\u5e38\u6587\u672c"), "\u6b63\u5e38\u6587\u672c")
+
+    def test_commercial_download_status_reply_hides_internal_paths(self) -> None:
+        import api_server
+
+        class FakeCommercialService:
+            workdir = "."
+
+            def get_job(self, job_id: str) -> dict:
+                return {
+                    "job_id": job_id,
+                    "user_id": "u1",
+                    "status": "completed",
+                    "stage": "done",
+                    "progress": 100,
+                    "source_key": "gscloud",
+                    "resource_type": "dem",
+                    "region": "chengdu",
+                    "output_name": "dem",
+                    "output_path": r"E:\agent\workspace\users\u1\sessions\s1\downloads\job_abc\dem.tif",
+                    "zip_path": r"E:\agent\workspace\users\u1\sessions\s1\downloads\job_abc\dem.zip",
+                }
+
+        with mock.patch.object(api_server, "commercial_service", FakeCommercialService()):
+            with mock.patch.object(api_server, "require_resource_owner", lambda resource, **kwargs: resource):
+                with mock.patch.object(api_server, "list_gscloud_tile_jobs", lambda workdir, limit=50: [{"job_id": "job_abc", "tile_job_id": "tile1", "state": "done", "status_path": r"E:\agent\status\tile1.json"}]):
+                    with mock.patch.object(api_server, "list_gscloud_scene_jobs", lambda workdir, limit=50: []):
+                        result = api_server._format_commercial_download_status("查询 job_abc 状态", "u1")
+
+        self.assertIn("dem.tif", result["reply"])
+        self.assertIn("dem.zip", result["reply"])
+        self.assertIn("tile1", result["reply"])
+        self.assertNotIn("E:\\agent", result["reply"])
+        self.assertNotIn("输出路径", result["reply"])
+        self.assertNotIn("结果压缩包", result["reply"])
+        self.assertNotIn("状态文件", result["reply"])
 
 
 if __name__ == "__main__":

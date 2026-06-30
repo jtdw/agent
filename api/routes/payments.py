@@ -1,10 +1,72 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Callable
 
 from fastapi import APIRouter, Request
 
 from api.schemas.payments import PaymentIn
+
+
+_PRIVATE_PAYMENT_KEYS = {
+    "path",
+    "debug_path",
+    "db_path",
+    "state_path",
+    "storage_state_path",
+    "status_path",
+    "log_path",
+    "absolute_path",
+    "relative_path",
+    "download_url",
+    "url",
+    "password",
+    "password_hash",
+    "token",
+    "token_hash",
+    "session_token",
+    "cookie",
+    "cookies",
+    "encrypted_username",
+    "encrypted_password",
+    "encrypted_cookie",
+    "secret",
+    "secret_key",
+    "secret_key_source",
+}
+_PRIVATE_PAYMENT_TEXT_RE = re.compile(
+    r"(?:/(?:tmp|home|var|etc|root|Users)/|workspace[\\/](?:users|sessions))",
+    re.IGNORECASE,
+)
+
+
+def _public_payment_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _PRIVATE_PAYMENT_KEYS:
+                continue
+            cleaned = _public_payment_payload(item)
+            if cleaned in ({}, [], ""):
+                continue
+            output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        output = [_public_payment_payload(item) for item in value]
+        return [item for item in output if item not in ({}, [], "")]
+    if isinstance(value, str):
+        lowered = value.lower()
+        if (
+            ":/" in value
+            or ":\\" in value
+            or "storage_state" in lowered
+            or "/api/downloads/artifact" in lowered
+            or "/api/files/artifact" in lowered
+            or _PRIVATE_PAYMENT_TEXT_RE.search(value)
+        ):
+            return ""
+    return value
 
 
 def create_payments_router(
@@ -39,7 +101,7 @@ def create_payments_router(
                 resource_id=str((result.get("payment") or {}).get("payment_id") or ""),
                 detail={"plan": body.plan},
             )
-            return result
+            return _public_payment_payload(result)
 
         return guard(run)
 

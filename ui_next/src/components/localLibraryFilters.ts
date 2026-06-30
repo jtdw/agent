@@ -6,11 +6,18 @@ const hiddenDocPatterns = [
   /_from_source\.(?:md|txt)$/i
 ];
 
-export function isUserVisibleLibraryItem(item: Pick<LocalLibraryItem, 'name' | 'path' | 'data_type'>) {
+type LocalLibraryFilterItem = Pick<LocalLibraryItem, 'name' | 'filename' | 'data_type'> & { path?: string };
+
+function basename(value: unknown) {
+  return String(value || '').split(/[\\/]/).pop() || '';
+}
+
+export function isUserVisibleLibraryItem(item: LocalLibraryFilterItem) {
   const name = String(item.name || '').split(/[\\/]/).pop() || '';
-  const pathName = String(item.path || '').split(/[\\/]/).pop() || '';
+  const filename = basename(item.filename);
+  const pathName = basename(item.path);
   if (item.data_type !== 'document') return true;
-  return !hiddenDocPatterns.some((pattern) => pattern.test(name) || pattern.test(pathName));
+  return !hiddenDocPatterns.some((pattern) => pattern.test(name) || pattern.test(filename) || pattern.test(pathName));
 }
 
 export function filterUserVisibleLibraryItems(items: LocalLibraryItem[]) {

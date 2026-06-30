@@ -44,6 +44,35 @@ def test_runtime_chain_adapter_invokes_retrieval_context_without_exposing_raw_pa
     assert "secret" not in str(result)
 
 
+def test_runtime_chain_adapter_redacts_private_paths_inside_public_snippets() -> None:
+    from core.agent_runtime.chains import RuntimeChainAdapter
+
+    result = RuntimeChainAdapter().invoke(
+        "answer_only_context",
+        {
+            "prompt": "Explain /tmp/private/runtime.log and E:/secret/data.shp",
+            "context": {
+                "response_language": "zh-CN",
+                "knowledge_snippets": [
+                    {
+                        "title": "Internal note E:/secret/private.md",
+                        "content": "Debug file /tmp/private/runtime.log and legacy link /api/files/artifact?path=derived/private.csv",
+                    }
+                ],
+            },
+        },
+    )
+
+    rendered = str(result)
+
+    assert result["chain_name"] == "answer_only_context"
+    assert "E:/secret" not in rendered
+    assert "/tmp/private" not in rendered
+    assert "/api/files/artifact" not in rendered
+    assert "runtime.log" not in rendered
+    assert "private.csv" not in rendered
+
+
 def test_runtime_diagnostics_include_chain_adapter_boundary() -> None:
     from core.agent_runtime.config import AgentRuntimeConfig
     from core.agent_runtime.context import AgentRuntimeContext

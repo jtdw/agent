@@ -16,7 +16,22 @@ def _as_list(value: Any) -> list[Any]:
 
 def _clean_text(value: Any, limit: int = 600) -> str:
     text = str(value or "").strip()
-    for marker in ("workspace\\", "workspace/", ":\\", "/users/", "\\users\\", "session_", "user_id", "session_id", "Traceback"):
+    for marker in (
+        "workspace\\",
+        "workspace/",
+        ":\\",
+        "/tmp/",
+        "/home/",
+        "/var/",
+        "/etc/",
+        "/root/",
+        "/users/",
+        "\\users\\",
+        "session_",
+        "user_id",
+        "session_id",
+        "Traceback",
+    ):
         if marker in text:
             return ""
     return text[:limit]

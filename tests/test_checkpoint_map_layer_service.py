@@ -172,6 +172,25 @@ class CheckpointMapLayerServiceTests(unittest.TestCase):
             self.assertEqual(second["bounds"], first["bounds"])
             self.assertEqual(second["meta"], first["meta"])
 
+    def test_image_artifact_layer_uses_artifact_download_route_not_legacy_download_url(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))
+            artifact = {
+                "artifact_id": "artifact_image_001",
+                "path": str(service.manager.plot_dir / "legacy_map.png"),
+                "title": "legacy_map.png",
+                "type": "image",
+                "download_url": "/api/files/artifact?path=plots/legacy_map.png",
+                "meta": {"bounds": [100.0, 20.0, 101.0, 21.0]},
+            }
+
+            with mock.patch.object(service.manager, "list_artifacts", return_value=[artifact]):
+                payload = MapLayerService(service).workspace_layers(user_id="u_test", session_id="s1")
+
+            layer = next(item for item in payload["layers"] if item.get("artifact_id") == "artifact_image_001")
+            self.assertEqual(layer["preview_url"], "/api/artifacts/artifact_image_001/download?user_id=u_test&session_id=s1")
+            self.assertNotIn("/api/files/artifact", layer["preview_url"])
+
     def test_refresh_raster_artifact_references_existing_file_without_upload_copy(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = GISWorkspaceService(Settings(api_key="", workdir=Path(tmp) / "workspace"))

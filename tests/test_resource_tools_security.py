@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
-from core.resource_tools import validate_public_http_url
+from core.data_manager import DataManager
+from core.resource_tools import build_resource_tools, validate_public_http_url
 
 
 class ResourceToolsSecurityTests(unittest.TestCase):
@@ -21,6 +25,20 @@ class ResourceToolsSecurityTests(unittest.TestCase):
 
     def test_allows_public_http_url_shape(self):
         self.assertEqual(validate_public_http_url("https://example.com/data.zip"), "https://example.com/data.zip")
+
+    def test_download_backend_status_does_not_expose_workspace_paths(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp) / "workspace")
+            tools = {tool.name: tool for tool in build_resource_tools(manager)}
+
+            payload = json.loads(tools["download_backend_status"].invoke({}))
+            rendered = json.dumps(payload, ensure_ascii=False)
+
+            self.assertNotIn("workdir", payload)
+            self.assertNotIn("temp_dir", payload)
+            self.assertNotIn("root", payload.get("local_library", {}))
+            self.assertNotIn(str(manager.workdir), rendered)
+            self.assertNotIn(str(manager.temp_dir), rendered)
 
 
 if __name__ == "__main__":

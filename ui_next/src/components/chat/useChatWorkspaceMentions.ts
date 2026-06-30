@@ -16,13 +16,13 @@ export function normalizeWorkspaceMentions(items: WorkspaceMentionSource[] = [])
     if (!name) return [];
     const meta = raw.meta && typeof raw.meta === 'object' ? raw.meta as Record<string, unknown> : {};
     const columns = Array.isArray(meta.columns) ? meta.columns : [];
-    const path = String(raw.path || raw.filename || '');
+    const filename = String(raw.filename || raw.label || name);
     return [{
       id: String(raw.id || name),
       name,
       mention: String(raw.mention || `@{${name}}`),
       type: String(raw.type || raw.data_type || 'file'),
-      filename: String(raw.filename || path.split(/[\\/]/).pop() || name),
+      filename,
       row_count: Number.isFinite(Number(raw.row_count ?? meta.rows)) ? Number(raw.row_count ?? meta.rows) : null,
       column_count: Number.isFinite(Number(raw.column_count)) ? Number(raw.column_count) : columns.length || null,
       crs: String(raw.crs || meta.crs || '')

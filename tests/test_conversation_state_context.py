@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from core.context_builder import build_conversation_context
+from core.context_builder import build_conversation_context, format_context_for_agent
 from core.conversation_state import recover_conversation_state
 from core.followup_resolver import resolve_followup
 
@@ -127,6 +128,36 @@ class ConversationStateContextTests(unittest.TestCase):
         self.assertLessEqual(len(context["available_datasets"]), 12)
         self.assertLessEqual(len(context["available_layers"]), 12)
         self.assertEqual(context["active_dataset"]["name"], "dataset_29")
+
+    def test_formatted_context_does_not_expose_raw_dataset_paths(self) -> None:
+        manager = _Manager({"active_dataset": "county_points"})
+        manager.datasets[0]["path"] = r"E:\agent\workspace\uploads\county_points.geojson"
+        manager.datasets[1]["path"] = r"E:\agent\workspace\derived\county_points_clipped.geojson"
+        dashboard = {"summary": manager.workspace_summary(), "artifacts": manager.artifacts, "model_results": manager.model_results}
+        state = recover_conversation_state(manager, "session_a")
+
+        context = build_conversation_context("检查当前上传的数据", {"intent": "data_upload_analysis"}, state.to_dict(), manager, dashboard)
+        formatted = format_context_for_agent(context)
+        payload = json.loads(formatted)
+
+        self.assertEqual(payload["active_dataset"]["name"], "county_points")
+        self.assertNotIn("path", payload["active_dataset"])
+        self.assertNotIn("path", json.dumps(payload["available_datasets"], ensure_ascii=False))
+        self.assertNotIn("path", json.dumps(payload["available_layers"], ensure_ascii=False))
+        self.assertNotIn("E:\\agent", formatted)
+        self.assertNotIn("workspace/derived", formatted.replace("\\", "/"))
+
+    def test_formatted_history_context_does_not_expose_recent_map_path(self) -> None:
+        manager = _Manager({"active_dataset": "county_points", "last_map_path": "plots/latest_map.png"})
+        dashboard = {"summary": manager.workspace_summary(), "artifacts": manager.artifacts, "model_results": manager.model_results}
+        state = recover_conversation_state(manager, "session_a")
+
+        context = build_conversation_context("这个图说明什么", {"intent": "result_analysis"}, state.to_dict(), manager, dashboard)
+        formatted = format_context_for_agent(context)
+        payload = json.loads(formatted)
+
+        self.assertNotIn("recent_map_path", payload)
+        self.assertNotIn("plots/latest_map.png", formatted)
 
     def test_real_chinese_followup_prefers_selected_feature(self) -> None:
         state = {

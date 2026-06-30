@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Callable
 
 from core.diagnostic_views import diagnostic_event_views
@@ -8,6 +9,24 @@ from core.management_views import download_job_to_management_view
 from core.presentation_result import build_presentation_bundle
 from core.response_language import detect_response_language
 from core.tool_contracts import download_job_to_tool_result
+
+
+def _safe_file_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return text.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _safe_log_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[A-Za-z]:[\\/][^\s'\"<>]+", "[internal_path]", text)
+    text = re.sub(r"/(?:Users|home|var|tmp|etc|root)/[^\s'\"<>]+", "[internal_path]", text)
+    for token in ("storage_state", "cookie", "token", "authorization", "Traceback"):
+        text = re.sub(token, "[redacted]", text, flags=re.IGNORECASE)
+    return text[:500]
 
 
 def assert_download_job_session(job: dict[str, Any], session_id: str = "") -> None:
@@ -30,22 +49,22 @@ def format_download_job_log_text(job: dict[str, Any], scene_jobs: list[dict[str,
         f"source_key: {job.get('source_key')}",
         f"resource_type: {job.get('resource_type')}",
         f"region: {job.get('region')}",
-        f"output_path: {job.get('output_path') or ''}",
-        f"zip_path: {job.get('zip_path') or ''}",
-        f"error_message: {job.get('error_message') or ''}",
+        f"output_file: {_safe_file_label(job.get('output_path'))}",
+        f"archive_file: {_safe_file_label(job.get('zip_path'))}",
+        f"error_message: {_safe_log_text(job.get('error_message'))}",
         "",
         "Scene jobs:",
     ]
     if scene_jobs:
         for item in scene_jobs:
-            lines.append(f"- {item.get('scene_job_id') or ''} state={item.get('state') or ''} message={item.get('message') or ''}")
+            lines.append(f"- {item.get('scene_job_id') or ''} state={item.get('state') or ''} message={_safe_log_text(item.get('message'))}")
     else:
         lines.append("- none")
     lines.append("")
     lines.append("Tile jobs:")
     if tile_jobs:
         for item in tile_jobs:
-            lines.append(f"- {item.get('tile_job_id') or ''} state={item.get('state') or ''} message={item.get('message') or ''}")
+            lines.append(f"- {item.get('tile_job_id') or ''} state={item.get('state') or ''} message={_safe_log_text(item.get('message'))}")
     else:
         lines.append("- none")
     lines.append("")

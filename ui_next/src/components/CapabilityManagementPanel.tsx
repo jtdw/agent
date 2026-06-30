@@ -36,6 +36,12 @@ function displayStatus(status?: string) {
   return STATUS_LABELS[String(status || '')] || status || '未知状态';
 }
 
+function cleanupCandidateLabel(item: StorageCleanupCandidate) {
+  const label = String(item.label || '').trim();
+  if (label) return label;
+  return item.candidate_id || 'cleanup-candidate';
+}
+
 export function CapabilityManagementPanel() {
   const [adminToken, setAdminToken] = useState('');
   const [resourceType, setResourceType] = useState<CapabilityResourceType>('knowledge');
@@ -585,7 +591,7 @@ export function CapabilityManagementPanel() {
                   <span className="min-w-0 flex-1">
                     <span className="font-bold">{item.category}</span>
                     <span className="ml-2 text-slate-500 dark:text-slate-400">{formatBytes(Number(item.size_bytes || 0))} / {item.file_count || 0} 文件</span>
-                    <span className="block truncate text-slate-500 dark:text-slate-400">{item.path}</span>
+                    <span className="block truncate text-slate-500 dark:text-slate-400">{cleanupCandidateLabel(item)}</span>
                   </span>
                 </label>
               ))}

@@ -99,9 +99,8 @@ export function isReferenceMapLayer(layer: ResultLayerLike & { meta?: Record<str
     layer.name,
     layer.kind,
     meta.source,
-    meta.item_id,
-    meta.source_path
+    meta.item_id
   ].map((value) => String(value || '').toLowerCase()).join(' ');
   return text.includes('local_library_shandianhe_basin_boundary')
-    || (text.includes('source') && text.includes('local_library') && text.includes('shandianhe'));
+    || (text.includes('local_library') && (text.includes('shandianhe') || text.includes('闪电河')));
 }

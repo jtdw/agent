@@ -11,7 +11,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { api, type ChatArtifact } from '@/lib/api';
+import { api, type ChatArtifact, type ResolvedArtifactMetadata } from '@/lib/api';
 import { cn } from '@/lib/cn';
 
 function artifactIcon(kind = '', filename = '') {
@@ -88,7 +88,7 @@ export function ArtifactDownloadCard({
   const [deleting, setDeleting] = useState(false);
   const [mapping, setMapping] = useState(false);
   const [deleted, setDeleted] = useState(false);
-  const [resolvedArtifact, setResolvedArtifact] = useState<ChatArtifact | null>(null);
+  const [resolvedArtifact, setResolvedArtifact] = useState<ResolvedArtifactMetadata | null>(null);
   const [resolving, setResolving] = useState(false);
   const resolved = resolvedArtifact ? { ...artifact, ...resolvedArtifact } : artifact;
   const filename = resolved.filename || resolved.name || resolved.title || '成果文件';
@@ -96,7 +96,7 @@ export function ArtifactDownloadCard({
   const source = resolved.source?.tool_name || resolved.source?.workflow_id || 'GIS 处理结果';
   const missing = resolved.status === 'missing';
   const mapReady = Boolean(resolved.map_ready || resolved.meta?.map_ready || resolved.meta?.map_layer_id || resolved.meta?.dataset_name);
-  const resolvedDownloadUrl = resolved.download_url || (!resolved.artifact_id ? artifact.download_url : '');
+  const resolvedDownloadUrl = resolvedArtifact?.download_url || '';
   const canDownload = Boolean(resolved.artifact_id) && !deleted && !missing;
   const imagePreviewUrl = !missing && isImageArtifact(resolved, filename) && resolvedDownloadUrl ? resolvedDownloadUrl : '';
   const rows = previewRows(resolved.preview);

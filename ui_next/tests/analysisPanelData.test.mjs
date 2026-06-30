@@ -57,8 +57,8 @@ assert.equal(view.bestModel?.modelResultId, '');
 assert.equal(view.downloads.length, 2);
 assert.equal(view.downloads[0].artifactId, 'artifact_summary_001');
 assert.equal(view.downloads[1].artifactId, 'artifact_plot_001');
-assert.equal(view.downloads[0].url, '');
-assert.equal(view.downloads[1].url, '');
+assert.equal('url' in view.downloads[0], false);
+assert.equal('url' in view.downloads[1], false);
 
 const boundModelView = analysis.buildAnalysisPanelView({
   model_results: [
@@ -138,7 +138,7 @@ assert.equal(resultPanelView.title, 'XGBoost model finished');
 assert.equal(resultPanelView.downloads.length, 1);
 assert.equal(resultPanelView.downloads[0].label, 'metrics');
 assert.equal(resultPanelView.downloads[0].artifactId, 'artifact_metrics_001');
-assert.equal(resultPanelView.downloads[0].url, '');
+assert.equal('url' in resultPanelView.downloads[0], false);
 assert.equal(resultPanelView.recommendations[0], 'check metrics');
 
 const mergedResultPanelView = analysis.buildAnalysisPanelView(

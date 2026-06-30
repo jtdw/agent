@@ -9,6 +9,7 @@ const taskCardIndex = readFileSync(resolve(root, 'src/components/chat/task-card/
 const panel = readFileSync(resolve(root, 'src/components/ChatPanel.tsx'), 'utf8');
 const conversationHeader = readFileSync(resolve(root, 'src/components/chat/ChatConversationHeader.tsx'), 'utf8');
 const messageList = readFileSync(resolve(root, 'src/components/chat/ChatMessageList.tsx'), 'utf8');
+const workspaceModel = readFileSync(resolve(root, 'src/components/chat/chatWorkspaceModel.ts'), 'utf8');
 const composerFooter = readFileSync(resolve(root, 'src/components/chat/ChatComposerFooter.tsx'), 'utf8');
 const realtimeHook = readFileSync(resolve(root, 'src/components/chat/useChatRealtimeEvents.ts'), 'utf8');
 const realtimeModel = readFileSync(resolve(root, 'src/components/chat/chatRealtimeEventModel.ts'), 'utf8');
@@ -36,7 +37,10 @@ assert.match(taskCard, /download-register|map-export|analysis-package|generic-re
 assert.match(taskCard, /GIS 任务/, 'TaskStatusCard must present a user-readable GIS task header');
 assert.match(taskCard, /任务结果/, 'ResultGroups must present a user-readable result section');
 assert.match(taskCard, /下一步建议/, 'ResultGroups must render canonical next_action_suggestions');
-assert.match(renderer, /interaction_type/, 'ChatMessageRenderer must consume explicit backend interaction_type metadata');
+assert.match(workspaceModel, /interaction_type/, 'The shared chat workspace model must consume explicit backend interaction_type metadata');
+assert.match(renderer, /messageIsToolTask/, 'ChatMessageRenderer must use the shared tool-task classifier');
+assert.match(renderer, /from ['"]\.\/chat\/chatWorkspaceModel['"]/, 'ChatMessageRenderer must import the shared chat workspace model');
+assert.match(renderer, /messageIsToolTask\(message\)/, 'ChatMessageRenderer must not keep a divergent task-card classifier');
 assert.match(taskCard, /function ResultGroups/, 'Task card boundary must group canonical PresentationResult artifacts through ResultGroups');
 assert.match(taskCard, /推荐查看/, 'ResultGroups must include the recommended group');
 assert.match(taskCard, /id:\s*['"]maps['"]/, 'ResultGroups must include a dedicated maps/prediction artifact group');

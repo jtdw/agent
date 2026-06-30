@@ -70,6 +70,43 @@ def _guess_data_type(path: Path) -> str:
     return "unknown"
 
 
+def _library_root_has_assets(root: Path) -> bool:
+    manifest_path = root / "library_manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if isinstance(manifest.get("items"), list) and manifest["items"]:
+                return True
+        except Exception:
+            pass
+    data_dir = root / "data"
+    if not data_dir.exists():
+        return False
+    return any(path.is_file() and not path.name.startswith(".") for path in data_dir.rglob("*"))
+
+
+def resolve_local_library_root(workdir: Path, env_value: str | None = None, project_root: Path | None = None) -> Path:
+    configured = os.getenv("GIS_AGENT_LOCAL_LIBRARY_DIR", "").strip() if env_value is None else str(env_value or "").strip()
+    workspace_library = Path(workdir).expanduser() / "local_library"
+    bundled_library = (project_root or Path(__file__).resolve().parents[1]) / "local_library"
+    if configured:
+        configured_library = Path(configured).expanduser()
+        if _library_root_has_assets(configured_library):
+            return configured_library
+        try:
+            configured_is_workspace_default = configured_library.resolve() == workspace_library.resolve()
+        except Exception:
+            configured_is_workspace_default = False
+        if configured_is_workspace_default and _library_root_has_assets(bundled_library):
+            return bundled_library
+        return configured_library
+    if _library_root_has_assets(workspace_library):
+        return workspace_library
+    if _library_root_has_assets(bundled_library):
+        return bundled_library
+    return workspace_library if workspace_library.exists() else bundled_library
+
+
 def is_user_visible_library_item(item: dict[str, Any]) -> bool:
     if item.get("data_type") != "document":
         return True

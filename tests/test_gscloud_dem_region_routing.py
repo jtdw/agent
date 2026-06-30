@@ -44,6 +44,51 @@ class GSCloudDemRegionRoutingTests(unittest.TestCase):
         self.assertEqual(plan["download_plan"]["dataset_id"], "306")
         self.assertFalse(plan["should_ask_clarification"])
 
+    def test_explicit_dem_download_with_active_boundary_does_not_route_upload_profile(self) -> None:
+        prompt = "\u5e2e\u6211\u4e0b\u8f7d\u6210\u90fd\u5e0230m\u7684dem\u6570\u636e"
+        context = {
+            "workspace": {"dataset_count": 1},
+            "active_dataset": {"name": "\u56db\u5ddd\u7701_\u6210\u90fd\u5e02_\u6210\u90fd\u5e02_city_boundary", "type": "vector"},
+        }
+
+        plan = build_task_plan(prompt, {"intent": "data_download", "confidence": 0.98}, context)
+
+        self.assertEqual(plan["task_type"], "data_download")
+        self.assertEqual(plan["semantic_parse"]["region"], "\u6210\u90fd\u5e02")
+        self.assertEqual(plan["download_plan"]["resource_type"], "dem")
+        self.assertNotEqual(plan.get("workflow_template", {}).get("workflow_id"), "upload_raster_profile")
+        self.assertFalse(plan.get("executable_workflow"))
+        self.assertFalse(plan.get("workflow_plan"))
+
+    def test_download_followup_inherits_previous_dem_slots(self) -> None:
+        prompt = "\u6211\u5df2\u7ecf\u5b8c\u6210\u767b\u5f55\uff0c\u5e2e\u6211\u4e0b\u8f7d"
+        context = {
+            "workspace": {"dataset_count": 1},
+            "user_goal": "\u5e2e\u6211\u4e0b\u8f7d\u6210\u90fd\u5e0230m\u7684dem\u6570\u636e",
+            "active_task": {
+                "task_type": "data_download",
+                "download_plan": {
+                    "source_key": "gscloud",
+                    "resource_type": "dem",
+                    "region": "\u6210\u90fd\u5e02",
+                    "region_standard": "\u56db\u5ddd\u7701\u6210\u90fd\u5e02",
+                    "admin_level": "prefecture_city",
+                    "resolution": "30m",
+                    "dataset_id": "310",
+                    "output_name": "\u6210\u90fd\u5e02_dem",
+                },
+            },
+        }
+
+        plan = build_task_plan(prompt, {"intent": "data_download", "confidence": 0.9}, context)
+
+        self.assertEqual(plan["task_type"], "data_download")
+        self.assertEqual(plan["download_plan"]["resource_type"], "dem")
+        self.assertEqual(plan["download_plan"]["region"], "\u6210\u90fd\u5e02")
+        self.assertEqual(plan["download_plan"]["resolution"], "30m")
+        self.assertEqual(plan["download_plan"]["dataset_id"], "310")
+        self.assertFalse(plan["should_ask_clarification"])
+
     def test_dem_tile_plan_ignores_prior_tile_grid_dataset_for_admin_region(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             settings = Settings(api_key="", workdir=Path(tmp) / "workspace")

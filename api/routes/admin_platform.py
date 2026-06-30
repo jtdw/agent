@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from api.schemas.admin_platform import AdminPlatformAccountIn, AdminPlatformLoginIn, AdminPlatformStatusIn
+
+
+_PRIVATE_HEALTH_KEYS = {
+    "path",
+    "storage_state_path",
+    "state_path",
+    "status_path",
+    "log_path",
+    "absolute_path",
+    "relative_path",
+    "download_url",
+    "cookie",
+    "cookies",
+    "token",
+    "password",
+}
+_PRIVATE_HEALTH_TEXT_RE = re.compile(
+    r"(?:/(?:tmp|home|var|etc|root|Users)/|workspace[\\/](?:users|sessions))",
+    re.IGNORECASE,
+)
 
 
 def _require_admin(require_capability_admin: Callable[[Request], None], request: Request) -> None:
@@ -15,6 +36,35 @@ def _require_admin(require_capability_admin: Callable[[Request], None], request:
         raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+def _public_login_health(value: Any) -> Any:
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in _PRIVATE_HEALTH_KEYS:
+                continue
+            cleaned = _public_login_health(item)
+            if cleaned in ({}, [], ""):
+                continue
+            output[key_text] = cleaned
+        return output
+    if isinstance(value, list):
+        output = [_public_login_health(item) for item in value]
+        return [item for item in output if item not in ({}, [], "")]
+    if isinstance(value, str):
+        lowered = value.lower()
+        if (
+            ":/" in value
+            or ":\\" in value
+            or "storage_state" in lowered
+            or "cookie" in lowered
+            or "token" in lowered
+            or _PRIVATE_HEALTH_TEXT_RE.search(value)
+        ):
+            return ""
+    return value
 
 
 def create_admin_platform_router(
@@ -44,7 +94,7 @@ def create_admin_platform_router(
         except Exception:
             private = {}
         public = service()._platform_public(private) if private else dict(account or {})
-        health = inspect_storage_state(str(private.get("storage_state_path") or ""))
+        health = _public_login_health(inspect_storage_state(str(private.get("storage_state_path") or "")))
         public["login_health"] = health
         public["has_storage_state"] = bool(private.get("storage_state_path"))
         public.pop("storage_state_path", None)
@@ -128,7 +178,7 @@ def create_admin_platform_router(
         def run():
             _require_admin(require_capability_admin, request)
             account = service().get_platform_account_private(account_id)
-            health = inspect_storage_state(str(account.get("storage_state_path") or ""))
+            health = _public_login_health(inspect_storage_state(str(account.get("storage_state_path") or "")))
             service().write_audit_event(
                 action="admin.platform_account.login_health",
                 status="ok" if health.get("ok") else "warning",

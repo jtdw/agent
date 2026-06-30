@@ -48,6 +48,7 @@ const cleanChatMeta = model.mergeRealtimeEventMeta(
     status: 'succeeded',
     streaming: false,
     mode: 'answer_only',
+    response_mode: 'answer_only',
     interaction_type: 'chat_answer',
     reason: 'chat_only_direct_answer'
   },
@@ -55,10 +56,77 @@ const cleanChatMeta = model.mergeRealtimeEventMeta(
 );
 assert.equal(cleanChatMeta.interaction_type, 'chat_answer');
 assert.equal(cleanChatMeta.mode, 'answer_only');
-assert.equal(cleanChatMeta.status, 'succeeded');
+assert.equal(cleanChatMeta.response_mode, 'answer_only');
+assert.equal(cleanChatMeta.task_id, undefined);
+assert.equal(cleanChatMeta.job_id, undefined);
+assert.equal(cleanChatMeta.status, undefined);
+assert.equal(cleanChatMeta.progress, undefined);
 assert.equal(cleanChatMeta.task_card, undefined);
 assert.equal(cleanChatMeta.management_view, undefined);
 assert.equal(cleanChatMeta.download_management_view, undefined);
 assert.equal(cleanChatMeta.action_required, undefined);
+
+const chatPlaceholderMeta = model.mergeRealtimeEventMeta(
+  {
+    task_id: 'chat-pending',
+    streaming: true,
+    realtime_sync: 'live'
+  },
+  {
+    task_id: 'chat-pending',
+    status: 'planning',
+    progress: 10,
+    phase: 'routing',
+    current_step: 'Preparing response or task plan.',
+    realtime_sync: 'live'
+  },
+  { kind: 'task_status', task_id: 'chat-pending' }
+);
+assert.equal(chatPlaceholderMeta.task_id, 'chat-pending');
+assert.equal(chatPlaceholderMeta.streaming, true);
+assert.equal(chatPlaceholderMeta.realtime_sync, 'live');
+assert.equal(chatPlaceholderMeta.status, undefined);
+assert.equal(chatPlaceholderMeta.progress, undefined);
+assert.equal(chatPlaceholderMeta.phase, undefined);
+assert.equal(chatPlaceholderMeta.current_step, undefined);
+assert.equal(
+  model.shouldUseRealtimeEventContent(
+    { task_id: 'chat-pending', streaming: true },
+    { task_id: 'chat-pending', status: 'planning' },
+    { kind: 'task_status', task_id: 'chat-pending' }
+  ),
+  false,
+  'Generic task status text must not replace a chat answer placeholder'
+);
+
+const explicitToolMeta = model.mergeRealtimeEventMeta(
+  {
+    task_id: 'chat-task',
+    streaming: true
+  },
+  {
+    task_id: 'chat-task',
+    status: 'planning',
+    progress: 10,
+    phase: 'routing',
+    interaction_type: 'tool_task',
+    task_card: { task_id: 'chat-task', status: 'planning' }
+  },
+  { kind: 'task_status', task_id: 'chat-task' }
+);
+assert.equal(explicitToolMeta.status, 'planning');
+assert.equal(explicitToolMeta.progress, 10);
+assert.equal(explicitToolMeta.phase, 'routing');
+assert.equal(explicitToolMeta.interaction_type, 'tool_task');
+assert.deepEqual(explicitToolMeta.task_card, { task_id: 'chat-task', status: 'planning' });
+assert.equal(
+  model.shouldUseRealtimeEventContent(
+    { task_id: 'chat-task', streaming: true },
+    { task_id: 'chat-task', status: 'planning', interaction_type: 'tool_task' },
+    { kind: 'task_status', task_id: 'chat-task' }
+  ),
+  true,
+  'Explicit tool task status text should still update the visible task card'
+);
 
 console.log('chatRealtimeEventModel.test.mjs passed');

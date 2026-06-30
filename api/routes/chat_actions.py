@@ -42,49 +42,48 @@ def create_chat_actions_router(
                 start_chat_task(task_id, user_id=user_id, session_id=body.session_id)
 
             def finalize(response: dict[str, Any]) -> dict[str, Any]:
-                if task_id:
-                    finish_chat_task(task_id)
                 return attach_result_panel(service, user_id, response)
 
-            service.apply_frontend_context(body.frontend_context)
-            if is_commercial_download_status_prompt(body.prompt):
-                if not user_id:
-                    return finalize(build_chat_response(service, user_prompt=body.prompt, result=download_requires_login_result(body.prompt)))
-                result = format_commercial_download_status(body.prompt, user_id)
-                result = attach_download_tool_result(result)
-                if result.get("presentation_reply"):
-                    result["reply"] = str(result["presentation_reply"])
+            try:
+                service.apply_frontend_context(body.frontend_context)
+                if is_commercial_download_status_prompt(body.prompt):
+                    if not user_id:
+                        return finalize(build_chat_response(service, user_prompt=body.prompt, result=download_requires_login_result(body.prompt)))
+                    result = format_commercial_download_status(body.prompt, user_id)
+                    result = attach_download_tool_result(result)
+                    if result.get("presentation_reply"):
+                        result["reply"] = str(result["presentation_reply"])
+                    return finalize(
+                        build_chat_response(
+                            service,
+                            user_prompt=body.prompt,
+                            result=result,
+                            meta_keys=(
+                                "model",
+                                "reason",
+                                "normalized_results",
+                                "presentation_result",
+                                "execution_summary",
+                                "result_rendering_path",
+                                "presentation_source",
+                                "tool_result",
+                            ),
+                        )
+                    )
                 return finalize(
-                    build_chat_response(
+                    attach_chat_state(
                         service,
-                        user_prompt=body.prompt,
-                        result=result,
-                        meta_keys=(
-                            "model",
-                            "reason",
-                            "normalized_results",
-                            "presentation_result",
-                            "execution_summary",
-                            "result_rendering_path",
-                            "presentation_source",
-                            "tool_result",
-                            "job",
-                            "tile_job",
-                            "scene_job",
+                        service.ask(
+                            body.prompt,
+                            visible_prompt=body.prompt,
+                            frontend_context=body.frontend_context,
+                            extra_assistant_meta={"active_task_id": task_id} if task_id else None,
                         ),
                     )
                 )
-            return finalize(
-                attach_chat_state(
-                    service,
-                    service.ask(
-                        body.prompt,
-                        visible_prompt=body.prompt,
-                        frontend_context=body.frontend_context,
-                        extra_assistant_meta={"active_task_id": task_id} if task_id else None,
-                    ),
-                )
-            )
+            finally:
+                if task_id:
+                    finish_chat_task(task_id)
 
         return guard(run)
 
@@ -189,33 +188,35 @@ def create_chat_actions_router(
                 start_chat_task(task_id, user_id=user_id, session_id=body.session_id)
 
             def finalize(response: dict[str, Any]) -> dict[str, Any]:
-                if task_id:
-                    finish_chat_task(task_id)
                 return attach_result_panel(service, user_id, response)
 
-            service.apply_frontend_context(body.frontend_context)
-            token = str(body.confirmation_id or "").strip()
-            prompt = f"{str(body.confirmation_prompt or 'Confirm execution').strip()} confirmed_action_id={token}".strip()
-            return finalize(
-                attach_chat_state(
-                    service,
-                    service.ask(
-                        prompt,
-                        frontend_context=body.frontend_context,
-                        record_user_message=False,
-                        extra_assistant_meta={
-                            "active_task_id": task_id,
-                            "confirmed_pending_confirmation_id": token,
-                            "confirmation_submission": "structured",
-                        }
-                        if task_id
-                        else {
-                            "confirmed_pending_confirmation_id": token,
-                            "confirmation_submission": "structured",
-                        },
-                    ),
+            try:
+                service.apply_frontend_context(body.frontend_context)
+                token = str(body.confirmation_id or "").strip()
+                prompt = f"{str(body.confirmation_prompt or 'Confirm execution').strip()} confirmed_action_id={token}".strip()
+                return finalize(
+                    attach_chat_state(
+                        service,
+                        service.ask(
+                            prompt,
+                            frontend_context=body.frontend_context,
+                            record_user_message=False,
+                            extra_assistant_meta={
+                                "active_task_id": task_id,
+                                "confirmed_pending_confirmation_id": token,
+                                "confirmation_submission": "structured",
+                            }
+                            if task_id
+                            else {
+                                "confirmed_pending_confirmation_id": token,
+                                "confirmation_submission": "structured",
+                            },
+                        ),
+                    )
                 )
-            )
+            finally:
+                if task_id:
+                    finish_chat_task(task_id)
 
         return guard(run)
 

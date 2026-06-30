@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core.local_library import LocalFileLibrary, is_user_visible_library_item
+from core.local_library import LocalFileLibrary, is_user_visible_library_item, resolve_local_library_root
 
 
 class LocalLibraryFilteringTest(unittest.TestCase):
@@ -30,6 +30,50 @@ class LocalLibraryFilteringTest(unittest.TestCase):
 
             self.assertEqual([item["name"] for item in public_items], ["china_admin_boundary"])
             self.assertEqual({item["name"] for item in admin_items}, {"README_from_source", "china_admin_boundary"})
+
+    def test_default_root_prefers_project_library_when_workspace_library_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workdir = base / "workspace"
+            project_root = base / "project"
+            (workdir / "local_library" / "data").mkdir(parents=True)
+            (project_root / "local_library" / "data" / "administrative").mkdir(parents=True)
+            (project_root / "local_library" / "library_manifest.json").write_text(
+                '{"version": 1, "items": [{"item_id": "lib_admin", "path": "data/administrative/admin.zip"}]}',
+                encoding="utf-8",
+            )
+            (project_root / "local_library" / "data" / "administrative" / "admin.zip").write_bytes(b"zip")
+
+            self.assertEqual(
+                resolve_local_library_root(workdir, env_value="", project_root=project_root),
+                project_root / "local_library",
+            )
+
+    def test_explicit_local_library_env_still_wins(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            configured = base / "configured_library"
+
+            self.assertEqual(
+                resolve_local_library_root(base / "workspace", env_value=str(configured), project_root=base / "project"),
+                configured,
+            )
+
+    def test_empty_workspace_env_does_not_hide_project_library_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workdir = base / "workspace"
+            project_root = base / "project"
+            workspace_library = workdir / "local_library"
+            workspace_library.mkdir(parents=True)
+            (workspace_library / "library_manifest.json").write_text('{"version": 1, "items": []}', encoding="utf-8")
+            (project_root / "local_library" / "data").mkdir(parents=True)
+            (project_root / "local_library" / "data" / "admin.zip").write_bytes(b"zip")
+
+            self.assertEqual(
+                resolve_local_library_root(workdir, env_value=str(workspace_library), project_root=project_root),
+                project_root / "local_library",
+            )
 
 
 if __name__ == "__main__":

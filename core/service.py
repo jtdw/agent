@@ -98,6 +98,33 @@ def _artifact_is_image(artifact: dict[str, Any]) -> bool:
     )
 
 
+def _looks_like_internal_ref(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if lowered.startswith(("/api/", "http://", "https://", "workspace/", "workspace\\", "derived/", "plots/", "exports/")):
+        return True
+    return "/" in text or "\\" in text
+
+
+def _artifact_public_ref(artifact: dict[str, Any]) -> str:
+    artifact_id = str(artifact.get("artifact_id") or artifact.get("id") or "").strip()
+    label = str(
+        artifact.get("label")
+        or artifact.get("title")
+        or artifact.get("name")
+        or artifact.get("filename")
+        or artifact_id
+        or "成果文件"
+    ).strip()
+    if _looks_like_internal_ref(label):
+        label = artifact_id or "成果文件"
+    if artifact_id and label and label != artifact_id:
+        return f"{label}（{artifact_id}）"
+    return artifact_id or label
+
+
 def _plan_requests_background_execution(plan: dict[str, Any]) -> bool:
     mode = str(plan.get("execution_mode") or plan.get("executor_mode") or "").strip().lower()
     if mode in {"background", "worker", "durable"}:
@@ -1327,25 +1354,23 @@ class GISWorkspaceService:
         for artifact in result.get("artifacts", [])[:4]:
             if not isinstance(artifact, dict):
                 continue
-            label = str(artifact.get("label") or artifact.get("name") or "成果文件")
-            display_path = str(artifact.get("display_path") or artifact.get("path") or "")
-            artifact_lines.append(f"- {label}：{display_path}")
+            ref = _artifact_public_ref(artifact)
+            if ref:
+                artifact_lines.append(f"- {ref}")
         recommendation_lines = [f"- {item}" for item in result.get("recommendations", [])[:4]]
-        return "\n".join([
-            "",
-            "处理后的数据位置：",
-            *artifact_lines,
+        lines = [
             "",
             f"最新模型结果：{result.get('model')}（{result.get('output_prefix')}）",
             f"关键指标：{', '.join(metric_parts) if metric_parts else '请打开指标表查看详细数值'}",
-            "",
-            "下一步建议：",
-            *recommendation_lines,
-        ])
+        ]
+        if artifact_lines:
+            lines.extend(["", "结果引用：", *artifact_lines])
+        lines.extend(["", "下一步建议：", *recommendation_lines])
+        return "\n".join(lines)
 
     def _should_append_model_result_context(self, prompt: str, reply: str) -> bool:
         text = f"{prompt}\n{reply}".lower()
-        if "处理后的数据位置" in reply:
+        if "处理后的数据位置" in reply or "结果引用" in reply:
             return False
         tokens = ("xgboost", "xgb", "rf", "lstm", "gcp", "模型", "建模", "分析结果", "结果在哪里", "处理后的数据")
         return any(token in text for token in tokens)
@@ -1814,6 +1839,40 @@ class GISWorkspaceService:
             },
             *state.last_tool_results[:2],
         ]
+        download_plan = plan.get("download_plan") if isinstance(plan.get("download_plan"), dict) else {}
+        download_requests = plan.get("download_requests") if isinstance(plan.get("download_requests"), list) else []
+        if task_type == "data_download" or download_plan or download_requests:
+            state.active_task = {
+                "task_type": "data_download",
+                "goal": user_message,
+                "download_plan": {
+                    key: value
+                    for key, value in download_plan.items()
+                    if key
+                    in {
+                        "source_key",
+                        "resource_type",
+                        "region",
+                        "region_raw",
+                        "region_standard",
+                        "admin_level",
+                        "resolution",
+                        "product_key",
+                        "dataset_id",
+                        "output_name",
+                    }
+                    and value not in (None, "")
+                },
+                "download_requests": [
+                    {
+                        key: item.get(key)
+                        for key in ("area_asset_id", "product_id", "requested_resolution", "resolved_resolution", "time_range")
+                        if isinstance(item, dict) and item.get(key) not in (None, "")
+                    }
+                    for item in download_requests[:3]
+                    if isinstance(item, dict)
+                ],
+            }
         state.pending_clarification = (
             {"question": plan.get("clarification_question"), "missing_inputs": plan.get("missing_inputs", [])}
             if plan.get("should_ask_clarification")
@@ -2974,15 +3033,12 @@ class GISWorkspaceService:
                 ref_type = str(referenced.get("type") or "object")
                 ref_id = str(referenced.get("id") or referenced.get("artifact_id") or referenced.get("model_result_id") or "")
                 ref_label = str(referenced.get("label") or referenced.get("name") or ref_id or ref_type)
-                ref_path = str(referenced.get("path") or "")
                 raw_parts = [
                     f"已定位当前引用对象：{ref_label}",
                     f"对象类型：{ref_type}",
                 ]
                 if ref_id:
                     raw_parts.append(f"对象 ID：{ref_id}")
-                if ref_path:
-                    raw_parts.append(f"对象路径：{ref_path}")
                 raw_parts.append("本轮基于当前工作区记录和前端选中对象进行解释，没有重新生成或编造新的指标。")
                 raw_reply = "\n".join(raw_parts)
                 reply = interpret_result(user_message, intent, plan, raw_reply, context, dashboard_data)
@@ -3164,7 +3220,8 @@ class GISWorkspaceService:
             "table": sum(1 for item in datasets if item["type"] == "table"),
             "document": sum(1 for item in datasets if item["type"] == "document"),
         }
-        db_status = self.manager.database_status()
+        db_status = dict(self.manager.database_status())
+        db_status.pop("db_path", None)
         recent_runs = self.manager.list_pipeline_runs(limit=8)
         latest_pipeline = recent_runs[0] if recent_runs else None
         if latest_pipeline:
@@ -3177,11 +3234,8 @@ class GISWorkspaceService:
             "artifacts": self.manager.list_artifacts(),
             "activity": self.manager.operation_log,
             "dataset_type_counts": counts,
-            "workdir": str(self.manager.workdir.resolve()),
-            "export_dir": self.get_export_dir(),
             "runtime_status": self.runtime_status,
             "recent_export_tasks": self.list_export_tasks(refresh=False, limit=8).get("items", []),
-            "last_plot": self.manager.last_plot_path,
             "route_options": self.route_options(),
             "current_model": self.current_model(),
             "active_model": self.active_model(),

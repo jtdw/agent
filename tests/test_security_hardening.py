@@ -460,6 +460,104 @@ class SecurityHardeningTests(unittest.TestCase):
             self.assertEqual(result["status"], "failed")
             self.assertIn("restricted", result["error_message"].lower())
 
+    def test_commercial_gscloud_job_status_tools_hide_internal_paths(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            manager = DataManager(Path(tmp) / "workspace")
+            tools = {tool.name: tool for tool in build_commercial_tools(manager)}
+            secret_root = Path(tmp) / "secret"
+            raw_job = {
+                "job_id": "job_1",
+                "login_job_id": "login_1",
+                "capture_job_id": "capture_1",
+                "tile_job_id": "tile_1",
+                "state": "FAILED",
+                "status": "failed",
+                "stage": "waiting_login",
+                "message": "Traceback at storage_state.json",
+                "status_path": str(secret_root / "status.json"),
+                "log_path": str(secret_root / "worker.log"),
+                "storage_state_path": str(secret_root / "storage_state.json"),
+                "state_path": str(secret_root / "state.json"),
+                "output_path": str(secret_root / "output.tif"),
+                "zip_path": str(secret_root / "result.zip"),
+                "download_url": "/api/downloads/artifact?path=secret/result.zip",
+            }
+            for subdir, filename in (
+                ("login_jobs", "login_1.json"),
+                ("capture_jobs", "capture_1.json"),
+                ("tile_jobs", "tile_1.json"),
+            ):
+                path = manager.workdir / "domestic_auth" / subdir / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(raw_job, ensure_ascii=False), encoding="utf-8")
+
+            payloads = [
+                tools["list_gscloud_login_window_jobs"].invoke({"limit": 5}),
+                tools["get_gscloud_login_window_job"].invoke({"login_job_id": "login_1"}),
+                tools["list_gscloud_capture_window_jobs"].invoke({"limit": 5}),
+                tools["get_gscloud_capture_window_job"].invoke({"capture_job_id": "capture_1"}),
+                tools["list_gscloud_auto_tile_jobs"].invoke({"limit": 5}),
+                tools["get_gscloud_auto_tile_job"].invoke({"tile_job_id": "tile_1"}),
+            ]
+
+            rendered = "\n".join(payloads)
+            self.assertNotIn("status_path", rendered)
+            self.assertNotIn("log_path", rendered)
+            self.assertNotIn("storage_state_path", rendered)
+            self.assertNotIn("state_path", rendered)
+            self.assertNotIn("output_path", rendered)
+            self.assertNotIn("zip_path", rendered)
+            self.assertNotIn("download_url", rendered)
+            self.assertNotIn("storage_state", rendered.lower())
+            self.assertNotIn("traceback", rendered.lower())
+            self.assertNotIn(str(secret_root), rendered)
+            self.assertNotIn("/api/downloads/artifact", rendered)
+
+    def test_commercial_download_job_tools_return_public_projection(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            manager = DataManager(root / "workspace")
+            service = CommercialService(manager.workdir)
+            service.register_user("user@example.com", "password1", user_id="u_1")
+            outside = root / "secret" / "manual.csv"
+            outside.parent.mkdir(parents=True, exist_ok=True)
+            outside.write_text("x,y\n1,2\n", encoding="utf-8")
+            job = service.submit_job(
+                user_id="u_1",
+                source_key="manual",
+                resource_type="table",
+                account_mode="own",
+                direct_url="https://example.invalid/private.csv?token=secret",
+                local_file_path=str(outside),
+                request_text=f"load {outside}",
+            )
+            service._update_job(
+                job["job_id"],
+                status="completed",
+                output_path=str(outside),
+                zip_path=str(root / "secret" / "package.zip"),
+                error_message="Traceback at storage_state.json",
+            )
+            tools = {tool.name: tool for tool in build_commercial_tools(manager)}
+
+            payloads = [
+                tools["get_commercial_download_job"].invoke({"job_id": job["job_id"]}),
+                tools["list_commercial_download_jobs"].invoke({"user_id": "u_1", "limit": 5}),
+            ]
+
+            rendered = "\n".join(payloads)
+            self.assertIn("tool_result", rendered)
+            self.assertIn(job["job_id"], rendered)
+            self.assertNotIn("direct_url", rendered)
+            self.assertNotIn("local_file_path", rendered)
+            self.assertNotIn("request_text", rendered)
+            self.assertNotIn("output_path", rendered)
+            self.assertNotIn("zip_path", rendered)
+            self.assertNotIn("token=secret", rendered)
+            self.assertNotIn("storage_state", rendered.lower())
+            self.assertNotIn("traceback", rendered.lower())
+            self.assertNotIn(str(outside), rendered)
+
     def test_agent_direct_router_blocks_platform_login_by_default(self) -> None:
         agent = object.__new__(GISAgent)
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -471,6 +569,87 @@ class SecurityHardeningTests(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertIn("forbidden", result or "")
             start_login.assert_not_called()
+
+    def test_agent_direct_submit_auto_tiles_reply_uses_public_projection(self) -> None:
+        agent = object.__new__(GISAgent)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            agent.manager = DataManager(root / "workspace")
+            service = CommercialService(agent.manager.workdir)
+            service.register_user("user@example.com", "password1", user_id="u_1")
+            state_path = agent.manager.workdir / "domestic_auth" / "user_state.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text("{}", encoding="utf-8")
+            service.set_user_credential_storage_state("u_1", "gscloud", str(state_path))
+            agent._direct_confirmation_reply = lambda *args, **kwargs: None
+
+            with patch(
+                "core.agent.start_gscloud_tile_process",
+                return_value={
+                    "tile_job_id": "tile_1",
+                    "job_id": "job_1",
+                    "state": "STARTING",
+                    "status_path": str(root / "secret" / "tile_status.json"),
+                    "log_path": str(root / "secret" / "tile.log"),
+                    "storage_state_path": str(state_path),
+                    "message": "Traceback at storage_state.json",
+                },
+            ):
+                result = agent._try_direct_gscloud_submit_auto_tiles_command(
+                    "为 user@example.com 提交一个地理空间数据云 DEM 下载任务，区域为四川省，使用自己的账号，输出名为 sichuan_dem_paid。"
+                )
+
+            self.assertIsNotNone(result)
+            rendered = result or ""
+            self.assertIn("tool_result", rendered)
+            self.assertIn("auto_tile_job", rendered)
+            self.assertNotIn("storage_state_path", rendered)
+            self.assertNotIn("status_path", rendered)
+            self.assertNotIn("log_path", rendered)
+            self.assertNotIn("output_path", rendered)
+            self.assertNotIn("zip_path", rendered)
+            self.assertNotIn("direct_url", rendered)
+            self.assertNotIn("local_file_path", rendered)
+            self.assertNotIn("traceback", rendered.lower())
+            self.assertNotIn(str(root / "secret"), rendered)
+            self.assertNotIn("/api/downloads/artifact", rendered)
+
+    def test_agent_direct_tile_status_reply_uses_public_projection(self) -> None:
+        agent = object.__new__(GISAgent)
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp)
+            agent.manager = DataManager(root / "workspace")
+            status_path = agent.manager.workdir / "domestic_auth" / "tile_jobs" / "tile_1.json"
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(
+                json.dumps(
+                    {
+                        "tile_job_id": "tile_1",
+                        "job_id": "job_1",
+                        "state": "FAILED",
+                        "message": "Traceback at storage_state.json",
+                        "status_path": str(status_path),
+                        "log_path": str(root / "secret" / "tile.log"),
+                        "storage_state_path": str(root / "secret" / "storage_state.json"),
+                        "download_url": "/api/downloads/artifact?path=secret/result.zip",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            result = agent._try_direct_gscloud_tile_status_command("列出地理空间数据云 DEM 自动分幅下载后台任务状态")
+
+            self.assertIsNotNone(result)
+            rendered = result or ""
+            self.assertIn("tile_1", rendered)
+            self.assertNotIn("storage_state_path", rendered)
+            self.assertNotIn("status_path", rendered)
+            self.assertNotIn("log_path", rendered)
+            self.assertNotIn("download_url", rendered)
+            self.assertNotIn("traceback", rendered.lower())
+            self.assertNotIn(str(root / "secret"), rendered)
+            self.assertNotIn("/api/downloads/artifact", rendered)
 
     def test_agent_direct_confirmation_reply_requires_token_round_trip(self) -> None:
         agent = object.__new__(GISAgent)

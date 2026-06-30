@@ -27,7 +27,7 @@ class FrontendContextPayloadTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(payload["selected_artifact_path"], "plots/soil_map.png")
+        self.assertNotIn("selected_artifact_path", payload)
         self.assertEqual(payload["selected_map_bounds"], [100.0, 20.0, 101.0, 21.0])
         self.assertEqual(payload["selected_feature_properties"]["value"], 0.12)
 
@@ -76,8 +76,9 @@ class FrontendContextPayloadTests(unittest.TestCase):
         self.assertNotIn("active_task_id", payload)
         self.assertEqual(payload["selected_layer_id"], "safe_layer")
 
-    def test_selected_artifact_path_rejects_large_or_escaping_payload_values(self) -> None:
+    def test_selected_artifact_path_is_dropped_as_legacy_identity(self) -> None:
         for bad_path in (
+            "plots/soil_map.png",
             "data:image/png;base64," + "a" * 500,
             "../outside/secret.png",
             "%2e%2e/outside/secret.png",
@@ -91,6 +92,17 @@ class FrontendContextPayloadTests(unittest.TestCase):
 
                 self.assertEqual(payload.get("selected_artifact_id"), "a1")
                 self.assertNotIn("selected_artifact_path", payload)
+
+    def test_selected_artifact_path_does_not_revive_legacy_download_route(self) -> None:
+        payload = sanitize_frontend_context(
+            {
+                "selected_artifact_id": "artifact_current",
+                "selected_artifact_path": "/api/files/artifact?path=plots/current_map.png",
+            }
+        )
+
+        self.assertEqual(payload.get("selected_artifact_id"), "artifact_current")
+        self.assertNotIn("selected_artifact_path", payload)
 
     def test_askin_accepts_legacy_payload_without_frontend_context(self) -> None:
         body = AskIn(prompt="hello")
@@ -118,10 +130,44 @@ class FrontendContextPayloadTests(unittest.TestCase):
 
         self.assertEqual(state.active_dataset, "soil_points")
         self.assertEqual(state.selected_artifact["id"], "artifact_1")
+        self.assertNotIn("path", state.selected_artifact)
+        self.assertNotIn("path", state.referenced_object)
         self.assertEqual(state.selected_feature["properties"]["name"], "Station A")
         self.assertEqual(state.selected_map_bounds, [100.0, 20.0, 101.0, 21.0])
         self.assertEqual(state.selected_model_result["id"], "xgb_soil")
         self.assertEqual(state.active_task["id"], "task_1")
+
+    def test_artifact_path_without_id_does_not_become_reference_identity(self) -> None:
+        state = ConversationState()
+        payload = sanitize_frontend_context(
+            {
+                "selected_artifact_path": "plots/legacy_only_map.png",
+                "selected_artifact_type": "map",
+            }
+        )
+
+        apply_frontend_context_to_state(state, payload)
+
+        self.assertIsNone(state.selected_artifact)
+        self.assertIsNone(state.referenced_object)
+
+    def test_selected_layer_context_is_not_recast_as_dataset_reference(self) -> None:
+        state = ConversationState(active_dataset="real_dataset")
+        payload = sanitize_frontend_context(
+            {
+                "selected_layer_id": "display_layer_name",
+                "selected_map_bounds": [100, 20, 101, 21],
+            }
+        )
+
+        apply_frontend_context_to_state(state, payload)
+
+        self.assertEqual(state.active_dataset, "real_dataset")
+        self.assertEqual(state.selected_layer["id"], "display_layer_name")
+        self.assertEqual(state.referenced_object["type"], "layer")
+        self.assertEqual(state.referenced_object["id"], "display_layer_name")
+        self.assertNotIn("dataset_id", state.referenced_object)
+        self.assertNotIn("name", state.referenced_object)
 
 
 if __name__ == "__main__":

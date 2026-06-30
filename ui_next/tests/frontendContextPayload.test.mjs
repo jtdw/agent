@@ -53,6 +53,25 @@ assert.equal('raw_content' in payload.selected_feature_properties, false);
 assert.equal('file' in payload.selected_feature_properties, false);
 assert.equal('html' in payload.selected_feature_properties, false);
 
+const legacyArtifactPathPayload = chatContext.sanitizeChatContextPayload({
+  selected_artifact_id: 'artifact_1',
+  selected_artifact_path: '/api/files/artifact?path=derived/legacy.csv'
+});
+assert.deepEqual(legacyArtifactPathPayload, { selected_artifact_id: 'artifact_1' });
+
+const artifactRoutePathPayload = chatContext.sanitizeChatContextPayload({
+  selected_artifact_id: 'artifact_1',
+  selected_artifact_path: '/api/artifacts/artifact_1/download'
+});
+assert.deepEqual(artifactRoutePathPayload, { selected_artifact_id: 'artifact_1' });
+
+const relativeArtifactPathPayload = chatContext.sanitizeChatContextPayload({
+  selected_artifact_id: 'artifact_1',
+  selected_artifact_path: 'plots/soil_map.png'
+});
+assert.deepEqual(relativeArtifactPathPayload, { selected_artifact_id: 'artifact_1' });
+assert.doesNotMatch(await readFile('src/lib/chatContext.ts', 'utf8'), /selected_artifact_path\?: string/, 'ChatContextPayload must not expose legacy artifact path identity');
+
 assert.match(apiSource, /frontend_context/, 'api.ask must send frontend_context');
 assert.match(apiSource, /ChatContextPayload/, 'api.ask should type frontend context payload');
 assert.match(chatPanelSource, /chatContext/, 'ChatPanel must accept chatContext');
@@ -63,9 +82,13 @@ assert.match(appSource, /setChatContext/, 'App must update chat context');
 assert.match(mapStageSource, /onChatContextChange/, 'MapStage must report selected map context');
 assert.match(mapStageSource, /selected_feature_properties/, 'MapStage must report clicked feature properties');
 assert.match(mapStageSource, /selected_map_bounds/, 'MapStage must report current bounds');
+assert.doesNotMatch(mapStageSource, /active_dataset_id:\s*String\([^)]*layer\.name/, 'MapStage must not use layer display names as active_dataset_id');
+assert.doesNotMatch(mapStageSource, /active_dataset_id:\s*String\([^)]*layer\.id/, 'MapStage must not use map layer ids as active_dataset_id fallback');
+assert.doesNotMatch(mapStageSource, /selected_feature_id:\s*String\([^)]*props\?\.name/, 'MapStage must not use feature display names as selected_feature_id fallback');
 assert.match(analysisPanelSource, /onChatContextChange/, 'AnalysisPanel must report selected result context');
 assert.match(analysisPanelSource, /selected_artifact_id/, 'AnalysisPanel must report selected artifacts');
-assert.match(analysisPanelSource, /selected_artifact_id:\s*item\.artifactId\s*\|\|/, 'AnalysisPanel must prefer backend artifact_id over display labels');
+assert.match(analysisPanelSource, /selected_artifact_id:\s*item\.artifactId/, 'AnalysisPanel must send backend artifact_id as selected_artifact_id');
+assert.doesNotMatch(analysisPanelSource, /selected_artifact_id:\s*item\.artifactId\s*\|\|/, 'AnalysisPanel must not use display labels as selected_artifact_id fallback');
 assert.match(analysisPanelSource, /selected_model_result_id/, 'AnalysisPanel must report selected model result');
 assert.match(analysisPanelSource, /view\.bestModel\?\.modelResultId/, 'AnalysisPanel must send backend model_result_id');
 assert.doesNotMatch(analysisPanelSource, /selected_model_result_id:\s*view\.bestModel\?\.name/, 'AnalysisPanel must not use display model name as selected_model_result_id');

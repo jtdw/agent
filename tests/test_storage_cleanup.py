@@ -123,13 +123,22 @@ class StorageCleanupApiTests(unittest.TestCase):
                     self.assertEqual(denied.status_code, 403)
                     scan = client.get("/api/admin/storage-cleanup/scan", headers={"x-admin-token": "secret"})
                     self.assertEqual(scan.status_code, 200, scan.text)
-                    candidate_id = scan.json()["candidates"][0]["candidate_id"]
+                    scan_payload = scan.json()
+                    self.assertNotIn("root", scan_payload)
+                    self.assertEqual(scan_payload["candidates"][0]["label"], "layer.png")
+                    self.assertNotIn("path", scan_payload["candidates"][0])
+                    self.assertNotIn(str(root), str(scan_payload))
+                    candidate_id = scan_payload["candidates"][0]["candidate_id"]
                     deleted = client.post(
                         "/api/admin/storage-cleanup/delete",
                         headers={"x-admin-token": "secret"},
                         json={"candidate_ids": [candidate_id], "confirm_text": "删除历史缓存"},
                     )
                     self.assertEqual(deleted.status_code, 200, deleted.text)
+                    deleted_payload = deleted.json()
+                    self.assertEqual(deleted_payload["deleted"][0]["label"], "layer.png")
+                    self.assertNotIn("path", deleted_payload["deleted"][0])
+                    self.assertNotIn(str(root), str(deleted_payload))
                     self.assertFalse(preview.exists())
             finally:
                 api_server._workspace_services.clear()

@@ -88,6 +88,24 @@ class UnifiedToolResultContractTests(unittest.TestCase):
         self.assertEqual(result["artifacts"][0]["status"], "missing")
         self.assertTrue(any("missing" in warning.lower() for warning in result["warnings"]))
 
+    def test_normalize_tool_result_redacts_unix_private_paths_from_messages(self) -> None:
+        result = normalize_tool_result(
+            {
+                "status": "failed",
+                "tool_name": "legacy_gis_tool",
+                "task_id": "legacy_unix_path",
+                "user_message": "失败详情见 /tmp/secret/runtime.log",
+                "technical_detail": "Trace file /home/app/private/trace.txt",
+                "errors": [{"code": "FAILED", "message": "Raw report at /var/log/gis-agent/error.log"}],
+            }
+        )
+        rendered = json.dumps(result, ensure_ascii=False)
+
+        self.assertNotIn("/tmp/secret", rendered)
+        self.assertNotIn("/home/app/private", rendered)
+        self.assertNotIn("/var/log/gis-agent", rendered)
+        self.assertIn("[internal_path]", rendered)
+
     def test_aggregate_tool_results_uses_canonical_status(self) -> None:
         ok = tool_result_ok("describe_dataset", outputs={"dataset": "points"}).to_dict()
         failed = tool_result_error("plot_dataset", error_code="FIELD_NOT_FOUND", user_message="Missing field.").to_dict()

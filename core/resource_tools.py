@@ -108,11 +108,8 @@ def build_resource_tools(manager: DataManager):
         local_library_dir = Path(os.getenv("GIS_AGENT_LOCAL_LIBRARY_DIR", str(manager.workdir.parent / "local_library"))).expanduser()
         tdt_token = os.getenv("TIANDITU_TOKEN", "").strip()
         payload = {
-            "workdir": str(manager.workdir.resolve()),
-            "temp_dir": str(manager.temp_dir.resolve()),
             "local_library": {
                 "enabled": True,
-                "root": str(local_library_dir),
                 "exists": local_library_dir.exists(),
             },
             "tianditu": {
