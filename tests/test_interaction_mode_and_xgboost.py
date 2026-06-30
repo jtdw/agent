@@ -250,9 +250,11 @@ class InteractionModeAndXGBoostTests(unittest.TestCase):
                 with mock.patch("core.service.execute_workflow_plan") as workflow_exec:
                     with mock.patch("core.service.execute_validated_tool_plan") as tool_exec:
                         response = service.ask(XGB_PROMPT)
-            self.assertEqual(response["mode"], "chat_only_blocked")
-            self.assertIn("当前处于聊天模式", response["reply"])
-            self.assertIn("打开工具模式", response["reply"])
+            assistant_meta = service.current_messages()[-1].get("meta") or {}
+            self.assertEqual(response["mode"], "answer_only")
+            self.assertEqual(response["reason"], "chat_only_direct_answer")
+            self.assertEqual(assistant_meta.get("interaction_type"), "chat_answer")
+            self.assertNotIn("task_card", assistant_meta)
             workflow_exec.assert_not_called()
             tool_exec.assert_not_called()
             self.assertFalse(service.dashboard()["model_results"])

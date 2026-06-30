@@ -1396,6 +1396,14 @@ class GISWorkspaceService:
                 "如果要在本系统里实际计算空间自相关，需要切换到工具模式，并提供带坐标或几何的真实数据。"
             )
         if "gis" in text or "地理信息系统" in text:
+            if any(token in text for token in ("便利", "好处", "作用", "价值", "带来")):
+                return (
+                    "GIS 给人们带来的便利主要体现在把“位置”变成可分析、可决策的信息。"
+                    "它能把道路、人口、地形、遥感影像、河流、设施和灾害等数据叠加到地图上，帮助人们更快看清空间关系。"
+                    "在日常生活中，导航选路、外卖配送、找附近服务、共享出行都依赖 GIS；在城市治理中，它能支持交通优化、管网巡检、应急救援和公共设施选址；"
+                    "在农业、环保和自然资源管理中，它可以帮助监测作物长势、评估洪涝干旱、保护生态和管理土地。"
+                    "简单说，GIS 让复杂的地理问题更直观，让空间分析更高效，也让很多决策更有依据。"
+                )
             return (
                 "GIS 是地理信息系统，用来管理、展示、分析和建模带有空间位置的数据，例如行政区边界、河流流域、遥感栅格、站点表格和地图成果。"
                 "在本系统中，GIS 可用于数据管理、地图展示、空间分析，以及遥感数据与站点数据结合的建模分析。"
@@ -1831,6 +1839,81 @@ class GISWorkspaceService:
     def _clean_assistant_reply(self, reply: str) -> str:
         return clean_assistant_reply(str(reply or ""))
 
+    def _direct_answer_only_response(
+        self,
+        *,
+        state: ConversationState,
+        user_message: str,
+        intent: dict[str, Any],
+        context: dict[str, Any],
+        dashboard_data: dict[str, Any],
+        reason: str,
+        stream_callback: Callable[[str], None] | None = None,
+        extra_assistant_meta: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response_language = normalize_response_language(context.get("response_language"), user_message)
+        answer_plan = {
+            "primary_goal": "回答用户的知识或使用问题",
+            "intent": "knowledge_qa",
+            "operation": "answer_question",
+            "execution_required": False,
+            "response_mode": "answer_only",
+            "input_assets": [],
+            "asset_roles": {},
+            "requested_downloads": [],
+            "download_requests": [],
+            "study_area": "",
+            "time_range": {},
+            "spatial_resolution": "",
+            "candidate_tools": [],
+            "selected_tools": [],
+            "workflow_steps": [],
+            "expected_outputs": ["chat_answer"],
+            "requires_confirmation": False,
+            "clarification_question": "",
+            "confidence": 0.7,
+            "source_attribution": {},
+            "explicit_history_references": [],
+            "response_language": response_language,
+        }
+        answer_payload = self._answer_only_reply_with_source(user_message, answer_plan, context, on_delta=stream_callback)
+        reply = enforce_user_text_language(answer_payload.get("reply") or "", response_language, "answer_only")
+        reply = self._clean_assistant_reply(reply)
+        task_outcome = build_task_outcome("analysis", {"reply": reply}, dashboard=dashboard_data)
+        assistant_meta = {
+            "model": "conversation-coordinator",
+            "mode": "answer_only",
+            "reason": reason,
+            "intent": intent,
+            "plan": answer_plan,
+            "interaction_mode": context.get("interaction_mode"),
+            "interaction_type": "chat_answer",
+            "execution_required": False,
+            "response_mode": "answer_only",
+            "normalized_results": [],
+            "result_rendering_path": "presentation_result",
+            "newly_executed": False,
+            "source": "direct_chat_answer",
+            "answer_source": answer_payload.get("source"),
+            "llm_answer_usage": answer_payload.get("llm_usage") or {},
+        }
+        if extra_assistant_meta:
+            assistant_meta.update(extra_assistant_meta)
+        self._update_conversation_state_after_turn(
+            state,
+            user_message=user_message,
+            intent=intent,
+            plan=answer_plan,
+            context=context,
+            reply=reply,
+            dashboard_data=dashboard_data,
+        )
+        self.manager.database.add_message(self.current_session_id, "assistant", reply, meta=assistant_meta)
+        self.last_route = {"mode": "answer_only", "model": "conversation-coordinator", "reason": reason, "images": []}
+        self.manager.log_operation("answer_only_reply", user_message[:180], "chat")
+        self._set_runtime_status("运行完成", "已回答知识或使用问题，未执行工具", busy=False, phase="complete", progress=100)
+        return {"reply": reply, "model": "conversation-coordinator", "mode": "answer_only", "reason": reason, "images": [], "task_outcome": task_outcome}
+
     def ask(
         self,
         prompt: str,
@@ -1866,6 +1949,17 @@ class GISWorkspaceService:
             context = build_conversation_context(user_message, intent, state.to_dict(), self.manager, dashboard_data, followup=followup)
             interaction_mode = self.current_interaction_mode()
             context["interaction_mode"] = interaction_mode
+            if interaction_mode == "chat_only":
+                return self._direct_answer_only_response(
+                    state=state,
+                    user_message=user_message,
+                    intent=intent,
+                    context=context,
+                    dashboard_data=dashboard_data,
+                    reason="chat_only_direct_answer",
+                    stream_callback=stream_callback,
+                    extra_assistant_meta=extra_assistant_meta,
+                )
             user_id, session_id, conversation_id = self._confirmation_scope()
             confirmation_id = extract_confirmation_id(user_message)
             if not confirmation_id and is_plan_modification_message(user_message):
@@ -2331,6 +2425,13 @@ class GISWorkspaceService:
                 self.manager.log_operation("answer_only_reply", user_message[:180], "chat")
                 self._set_runtime_status("运行完成", "已回答知识或使用问题，未执行工具", busy=False, phase="complete", progress=100)
                 return {"reply": reply, "model": "conversation-coordinator", "mode": "answer_only", "reason": "valid_answer_only", "images": [], "task_outcome": task_outcome}
+
+            if (
+                not _plan_requests_tool_execution(plan)
+                and not _intent_requests_tool_execution(intent)
+                and not str(plan.get("clarification_question") or "").strip()
+            ):
+                return _return_chat_only_answer("no_executable_validated_plan_answer_only")
 
             if plan.get("should_ask_clarification") and builtin_reply is None:
                 response_language = normalize_response_language(context.get("response_language"), user_message)

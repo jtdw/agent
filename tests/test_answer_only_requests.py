@@ -71,6 +71,51 @@ class AnswerOnlyRequestTests(unittest.TestCase):
         self.assertFalse(tool_mock.called)
         self.assertNotIn("计划输入", result["reply"])
 
+    def test_ready_plan_without_executable_steps_falls_back_to_chat_answer(self) -> None:
+        ready_no_step_plan = {
+            "primary_goal": "回答用户的 GIS 知识问题",
+            "intent": "knowledge_qa",
+            "operation": "answer_question",
+            "execution_required": True,
+            "response_mode": "",
+            "input_assets": [],
+            "asset_roles": {},
+            "requested_downloads": [],
+            "download_requests": [],
+            "study_area": "",
+            "time_range": {},
+            "spatial_resolution": "",
+            "candidate_tools": [],
+            "selected_tools": [],
+            "workflow_steps": [],
+            "expected_outputs": ["chat_answer"],
+            "requires_confirmation": False,
+            "clarification_question": "",
+            "confidence": 0.82,
+            "source_attribution": {},
+            "explicit_history_references": [],
+            "response_language": "zh-CN",
+        }
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = self.make_service(Path(tmp))
+            with mock.patch(
+                "core.service.build_llm_task_plan",
+                return_value={"status": "ready", "mode": "active", "planner_source": "test", "executes_tools": False, "plan": ready_no_step_plan},
+            ):
+                with mock.patch("core.service.execute_workflow_plan", return_value={"executed": False}) as workflow_mock:
+                    with mock.patch("core.service.execute_validated_tool_plan", return_value={"executed": False}) as tool_mock:
+                        result = service.ask("gis给人们带来了什么便利")
+            assistant_meta = service.current_messages()[-1].get("meta") or {}
+
+        self.assertEqual(result["mode"], "answer_only")
+        self.assertIn("GIS", result["reply"])
+        self.assertNotIn("The LLM plan was validated", result["reply"])
+        self.assertEqual(assistant_meta.get("interaction_type"), "chat_answer")
+        self.assertNotIn("task_card", assistant_meta)
+        self.assertFalse(workflow_mock.called)
+        self.assertFalse(tool_mock.called)
+
     def test_chinese_greeting_is_answer_only_with_zero_tool_execution(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             service = self.make_service(Path(tmp))
@@ -198,6 +243,35 @@ class AnswerOnlyRequestTests(unittest.TestCase):
         assistant_meta = messages[-1].get("meta") or {}
         self.assertEqual(assistant_meta.get("answer_source"), "llm_answer")
         self.assertEqual(assistant_meta.get("llm_answer_usage", {}).get("usage", {}).get("total_tokens"), 30)
+
+    def test_chat_mode_directly_uses_answer_model_without_task_planner_or_card(self) -> None:
+        class AnswerClient:
+            last_usage = {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+            last_cached_tokens = 3
+            last_latency_ms = 88
+            last_retry_count = 0
+            last_model = "glm-chat-direct"
+            last_status = "ok"
+
+            def invoke(self, messages):
+                return json.dumps({"answer": "这是直接来自聊天模型的回答。", "confidence": 0.9}, ensure_ascii=False)
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            service = GISWorkspaceService(Settings(api_key="test-key", workdir=Path(tmp) / "workspace"))
+            self.assertEqual(service.current_interaction_mode(), "chat_only")
+            with mock.patch("core.service.build_default_answer_client", return_value=AnswerClient()):
+                with mock.patch("core.service.build_llm_task_plan", side_effect=AssertionError("chat mode must not invoke task planner")):
+                    with mock.patch("core.service.execute_workflow_plan", side_effect=AssertionError("chat mode must not execute workflows")):
+                        with mock.patch("core.service.execute_validated_tool_plan", side_effect=AssertionError("chat mode must not execute tools")):
+                            result = service.ask("gis如何进行开发")
+            assistant_meta = service.current_messages()[-1].get("meta") or {}
+
+        self.assertEqual(result["mode"], "answer_only")
+        self.assertEqual(result["reply"], "这是直接来自聊天模型的回答。")
+        self.assertEqual(result["reason"], "chat_only_direct_answer")
+        self.assertEqual(assistant_meta.get("interaction_type"), "chat_answer")
+        self.assertNotIn("task_card", assistant_meta)
+        self.assertEqual(assistant_meta.get("answer_source"), "llm_answer")
 
     def test_answer_only_streams_model_deltas_without_tool_execution(self) -> None:
         class StreamClient:
